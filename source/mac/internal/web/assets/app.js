@@ -9,6 +9,26 @@ $(function () {
   const $interceptInput = $('#intercept-input');
   const $hint = $('#intercept-hint');
 
+  // Persist config form values across reloads. Each field has a localStorage
+  // key; we restore on load and save on every change. Engine-driven updates
+  // (when running) also write to localStorage so the form starts from the
+  // last actual state next time.
+  const FIELDS = [
+    '#local-ip', '#peer-ip', '#listen', '#peer-udp',
+    '#egress-iface', '#egress-subnet',
+  ];
+  const storageKey = (sel) => 'f2f:' + sel.slice(1);
+  function restoreForm() {
+    FIELDS.forEach((sel) => {
+      const v = localStorage.getItem(storageKey(sel));
+      if (v !== null && v !== '') $(sel).val(v);
+    });
+  }
+  function persistField(sel) {
+    localStorage.setItem(storageKey(sel), $(sel).val() || '');
+  }
+  FIELDS.forEach((sel) => $(sel).on('change input', () => persistField(sel)));
+
   const fmtBytes = (n) => {
     if (n < 1024) return n + ' B';
     if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
@@ -34,12 +54,20 @@ $(function () {
       $interceptInput.prop('disabled', false);
       $btnAdd.prop('disabled', false);
       // Reflect the actual running config so the form shows truth, not stale input.
-      if (s.local_ip) $('#local-ip').val(s.local_ip);
-      if (s.peer_ip) $('#peer-ip').val(s.peer_ip);
-      if (s.listen_addr) $('#listen').val(s.listen_addr);
-      if (s.peer_addr) $('#peer-udp').val(s.peer_addr);
-      if (s.egress_iface) $('#egress-iface').val(s.egress_iface);
-      if (s.egress_subnet) $('#egress-subnet').val(s.egress_subnet);
+      const live = {
+        '#local-ip': s.local_ip,
+        '#peer-ip': s.peer_ip,
+        '#listen': s.listen_addr,
+        '#peer-udp': s.peer_addr,
+        '#egress-iface': s.egress_iface,
+        '#egress-subnet': s.egress_subnet,
+      };
+      Object.entries(live).forEach(([sel, val]) => {
+        if (val) {
+          $(sel).val(val);
+          persistField(sel);
+        }
+      });
     } else {
       $status.text('Stopped').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700');
       $btnStart.removeClass('hidden');
@@ -121,18 +149,30 @@ $(function () {
       .fail((xhr) => alert('Stop failed: ' + errorOf(xhr)));
   });
 
-  $btnAdd.on('click', () => {
-    const spec = $interceptInput.val().trim();
-    if (!spec) return;
-    $.ajax({
+  function addOne(spec) {
+    return $.ajax({
       url: '/api/intercepts',
       method: 'POST',
       contentType: 'application/json',
       data: JSON.stringify({ spec: spec })
-    }).done(() => {
+    });
+  }
+
+  $btnAdd.on('click', () => {
+    const raw = $interceptInput.val();
+    const specs = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (specs.length === 0) return;
+
+    const errors = [];
+    const requests = specs.map((spec) =>
+      addOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`))
+    );
+
+    $.when(...requests).always(() => {
       $interceptInput.val('');
       refreshStatus();
-    }).fail((xhr) => alert('Add failed: ' + errorOf(xhr)));
+      if (errors.length) alert('Some intercepts failed:\n' + errors.join('\n'));
+    });
   });
 
   $interceptInput.on('keydown', (e) => {
@@ -162,6 +202,7 @@ $(function () {
     };
   }
 
+  restoreForm();
   loadIfaces();
   refreshStatus();
   setInterval(refreshStatus, 3000);
