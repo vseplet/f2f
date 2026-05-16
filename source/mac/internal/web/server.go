@@ -69,7 +69,74 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
+	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+}
+
+// topologyNode and topologyEdge feed the d3 force graph in the UI. The
+// graph is a simple star: this node in the middle, the peer next to it,
+// and each intercept as a leaf attached to the peer.
+type topologyNode struct {
+	ID    string   `json:"id"`
+	Label string   `json:"label"`
+	Kind  string   `json:"kind"` // "self" | "peer" | "intercept"
+	Spec  string   `json:"spec,omitempty"`
+	IPs   []string `json:"ips,omitempty"`
+}
+
+type topologyEdge struct {
+	Source  string `json:"source"`
+	Target  string `json:"target"`
+	TxBytes uint64 `json:"tx_bytes"`
+	RxBytes uint64 `json:"rx_bytes"`
+}
+
+type topology struct {
+	Running bool           `json:"running"`
+	Nodes   []topologyNode `json:"nodes"`
+	Edges   []topologyEdge `json:"edges"`
+}
+
+func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	t := topology{Running: st.Running, Nodes: []topologyNode{}, Edges: []topologyEdge{}}
+	if !st.Running {
+		writeJSON(w, http.StatusOK, t)
+		return
+	}
+	selfLabel := st.UtunName
+	if st.LocalIP != "" {
+		selfLabel = selfLabel + " · " + st.LocalIP
+	}
+	t.Nodes = append(t.Nodes, topologyNode{ID: "self", Label: selfLabel, Kind: "self"})
+
+	peerID := ""
+	if st.PeerAddr != "" {
+		peerID = "peer"
+		t.Nodes = append(t.Nodes, topologyNode{ID: peerID, Label: st.PeerAddr, Kind: "peer"})
+		// The aggregate tx/rx are reported on the self↔peer edge, since
+		// every byte we count flows through it.
+		t.Edges = append(t.Edges, topologyEdge{
+			Source: "self", Target: peerID,
+			TxBytes: st.TxBytes, RxBytes: st.RxBytes,
+		})
+	}
+
+	// Hang each intercept off the peer so the visual flow reads
+	// self → peer → destination.
+	parent := "self"
+	if peerID != "" {
+		parent = peerID
+	}
+	for _, it := range st.Intercepts {
+		id := "intercept:" + it.ID
+		t.Nodes = append(t.Nodes, topologyNode{
+			ID: id, Label: it.Spec, Kind: "intercept",
+			Spec: it.Spec, IPs: it.Prefixes,
+		})
+		t.Edges = append(t.Edges, topologyEdge{Source: parent, Target: id})
+	}
+	writeJSON(w, http.StatusOK, t)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

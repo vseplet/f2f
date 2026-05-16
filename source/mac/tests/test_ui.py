@@ -138,6 +138,23 @@ def test_log_stream_emits_connected_comment(server: str) -> None:
         assert ": connected" in buf
 
 
+def test_topology_when_stopped(server: str) -> None:
+    r = httpx.get(f"{server}/api/topology")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["running"] is False
+    # Stopped engine → empty graph.
+    assert data["nodes"] == []
+    assert data["edges"] == []
+
+
+def test_d3_vendored(server: str) -> None:
+    r = httpx.get(f"{server}/vendor/d3.min.js")
+    assert r.status_code == 200
+    assert len(r.content) > 100_000
+    assert b"d3" in r.content[:200]
+
+
 def test_status_json_is_valid(server: str) -> None:
     """Defensive: encoding/json should never produce something that breaks
     json.loads (catches accidental NaN/Inf in counters)."""

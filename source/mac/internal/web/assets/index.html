@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="/vendor/tailwind.min.js"></script>
   <script src="/vendor/jquery.min.js"></script>
+  <script src="/vendor/d3.min.js"></script>
 </head>
 <body class="bg-gray-100 min-h-screen">
   <div class="max-w-5xl mx-auto p-6">
@@ -58,6 +59,14 @@
         <button id="btn-add-intercept" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>
       </div>
       <p class="text-xs text-gray-500 mt-2">Saved across sessions in your browser. Entries marked <span class="font-mono">pending</span> get applied automatically on Start.</p>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-6 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold">Topology</h2>
+        <span class="text-xs text-gray-500">drag bubbles · scroll to zoom</span>
+      </div>
+      <svg id="topology" class="w-full bg-gray-50 rounded" style="height: 360px;"></svg>
     </section>
 
     <section class="bg-white rounded-lg shadow p-6 mb-6">

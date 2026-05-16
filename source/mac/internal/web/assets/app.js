@@ -278,9 +278,123 @@ $(function () {
     };
   }
 
+  // -- Topology graph (d3 force-directed) --
+  const svgEl = document.getElementById('topology');
+  const svg = d3.select('#topology');
+  const width = svgEl.clientWidth || 800;
+  const height = 360;
+
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.4, 3]).on('zoom', (e) => g.attr('transform', e.transform)));
+  const linksLayer = g.append('g').attr('class', 'links');
+  const nodesLayer = g.append('g').attr('class', 'nodes');
+
+  const sim = d3.forceSimulation()
+    .force('link', d3.forceLink().id((d) => d.id).distance(130))
+    .force('charge', d3.forceManyBody().strength(-450))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collide', d3.forceCollide().radius(44));
+
+  // Keep a stable view of nodes so positions survive refresh.
+  let nodeMap = new Map();
+
+  function bubbleRadius(n) {
+    if (n.kind === 'self') return 28;
+    if (n.kind === 'peer') return 26;
+    return 20;
+  }
+  function bubbleColor(n) {
+    if (n.kind === 'self') return '#2563eb';
+    if (n.kind === 'peer') return '#059669';
+    return '#d97706';
+  }
+  function edgeThickness(e) {
+    const bytes = (e.tx_bytes || 0) + (e.rx_bytes || 0);
+    if (!bytes) return 1.5;
+    return Math.min(7, 1 + Math.log10(bytes + 1) / 1.5);
+  }
+  function abbrev(s) {
+    if (!s) return '';
+    return s.length <= 16 ? s : s.slice(0, 14) + '…';
+  }
+  function fullLabel(n) {
+    let t = n.label;
+    if (n.ips && n.ips.length) t += '\n' + n.ips.join('\n');
+    return t;
+  }
+
+  function refreshTopology() {
+    $.getJSON('/api/topology', (data) => {
+      const incoming = data.nodes || [];
+      const newMap = new Map();
+      incoming.forEach((n) => {
+        const existing = nodeMap.get(n.id);
+        if (existing) {
+          // Update labels/ips but preserve position
+          Object.assign(existing, n);
+          newMap.set(n.id, existing);
+        } else {
+          newMap.set(n.id, Object.assign({}, n));
+        }
+      });
+      nodeMap = newMap;
+
+      const nodes = Array.from(nodeMap.values());
+      const links = (data.edges || []).map((e) => ({ ...e }));
+
+      const linkSel = linksLayer.selectAll('line').data(links, (e) => e.source + '|' + e.target);
+      linkSel.exit().remove();
+      const linkEnter = linkSel.enter().append('line')
+        .attr('stroke', '#94a3b8')
+        .attr('stroke-opacity', 0.75);
+      linkEnter.merge(linkSel).attr('stroke-width', edgeThickness);
+
+      const nodeSel = nodesLayer.selectAll('g.bubble').data(nodes, (n) => n.id);
+      nodeSel.exit().remove();
+      const nodeEnter = nodeSel.enter().append('g').attr('class', 'bubble').style('cursor', 'grab');
+      nodeEnter.append('circle')
+        .attr('stroke', '#0f172a')
+        .attr('stroke-width', 2);
+      nodeEnter.append('text')
+        .attr('text-anchor', 'middle')
+        .attr('dy', '0.35em')
+        .attr('font-size', '11px')
+        .attr('fill', '#fff')
+        .attr('font-weight', '600')
+        .style('pointer-events', 'none');
+      nodeEnter.append('title');
+      nodeEnter.call(d3.drag()
+        .on('start', (event, d) => {
+          if (!event.active) sim.alphaTarget(0.3).restart();
+          d.fx = d.x; d.fy = d.y;
+        })
+        .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+        .on('end', (event, d) => {
+          if (!event.active) sim.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        }));
+
+      const allNodes = nodeEnter.merge(nodeSel);
+      allNodes.select('circle').attr('r', bubbleRadius).attr('fill', bubbleColor);
+      allNodes.select('text').text((n) => abbrev(n.label));
+      allNodes.select('title').text((n) => fullLabel(n));
+
+      sim.nodes(nodes).on('tick', () => {
+        linksLayer.selectAll('line')
+          .attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y)
+          .attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
+        allNodes.attr('transform', (d) => `translate(${d.x},${d.y})`);
+      });
+      sim.force('link').links(links);
+      sim.alpha(0.4).restart();
+    });
+  }
+
   restoreForm();
   loadIfaces();
   refreshStatus();
+  refreshTopology();
   setInterval(refreshStatus, 3000);
+  setInterval(refreshTopology, 2000);
   startLogStream();
 });
