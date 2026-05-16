@@ -285,7 +285,17 @@ $(function () {
   const height = 360;
 
   const g = svg.append('g');
-  svg.call(d3.zoom().scaleExtent([0.4, 3]).on('zoom', (e) => g.attr('transform', e.transform)));
+  const zoomBehavior = d3.zoom().scaleExtent([0.3, 3])
+    .on('zoom', (e) => g.attr('transform', e.transform));
+  svg.call(zoomBehavior);
+  // Start zoomed out a bit so 3-4 bubbles fit without scrolling.
+  const initialScale = 0.7;
+  svg.call(
+    zoomBehavior.transform,
+    d3.zoomIdentity
+      .translate(width * (1 - initialScale) / 2, height * (1 - initialScale) / 2)
+      .scale(initialScale),
+  );
   const linksLayer = g.append('g').attr('class', 'links');
   const nodesLayer = g.append('g').attr('class', 'nodes');
 
@@ -315,7 +325,7 @@ $(function () {
   }
   function abbrev(s) {
     if (!s) return '';
-    return s.length <= 16 ? s : s.slice(0, 14) + '…';
+    return s.length <= 36 ? s : s.slice(0, 34) + '…';
   }
   function fullLabel(n) {
     let t = n.label;
@@ -355,12 +365,13 @@ $(function () {
       nodeEnter.append('circle')
         .attr('stroke', '#0f172a')
         .attr('stroke-width', 2);
+      // Label sits BELOW the bubble — dark text on the panel background,
+      // no truncation worries.
       nodeEnter.append('text')
         .attr('text-anchor', 'middle')
-        .attr('dy', '0.35em')
-        .attr('font-size', '11px')
-        .attr('fill', '#fff')
-        .attr('font-weight', '600')
+        .attr('font-size', '12px')
+        .attr('fill', '#0f172a')
+        .attr('font-weight', '500')
         .style('pointer-events', 'none');
       nodeEnter.append('title');
       nodeEnter.call(d3.drag()
@@ -376,7 +387,9 @@ $(function () {
 
       const allNodes = nodeEnter.merge(nodeSel);
       allNodes.select('circle').attr('r', bubbleRadius).attr('fill', bubbleColor);
-      allNodes.select('text').text((n) => abbrev(n.label));
+      allNodes.select('text')
+        .attr('y', (n) => bubbleRadius(n) + 14)
+        .text((n) => abbrev(n.label));
       allNodes.select('title').text((n) => fullLabel(n));
 
       sim.nodes(nodes).on('tick', () => {
