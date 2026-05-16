@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/vseplet/f2f/source/mac/internal/icmp"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
@@ -66,6 +67,7 @@ func runCmd(args []string) error {
 	intercept := fs.String("intercept", "", "comma-separated list of IPs, CIDRs, and domains to route into the tunnel")
 	localIP := fs.String("local-ip", "10.99.0.1", "local end of the point-to-point address on utun")
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
+	echoICMP := fs.Bool("echo-icmp", false, "reply to ICMP Echo Requests instead of dropping them (so `ping` succeeds)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -109,7 +111,19 @@ func runCmd(args []string) error {
 			if len(pkt) == 0 {
 				continue
 			}
-			log.Printf("[%s] %s", tun.Name(), packet.Summary(pkt))
+			// Snapshot the summary before any in-place rewrite so the log
+			// still shows the original direction (src → dst).
+			summary := packet.Summary(pkt)
+			action := "drop"
+			if *echoICMP && icmp.MakeEchoReply(pkt) {
+				if werr := tun.Write(pkt); werr != nil {
+					log.Printf("WARN: write reply: %v", werr)
+					action = "echo-failed"
+				} else {
+					action = "echo"
+				}
+			}
+			log.Printf("[%s] %s [%s]", tun.Name(), summary, action)
 		}
 	}()
 

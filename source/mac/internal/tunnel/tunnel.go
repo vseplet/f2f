@@ -23,7 +23,9 @@ const (
 	afPrefixLen = 4
 )
 
-// Tunnel owns one utun interface.
+// Tunnel owns one utun interface. Methods are NOT safe for concurrent use
+// from multiple goroutines; the intended pattern is one reader goroutine that
+// also performs writes in response to incoming packets.
 type Tunnel struct {
 	dev  wgtun.Device
 	name string
@@ -31,6 +33,9 @@ type Tunnel struct {
 	readBuf   []byte
 	readBufs  [][]byte
 	readSizes []int
+
+	writeBuf  []byte
+	writeBufs [][]byte
 }
 
 // Open creates a utun interface (the kernel picks the number) and configures
@@ -57,6 +62,8 @@ func Open(localIP, peerIP string) (*Tunnel, error) {
 		readBuf:   make([]byte, MTU+afPrefixLen),
 		readBufs:  make([][]byte, 1),
 		readSizes: make([]int, 1),
+		writeBuf:  make([]byte, MTU+afPrefixLen),
+		writeBufs: make([][]byte, 1),
 	}, nil
 }
 
@@ -78,6 +85,21 @@ func (t *Tunnel) Read() ([]byte, error) {
 	}
 	size := t.readSizes[0]
 	return t.readBuf[afPrefixLen : afPrefixLen+size], nil
+}
+
+// Write injects one IP packet into the interface. The packet must start with
+// the IP header (no AF prefix — Tunnel adds that).
+func (t *Tunnel) Write(pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	if len(pkt) > MTU {
+		return fmt.Errorf("packet %d bytes exceeds MTU %d", len(pkt), MTU)
+	}
+	copy(t.writeBuf[afPrefixLen:], pkt)
+	t.writeBufs[0] = t.writeBuf[:afPrefixLen+len(pkt)]
+	_, err := t.dev.Write(t.writeBufs, afPrefixLen)
+	return err
 }
 
 // Close tears down the interface.
