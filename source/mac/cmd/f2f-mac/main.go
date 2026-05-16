@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
@@ -56,21 +57,31 @@ func usage() {
 Usage:
   sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
+                   [--egress-iface en0 [--egress-subnet 10.99.0.0/24]]
 
-  --intercept   comma-separated IPs/CIDRs/domains routed into utun.
-                Optional — omit on the egress side.
-  --listen      UDP address to receive from peer (e.g. :9000).
-  --peer        UDP address of the remote peer (e.g. 10.0.0.5:9000).
+  --intercept     comma-separated IPs/CIDRs/domains routed into utun.
+                  Omit on the egress side.
+  --listen        UDP address to receive from peer (e.g. :9000).
+  --peer          UDP address of the remote peer (e.g. 10.0.0.5:9000).
+                  Auto-updates when traffic arrives from elsewhere.
+  --egress-iface  physical interface to NAT tunnel traffic out of (e.g. en0).
+                  Enables egress mode: pf NAT + ip.forwarding=1.
 
-Example (symmetric two-instance setup):
-  # A (ingress side, routes some IPs into the tunnel):
-  sudo f2f-mac run --intercept 198.51.100.5 \
+Example (two-machine setup — A drives traffic, B is the exit):
+  # A (ingress, routes 1tv.ru into the tunnel):
+  sudo f2f-mac run --intercept 1tv.ru \
                    --local-ip 10.99.0.1 --peer-ip 10.99.0.2 \
-                   --listen :9000 --peer 10.0.0.5:9000
+                   --listen :9000 --peer B_LAN_IP:9000
 
-  # B (egress side, no intercept yet — just a tunnel endpoint):
+  # B (egress, NATs tunnel traffic out to the real internet):
   sudo f2f-mac run --local-ip 10.99.0.2 --peer-ip 10.99.0.1 \
-                   --listen :9000 --peer A_PUBLIC_IP:9000
+                   --listen :9000 --peer A_LAN_IP:9000 \
+                   --egress-iface en0
+
+Manual rescue (if f2f-mac was kill -9'd and left state behind):
+  sudo pfctl -a com.apple/f2f-mac -F all
+  sudo sysctl -w net.inet.ip.forwarding=0   # only if it was 0 before f2f-mac
+  sudo rm -f /var/run/f2f-mac.egress.json
 `)
 }
 
@@ -81,6 +92,8 @@ func runCmd(args []string) error {
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
 	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000); pair with --peer to enable peer mode")
 	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001); pair with --listen to enable peer mode")
+	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (enables egress mode, e.g. en0)")
+	egressSubnet := fs.String("egress-subnet", "10.99.0.0/24", "subnet to NAT out of --egress-iface; must contain --local-ip/--peer-ip")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -90,6 +103,27 @@ func runCmd(args []string) error {
 	prefixes, err := parseIntercept(*intercept)
 	if err != nil {
 		return err
+	}
+
+	// Egress (NAT) setup goes up first so its rollback runs last via defer —
+	// system state should be the last thing we touch on the way down.
+	var eg *egress.Egress
+	if *egressIface != "" {
+		subnet, err := netip.ParsePrefix(*egressSubnet)
+		if err != nil {
+			return fmt.Errorf("--egress-subnet: %w", err)
+		}
+		eg, err = egress.Open(*egressIface, subnet)
+		if err != nil {
+			return fmt.Errorf("egress setup: %w", err)
+		}
+		defer func() {
+			if err := eg.Close(); err != nil {
+				log.Printf("WARN: egress cleanup: %v", err)
+			}
+		}()
+		log.Printf("egress: NAT %s → %s via pf anchor %q, ip.forwarding=1",
+			subnet, *egressIface, eg.Anchor())
 	}
 
 	peerMode := *listen != ""
