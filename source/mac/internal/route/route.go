@@ -130,13 +130,31 @@ func routeArgs(action string, p netip.Prefix, iface string) []string {
 	return []string{"-n", action, family, "-net", p.String(), "-interface", iface}
 }
 
+// routeRejectArgs builds the argv for installing or removing a -reject
+// route. macOS's `route` requires a syntactic gateway even for -reject
+// (otherwise it errors with "Invalid argument") — we pass the loopback
+// address (::1 / 127.0.0.1) which is irrelevant to the rejected route's
+// semantics (the kernel returns ICMP unreachable, packets never actually
+// go anywhere). The delete form does not need either the gateway or the
+// -reject flag; destination + family is enough for the kernel to find
+// the route.
 func routeRejectArgs(action string, p netip.Prefix) []string {
 	family := "-inet"
 	if p.Addr().Is6() {
 		family = "-inet6"
 	}
+	args := []string{"-n", action, family}
 	if p.Bits() == p.Addr().BitLen() {
-		return []string{"-n", action, family, "-host", p.Addr().String(), "-reject"}
+		args = append(args, "-host", p.Addr().String())
+	} else {
+		args = append(args, "-net", p.String())
 	}
-	return []string{"-n", action, family, "-net", p.String(), "-reject"}
+	if action == "add" {
+		gw := "127.0.0.1"
+		if p.Addr().Is6() {
+			gw = "::1"
+		}
+		args = append(args, gw, "-reject")
+	}
+	return args
 }

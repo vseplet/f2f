@@ -74,22 +74,34 @@ func TestRouteRejectArgs(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "ipv6 host reject",
+			name:   "ipv6 host reject add",
 			action: "add",
 			prefix: "2a02:6b8::/128",
-			want:   []string{"-n", "add", "-inet6", "-host", "2a02:6b8::", "-reject"},
+			want:   []string{"-n", "add", "-inet6", "-host", "2a02:6b8::", "::1", "-reject"},
 		},
 		{
-			name:   "ipv6 cidr reject",
+			name:   "ipv6 cidr reject add",
 			action: "add",
 			prefix: "2001:db8::/64",
-			want:   []string{"-n", "add", "-inet6", "-net", "2001:db8::/64", "-reject"},
+			want:   []string{"-n", "add", "-inet6", "-net", "2001:db8::/64", "::1", "-reject"},
+		},
+		{
+			name:   "ipv4 host reject add",
+			action: "add",
+			prefix: "1.2.3.4/32",
+			want:   []string{"-n", "add", "-inet", "-host", "1.2.3.4", "127.0.0.1", "-reject"},
+		},
+		{
+			name:   "ipv6 host reject delete",
+			action: "delete",
+			prefix: "2a02:6b8::/128",
+			want:   []string{"-n", "delete", "-inet6", "-host", "2a02:6b8::"},
 		},
 		{
 			name:   "ipv4 host reject delete",
 			action: "delete",
 			prefix: "1.2.3.4/32",
-			want:   []string{"-n", "delete", "-inet", "-host", "1.2.3.4", "-reject"},
+			want:   []string{"-n", "delete", "-inet", "-host", "1.2.3.4"},
 		},
 	}
 	for _, c := range cases {
