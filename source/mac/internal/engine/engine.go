@@ -310,6 +310,9 @@ func (e *Engine) RemoveIntercept(id string) error {
 		return fmt.Errorf("intercept %q not found", id)
 	}
 	for _, prefStr := range info.Prefixes {
+		// Strip the " (reject)" annotation we add for IPv6 entries — the
+		// route manager picks the right delete syntax automatically.
+		prefStr = strings.TrimSuffix(prefStr, " (reject)")
 		p, err := netip.ParsePrefix(prefStr)
 		if err != nil {
 			continue
@@ -341,6 +344,21 @@ func (e *Engine) addInterceptLocked(spec string) (InterceptInfo, error) {
 	id := "i" + strconv.FormatUint(e.nextItemID, 10)
 	info := &InterceptInfo{ID: id, Spec: spec}
 	for _, p := range prefixes {
+		// IPv6 destinations get a -reject route instead of being sent into
+		// the utun: our tunnel is IPv4-only, and forwarding IPv6 packets
+		// into a v4-only utun results in OS picking en0 as source and the
+		// traffic bypassing us. With -reject the app gets ECONNREFUSED
+		// instantly and (in browsers) Happy Eyeballs falls back to the
+		// matching A record, which IS routed through the tunnel.
+		if p.Addr().Is6() {
+			if err := e.routes.AddReject(p); err != nil {
+				log.Printf("WARN: route -reject %s: %v", p, err)
+				continue
+			}
+			info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
+			log.Printf("route %s → reject (IPv6 fallback to IPv4)", p)
+			continue
+		}
 		if err := e.routes.Add(p); err != nil {
 			log.Printf("WARN: route %s: %v", p, err)
 			continue

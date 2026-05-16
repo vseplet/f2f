@@ -2,6 +2,14 @@
 
 // Package route adds host/CIDR routes through a specific interface and tracks
 // what was added so the manager can roll them back on shutdown.
+//
+// Two route shapes are supported:
+//
+//   - interface routes: packets to the destination get sent into the named
+//     interface (utun). This is the primary path — most intercepts go here.
+//   - reject routes (Manager.AddReject): the kernel returns "network
+//     unreachable" / ECONNREFUSED to senders. Used for IPv6 intercepts so
+//     applications fall back to IPv4 immediately instead of timing out.
 package route
 
 import (
@@ -11,12 +19,17 @@ import (
 	"sync"
 )
 
+type entry struct {
+	prefix netip.Prefix
+	reject bool // false = interface-bound, true = -reject
+}
+
 // Manager owns the routes that have been added through a given interface.
 type Manager struct {
 	iface string
 
 	mu    sync.Mutex
-	added []netip.Prefix
+	added []entry
 }
 
 func New(iface string) *Manager {
@@ -30,21 +43,37 @@ func (m *Manager) Add(p netip.Prefix) error {
 		return fmt.Errorf("route add %s: %w: %s", p, err, out)
 	}
 	m.mu.Lock()
-	m.added = append(m.added, p)
+	m.added = append(m.added, entry{prefix: p, reject: false})
 	m.mu.Unlock()
 	return nil
 }
 
-// Remove deletes a previously added route. Idempotent for entries not
-// currently tracked.
+// AddReject installs a -reject route. The kernel will respond with an ICMP
+// unreachable / ECONNREFUSED to any local sender. Use for destinations we
+// want to "appear unreachable" to apps (e.g. IPv6 targets so browsers'
+// Happy Eyeballs falls back to IPv4 instantly).
+func (m *Manager) AddReject(p netip.Prefix) error {
+	out, err := exec.Command("/sbin/route", routeRejectArgs("add", p)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route add -reject %s: %w: %s", p, err, out)
+	}
+	m.mu.Lock()
+	m.added = append(m.added, entry{prefix: p, reject: true})
+	m.mu.Unlock()
+	return nil
+}
+
+// Remove deletes a previously added route, regardless of which Add* variant
+// added it. Idempotent for entries not currently tracked.
 func (m *Manager) Remove(p netip.Prefix) error {
-	out, err := exec.Command("/sbin/route", routeArgs("delete", p, m.iface)...).CombinedOutput()
+	args := m.deleteArgsFor(p)
+	out, err := exec.Command("/sbin/route", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route delete %s: %w: %s", p, err, out)
 	}
 	m.mu.Lock()
-	for i, existing := range m.added {
-		if existing == p {
+	for i, e := range m.added {
+		if e.prefix == p {
 			m.added = append(m.added[:i], m.added[i+1:]...)
 			break
 		}
@@ -57,17 +86,36 @@ func (m *Manager) Remove(p netip.Prefix) error {
 // entry; the returned slice collects per-entry failures.
 func (m *Manager) Cleanup() []error {
 	m.mu.Lock()
-	prefixes := m.added
+	entries := m.added
 	m.added = nil
 	m.mu.Unlock()
 
 	var errs []error
-	for _, p := range prefixes {
-		if out, err := exec.Command("/sbin/route", routeArgs("delete", p, m.iface)...).CombinedOutput(); err != nil {
-			errs = append(errs, fmt.Errorf("route delete %s: %w: %s", p, err, out))
+	for _, e := range entries {
+		var args []string
+		if e.reject {
+			args = routeRejectArgs("delete", e.prefix)
+		} else {
+			args = routeArgs("delete", e.prefix, m.iface)
+		}
+		if out, err := exec.Command("/sbin/route", args...).CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("route delete %s: %w: %s", e.prefix, err, out))
 		}
 	}
 	return errs
+}
+
+// deleteArgsFor picks the correct delete syntax based on how the entry was
+// added. Falls back to interface-bound delete for prefixes we don't track.
+func (m *Manager) deleteArgsFor(p netip.Prefix) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.added {
+		if e.prefix == p && e.reject {
+			return routeRejectArgs("delete", p)
+		}
+	}
+	return routeArgs("delete", p, m.iface)
 }
 
 func routeArgs(action string, p netip.Prefix, iface string) []string {
@@ -80,4 +128,15 @@ func routeArgs(action string, p netip.Prefix, iface string) []string {
 		return []string{"-n", action, family, "-host", p.Addr().String(), "-interface", iface}
 	}
 	return []string{"-n", action, family, "-net", p.String(), "-interface", iface}
+}
+
+func routeRejectArgs(action string, p netip.Prefix) []string {
+	family := "-inet"
+	if p.Addr().Is6() {
+		family = "-inet6"
+	}
+	if p.Bits() == p.Addr().BitLen() {
+		return []string{"-n", action, family, "-host", p.Addr().String(), "-reject"}
+	}
+	return []string{"-n", action, family, "-net", p.String(), "-reject"}
 }

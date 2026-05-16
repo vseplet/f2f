@@ -65,3 +65,43 @@ func TestRouteArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestRouteRejectArgs(t *testing.T) {
+	cases := []struct {
+		name   string
+		action string
+		prefix string
+		want   []string
+	}{
+		{
+			name:   "ipv6 host reject",
+			action: "add",
+			prefix: "2a02:6b8::/128",
+			want:   []string{"-n", "add", "-inet6", "-host", "2a02:6b8::", "-reject"},
+		},
+		{
+			name:   "ipv6 cidr reject",
+			action: "add",
+			prefix: "2001:db8::/64",
+			want:   []string{"-n", "add", "-inet6", "-net", "2001:db8::/64", "-reject"},
+		},
+		{
+			name:   "ipv4 host reject delete",
+			action: "delete",
+			prefix: "1.2.3.4/32",
+			want:   []string{"-n", "delete", "-inet", "-host", "1.2.3.4", "-reject"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := netip.ParsePrefix(c.prefix)
+			if err != nil {
+				t.Fatalf("parse prefix %q: %v", c.prefix, err)
+			}
+			got := routeRejectArgs(c.action, p)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("\n got: %v\nwant: %v", got, c.want)
+			}
+		})
+	}
+}
