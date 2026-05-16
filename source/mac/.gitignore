@@ -1,0 +1,4 @@
+/f2f-mac
+*.test
+*.out
+.DS_Store
