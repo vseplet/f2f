@@ -291,13 +291,29 @@ $(function () {
     $.getJSON('/api/ifaces', (ifs) => {
       const $sel = $('#egress-iface');
       const current = $sel.val();
+      const stored = localStorage.getItem(storageKey('#egress-iface'));
       $sel.empty();
       $sel.append($('<option>').val('').text('— disabled —'));
+      let defaultName = '';
       (ifs || []).forEach((i) => {
-        const label = i.name + (i.ip ? '  (' + i.ip + ')' : '');
+        let label = i.name;
+        if (i.ip) label += '  (' + i.ip + ')';
+        if (i.is_default) {
+          label += '  · default route';
+          defaultName = i.name;
+        }
         $sel.append($('<option>').val(i.name).text(label));
       });
-      if (current) $sel.val(current);
+      // Priority: existing form value → previously stored choice → default
+      // route interface → "disabled".
+      if (current) {
+        $sel.val(current);
+      } else if (stored) {
+        $sel.val(stored);
+      } else if (defaultName) {
+        $sel.val(defaultName);
+        persistField('#egress-iface');
+      }
     });
   }
 

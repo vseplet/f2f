@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -238,8 +239,9 @@ func (s *Server) handleRemoveInboundAllow(w http.ResponseWriter, r *http.Request
 }
 
 type ifaceInfo struct {
-	Name string `json:"name"`
-	IP   string `json:"ip,omitempty"`
+	Name      string `json:"name"`
+	IP        string `json:"ip,omitempty"`
+	IsDefault bool   `json:"is_default,omitempty"`
 }
 
 func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +250,7 @@ func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	defaultName := defaultRouteIface()
 	out := []ifaceInfo{}
 	for _, iface := range ifs {
 		if iface.Flags&net.FlagLoopback != 0 {
@@ -259,7 +262,7 @@ func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(iface.Name, "utun") {
 			continue
 		}
-		info := ifaceInfo{Name: iface.Name}
+		info := ifaceInfo{Name: iface.Name, IsDefault: iface.Name == defaultName}
 		addrs, _ := iface.Addrs()
 		for _, a := range addrs {
 			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil {
@@ -270,6 +273,28 @@ func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
 		out = append(out, info)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// defaultRouteIface returns the interface name of the IPv4 default route,
+// or "" if it can't be determined. We never pick a utun* (avoids loops if
+// another VPN owns the default route).
+func defaultRouteIface() string {
+	out, err := exec.Command("/sbin/route", "-n", "get", "default").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "interface:") {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+		if strings.HasPrefix(name, "utun") {
+			return ""
+		}
+		return name
+	}
+	return ""
 }
 
 func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
