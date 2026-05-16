@@ -12,28 +12,40 @@ $(function () {
   // localStorage. The engine has its own copy while running (the "live"
   // entries with IDs and resolved prefixes) — we reconcile the two on
   // every status refresh.
-  const INTERCEPTS_KEY = 'f2f:intercepts';
-  function getStoredSpecs() {
-    try {
-      const raw = localStorage.getItem(INTERCEPTS_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string') : [];
-    } catch (_) { return []; }
+  // Two persistent lists in localStorage: intercept specs (what we send
+  // INTO the tunnel) and inbound-allow specs (what we let peer's traffic
+  // reach OUT of the tunnel on our side). Mirror structures, same helpers.
+  function makeList(key) {
+    return {
+      get() {
+        try {
+          const raw = localStorage.getItem(key);
+          if (!raw) return [];
+          const arr = JSON.parse(raw);
+          return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string') : [];
+        } catch (_) { return []; }
+      },
+      set(arr) { localStorage.setItem(key, JSON.stringify(arr)); },
+      add(spec) {
+        const list = this.get();
+        if (!list.includes(spec)) list.push(spec);
+        this.set(list);
+      },
+      remove(spec) {
+        this.set(this.get().filter((s) => s !== spec));
+      },
+    };
   }
-  function setStoredSpecs(arr) {
-    localStorage.setItem(INTERCEPTS_KEY, JSON.stringify(arr));
-  }
-  function addStoredSpec(spec) {
-    const list = getStoredSpecs();
-    if (!list.includes(spec)) list.push(spec);
-    setStoredSpecs(list);
-  }
-  function removeStoredSpec(spec) {
-    setStoredSpecs(getStoredSpecs().filter((s) => s !== spec));
-  }
+  const intercepts = makeList('f2f:intercepts');
+  const allows = makeList('f2f:allow');
+
+  // Back-compat wrappers (some existing code uses these names).
+  const getStoredSpecs = () => intercepts.get();
+  const addStoredSpec = (s) => intercepts.add(s);
+  const removeStoredSpec = (s) => intercepts.remove(s);
 
   let liveIntercepts = []; // last seen from /api/status
+  let liveAllows = [];
 
   // Persist config form values across reloads. Each field has a localStorage
   // key; we restore on load and save on every change. Engine-driven updates
@@ -102,12 +114,15 @@ $(function () {
     $btnAdd.prop('disabled', false);
 
     liveIntercepts = s.intercepts || [];
+    liveAllows = s.inbound_allow || [];
     renderIntercepts();
+    renderAllows();
 
     $('#tx-packets').text(s.tx_packets || 0);
     $('#rx-packets').text(s.rx_packets || 0);
     $('#tx-bytes').text(fmtBytes(s.tx_bytes || 0));
     $('#rx-bytes').text(fmtBytes(s.rx_bytes || 0));
+    $('#dropped-inbound').text(s.dropped_inbound || 0);
   }
 
   function renderIntercepts() {
@@ -176,6 +191,102 @@ $(function () {
     }
   }
 
+  // -- Inbound whitelist (mirror of Intercepts) --
+  const $allowList = $('#allow-list');
+  const $allowInput = $('#allow-input');
+  const $btnAddAllow = $('#btn-add-allow');
+
+  function renderAllows() {
+    $allowList.empty();
+    const stored = allows.get();
+    const liveBySpec = {};
+    liveAllows.forEach((l) => { liveBySpec[l.spec] = l; });
+
+    const seen = new Set();
+    const items = stored.map((spec) => {
+      seen.add(spec);
+      return { spec, live: liveBySpec[spec] || null };
+    });
+    liveAllows.forEach((l) => {
+      if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
+    });
+
+    if (items.length === 0) {
+      $allowList.append('<div class="text-sm text-gray-500">No filter — peer can reach any destination. Add an entry to switch to whitelist mode.</div>');
+      return;
+    }
+
+    items.forEach((it) => {
+      const $row = $('<div class="flex items-center justify-between bg-purple-50 rounded p-3">');
+      const $info = $('<div>');
+      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
+      $title.append($('<span>').text(it.spec));
+      if (it.live) {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
+      } else {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
+      }
+      if (it.orphan) {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
+      }
+      $info.append($title);
+      const prefixes = it.live ? (it.live.prefixes || []) : [];
+      if (prefixes.length) {
+        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+      }
+      $row.append($info);
+
+      const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
+      $btn.on('click', () => removeAllowSpec(it.spec, it.live));
+      $row.append($btn);
+
+      $allowList.append($row);
+    });
+  }
+
+  function removeAllowSpec(spec, live) {
+    allows.remove(spec);
+    const after = () => refreshStatus();
+    if (live && live.id) {
+      $.ajax({ url: '/api/inbound-allow/' + encodeURIComponent(live.id), method: 'DELETE' })
+        .done(after)
+        .fail((xhr) => { alert('Remove failed: ' + errorOf(xhr)); after(); });
+    } else {
+      renderAllows();
+    }
+  }
+
+  function addAllowOne(spec) {
+    return $.ajax({
+      url: '/api/inbound-allow',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ spec: spec }),
+    });
+  }
+
+  $btnAddAllow.on('click', () => {
+    const raw = $allowInput.val();
+    const specs = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (specs.length === 0) return;
+
+    specs.forEach((s) => allows.add(s));
+    $allowInput.val('');
+    renderAllows();
+
+    if ($btnStart.is(':visible')) return; // engine stopped
+    const errors = [];
+    const requests = specs.map((spec) =>
+      addAllowOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`)),
+    );
+    $.when(...requests).always(() => {
+      refreshStatus();
+      if (errors.length) alert('Some allow entries failed to apply live:\n' + errors.join('\n'));
+    });
+  });
+
+  $allowInput.on('keydown', (e) => { if (e.key === 'Enter') $btnAddAllow.click(); });
+
   function loadIfaces() {
     $.getJSON('/api/ifaces', (ifs) => {
       const $sel = $('#egress-iface');
@@ -197,8 +308,9 @@ $(function () {
       listen: $('#listen').val().trim(),
       peer: $('#peer-udp').val().trim(),
       // Seed the engine with whatever the user has saved locally — that
-      // way pending intercepts become active immediately on Start.
+      // way pending intercepts/allows become active immediately on Start.
       intercepts: getStoredSpecs(),
+      inbound_allow: allows.get(),
       egress_iface: $('#egress-iface').val(),
       egress_subnet: $('#egress-subnet').val().trim()
     };

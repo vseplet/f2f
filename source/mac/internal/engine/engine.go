@@ -27,34 +27,37 @@ import (
 
 // Config is the input to Start.
 type Config struct {
-	LocalIP      string   // utun local point-to-point address
-	PeerIP       string   // utun remote point-to-point address
-	Listen       string   // UDP listen address (":9000"), empty = no peer mode
-	Peer         string   // UDP peer address ("host:9000"), empty = no peer mode
-	Intercepts   []string // user-provided IPs/CIDRs/domains, resolved at Start
-	EgressIface  string   // physical interface for NAT (empty = no egress)
-	EgressSubnet string   // CIDR to NAT (default "10.99.0.0/24")
+	LocalIP       string   // utun local point-to-point address
+	PeerIP        string   // utun remote point-to-point address
+	Listen        string   // UDP listen address (":9000"), empty = no peer mode
+	Peer          string   // UDP peer address ("host:9000"), empty = no peer mode
+	Intercepts    []string // user-provided IPs/CIDRs/domains, resolved at Start
+	InboundAllow  []string // whitelist of destinations the peer is allowed to reach via us
+	EgressIface   string   // physical interface for NAT (empty = no egress)
+	EgressSubnet  string   // CIDR to NAT (default "10.99.0.0/24")
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
 // changes between calls.
 type Status struct {
-	Running       bool            `json:"running"`
-	UtunName      string          `json:"utun_name,omitempty"`
-	LocalIP       string          `json:"local_ip,omitempty"`
-	PeerIP        string          `json:"peer_ip,omitempty"`
-	ListenAddr    string          `json:"listen_addr,omitempty"`
-	PeerAddr      string          `json:"peer_addr,omitempty"`
-	EgressActive  bool            `json:"egress_active"`
-	EgressIface   string          `json:"egress_iface,omitempty"`
-	EgressAnchor  string          `json:"egress_anchor,omitempty"`
-	EgressSubnet  string          `json:"egress_subnet,omitempty"`
-	Intercepts    []InterceptInfo `json:"intercepts"`
-	StartedAt     time.Time       `json:"started_at,omitempty"`
-	TxBytes       uint64          `json:"tx_bytes"`
-	RxBytes       uint64          `json:"rx_bytes"`
-	TxPackets     uint64          `json:"tx_packets"`
-	RxPackets     uint64          `json:"rx_packets"`
+	Running        bool            `json:"running"`
+	UtunName       string          `json:"utun_name,omitempty"`
+	LocalIP        string          `json:"local_ip,omitempty"`
+	PeerIP         string          `json:"peer_ip,omitempty"`
+	ListenAddr     string          `json:"listen_addr,omitempty"`
+	PeerAddr       string          `json:"peer_addr,omitempty"`
+	EgressActive   bool            `json:"egress_active"`
+	EgressIface    string          `json:"egress_iface,omitempty"`
+	EgressAnchor   string          `json:"egress_anchor,omitempty"`
+	EgressSubnet   string          `json:"egress_subnet,omitempty"`
+	Intercepts     []InterceptInfo `json:"intercepts"`
+	InboundAllow   []InterceptInfo `json:"inbound_allow"`
+	StartedAt      time.Time       `json:"started_at,omitempty"`
+	TxBytes        uint64          `json:"tx_bytes"`
+	RxBytes        uint64          `json:"rx_bytes"`
+	TxPackets      uint64          `json:"tx_packets"`
+	RxPackets      uint64          `json:"rx_packets"`
+	DroppedInbound uint64          `json:"dropped_inbound"`
 }
 
 // InterceptInfo describes one intercept entry and what host routes it owns.
@@ -78,6 +81,7 @@ type Engine struct {
 	peerPtr atomic.Pointer[net.UDPAddr]
 
 	intercepts   map[string]*InterceptInfo
+	inboundAllow map[string]*InterceptInfo
 	nextItemID   uint64
 
 	cancel  context.CancelFunc
@@ -86,6 +90,7 @@ type Engine struct {
 
 	txBytes, rxBytes     atomic.Uint64
 	txPackets, rxPackets atomic.Uint64
+	droppedInbound       atomic.Uint64
 
 	tap *logTap
 }
@@ -93,8 +98,9 @@ type Engine struct {
 // New returns a fresh Engine. Start it to bring it up.
 func New() *Engine {
 	return &Engine{
-		intercepts: map[string]*InterceptInfo{},
-		tap:        newLogTap(),
+		intercepts:   map[string]*InterceptInfo{},
+		inboundAllow: map[string]*InterceptInfo{},
+		tap:          newLogTap(),
 	}
 }
 
@@ -183,6 +189,13 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
+	// Seed inbound whitelist (no system side effects — just resolve prefixes).
+	for _, spec := range cfg.InboundAllow {
+		if _, err := e.addInboundAllowLocked(spec); err != nil {
+			log.Printf("WARN: inbound-allow %q: %v", spec, err)
+		}
+	}
+
 	// Workers.
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
@@ -251,10 +264,12 @@ func (e *Engine) Stop() error {
 	e.routes = nil
 	e.egr = nil
 	e.intercepts = map[string]*InterceptInfo{}
+	e.inboundAllow = map[string]*InterceptInfo{}
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
 	e.rxPackets.Store(0)
+	e.droppedInbound.Store(0)
 	e.mu.Unlock()
 	return errors.Join(errs...)
 }
@@ -265,13 +280,14 @@ func (e *Engine) Status() Status {
 	defer e.mu.Unlock()
 
 	st := Status{
-		Running:      e.running,
-		EgressActive: e.egr != nil,
-		StartedAt:    e.started,
-		TxBytes:      e.txBytes.Load(),
-		RxBytes:      e.rxBytes.Load(),
-		TxPackets:    e.txPackets.Load(),
-		RxPackets:    e.rxPackets.Load(),
+		Running:        e.running,
+		EgressActive:   e.egr != nil,
+		StartedAt:      e.started,
+		TxBytes:        e.txBytes.Load(),
+		RxBytes:        e.rxBytes.Load(),
+		TxPackets:      e.txPackets.Load(),
+		RxPackets:      e.rxPackets.Load(),
+		DroppedInbound: e.droppedInbound.Load(),
 	}
 	if e.tun != nil {
 		st.UtunName = e.tun.Name()
@@ -292,6 +308,10 @@ func (e *Engine) Status() Status {
 	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
 	for _, info := range e.intercepts {
 		st.Intercepts = append(st.Intercepts, *info)
+	}
+	st.InboundAllow = make([]InterceptInfo, 0, len(e.inboundAllow))
+	for _, info := range e.inboundAllow {
+		st.InboundAllow = append(st.InboundAllow, *info)
 	}
 	return st
 }
@@ -333,6 +353,60 @@ func (e *Engine) RemoveIntercept(id string) error {
 	delete(e.intercepts, id)
 	log.Printf("removed intercept %s (%s)", id, info.Spec)
 	return nil
+}
+
+// AddInboundAllow adds an entry to the inbound whitelist. When the
+// whitelist is non-empty, packets arriving from the peer whose destination
+// is NOT in any whitelist prefix are dropped (and counted in DroppedInbound).
+// Requires Running.
+func (e *Engine) AddInboundAllow(spec string) (InterceptInfo, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.running {
+		return InterceptInfo{}, errors.New("engine not running")
+	}
+	return e.addInboundAllowLocked(spec)
+}
+
+// RemoveInboundAllow removes an entry from the inbound whitelist.
+func (e *Engine) RemoveInboundAllow(id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.running {
+		return errors.New("engine not running")
+	}
+	info, ok := e.inboundAllow[id]
+	if !ok {
+		return fmt.Errorf("inbound-allow %q not found", id)
+	}
+	delete(e.inboundAllow, id)
+	log.Printf("removed inbound-allow %s (%s)", id, info.Spec)
+	return nil
+}
+
+// addInboundAllowLocked resolves spec and adds the resulting prefixes to
+// the whitelist. Caller holds e.mu.
+func (e *Engine) addInboundAllowLocked(spec string) (InterceptInfo, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return InterceptInfo{}, errors.New("empty inbound-allow spec")
+	}
+	prefixes, err := resolveSpec(spec)
+	if err != nil {
+		return InterceptInfo{}, err
+	}
+	if len(prefixes) == 0 {
+		return InterceptInfo{}, fmt.Errorf("%q: no addresses", spec)
+	}
+	e.nextItemID++
+	id := "a" + strconv.FormatUint(e.nextItemID, 10)
+	info := &InterceptInfo{ID: id, Spec: spec}
+	for _, p := range prefixes {
+		info.Prefixes = append(info.Prefixes, p.String())
+	}
+	e.inboundAllow[id] = info
+	log.Printf("inbound-allow %s → %s", spec, strings.Join(info.Prefixes, ", "))
+	return *info, nil
 }
 
 // addInterceptLocked must be called with e.mu held and e.running == true.
@@ -455,6 +529,15 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		}
 		pkt := buf[:n]
 		summary := packet.Summary(pkt)
+
+		// Inbound whitelist: when non-empty, only packets whose destination
+		// matches some whitelist prefix are passed to the OS.
+		if !e.inboundAllowed(pkt) {
+			e.droppedInbound.Add(1)
+			log.Printf("[udp %s] %s [drop-filter]", from, summary)
+			continue
+		}
+
 		if werr := e.tun.Write(pkt); werr != nil {
 			if ctx.Err() == nil {
 				log.Printf("WARN: utun write from %s: %v", from, werr)
@@ -466,6 +549,39 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			log.Printf("[udp %s] %s [→utun]", from, summary)
 		}
 	}
+}
+
+// inboundAllowed reports whether the packet's destination matches the
+// whitelist. An empty whitelist means "no filter" — every packet is allowed.
+// Packets whose destination address we cannot parse are also allowed (we
+// don't want to silently break unknown-format traffic).
+func (e *Engine) inboundAllowed(pkt []byte) bool {
+	e.mu.Lock()
+	if len(e.inboundAllow) == 0 {
+		e.mu.Unlock()
+		return true
+	}
+	// Snapshot prefixes so we can drop the lock before the match loop.
+	prefixes := make([]netip.Prefix, 0, len(e.inboundAllow)*2)
+	for _, info := range e.inboundAllow {
+		for _, s := range info.Prefixes {
+			if p, err := netip.ParsePrefix(s); err == nil {
+				prefixes = append(prefixes, p)
+			}
+		}
+	}
+	e.mu.Unlock()
+
+	dst := packet.ExtractDst(pkt)
+	if !dst.IsValid() {
+		return true
+	}
+	for _, p := range prefixes {
+		if p.Contains(dst) {
+			return true
+		}
+	}
+	return false
 }
 
 // rollbackPartial cleans up whatever Start managed to bring up before

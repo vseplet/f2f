@@ -68,6 +68,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stop", s.handleStop)
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
+	mux.HandleFunc("POST /api/inbound-allow", s.handleAddInboundAllow)
+	mux.HandleFunc("DELETE /api/inbound-allow/{id}", s.handleRemoveInboundAllow)
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
@@ -144,13 +146,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type startRequest struct {
-	LocalIP      string   `json:"local_ip"`
-	PeerIP       string   `json:"peer_ip"`
-	Listen       string   `json:"listen"`
-	Peer         string   `json:"peer"`
-	Intercepts   []string `json:"intercepts"`
-	EgressIface  string   `json:"egress_iface"`
-	EgressSubnet string   `json:"egress_subnet"`
+	LocalIP       string   `json:"local_ip"`
+	PeerIP        string   `json:"peer_ip"`
+	Listen        string   `json:"listen"`
+	Peer          string   `json:"peer"`
+	Intercepts    []string `json:"intercepts"`
+	InboundAllow  []string `json:"inbound_allow"`
+	EgressIface   string   `json:"egress_iface"`
+	EgressSubnet  string   `json:"egress_subnet"`
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -160,13 +163,14 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:      req.LocalIP,
-		PeerIP:       req.PeerIP,
-		Listen:       req.Listen,
-		Peer:         req.Peer,
-		Intercepts:   req.Intercepts,
-		EgressIface:  req.EgressIface,
-		EgressSubnet: req.EgressSubnet,
+		LocalIP:       req.LocalIP,
+		PeerIP:        req.PeerIP,
+		Listen:        req.Listen,
+		Peer:          req.Peer,
+		Intercepts:    req.Intercepts,
+		InboundAllow:  req.InboundAllow,
+		EgressIface:   req.EgressIface,
+		EgressSubnet:  req.EgressSubnet,
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -204,6 +208,29 @@ func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.engine.RemoveIntercept(id); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAddInboundAllow(w http.ResponseWriter, r *http.Request) {
+	var req addInterceptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	info, err := s.engine.AddInboundAllow(req.Spec)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleRemoveInboundAllow(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.engine.RemoveInboundAllow(id); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}

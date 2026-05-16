@@ -93,6 +93,34 @@ func TestSummary_IPv6(t *testing.T) {
 	}
 }
 
+func TestExtractDst(t *testing.T) {
+	v4 := make([]byte, 28)
+	v4[0] = 0x45
+	binary.BigEndian.PutUint16(v4[2:4], 28)
+	v4[9] = 6
+	copy(v4[12:16], []byte{10, 0, 0, 1})
+	copy(v4[16:20], []byte{8, 8, 8, 8})
+	if got := ExtractDst(v4).String(); got != "8.8.8.8" {
+		t.Errorf("v4 dst = %q, want 8.8.8.8", got)
+	}
+
+	v6 := make([]byte, 48)
+	v6[0] = 0x60
+	v6[6] = 58
+	copy(v6[8:24], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1})
+	copy(v6[24:40], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2})
+	if got := ExtractDst(v6).String(); got != "2001:db8::2" {
+		t.Errorf("v6 dst = %q, want 2001:db8::2", got)
+	}
+
+	if ExtractDst(nil).IsValid() {
+		t.Error("ExtractDst(nil) should be invalid")
+	}
+	if ExtractDst([]byte{0x45}).IsValid() {
+		t.Error("ExtractDst(truncated v4) should be invalid")
+	}
+}
+
 func TestSummary_EdgeCases(t *testing.T) {
 	cases := []struct {
 		name string

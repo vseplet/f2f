@@ -62,6 +62,17 @@
     </section>
 
     <section class="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 class="text-lg font-semibold mb-1">Inbound whitelist</h2>
+      <p class="text-xs text-gray-500 mb-4">Destinations the <strong>peer</strong> is allowed to reach through this node. Empty list = allow everything (current behavior).</p>
+      <div id="allow-list" class="space-y-2 mb-4"></div>
+      <div class="flex gap-2">
+        <input id="allow-input" type="text" placeholder="ya.ru, 1.1.1.1, 142.250.0.0/16" class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm">
+        <button id="btn-add-allow" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded text-sm">Add</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-2">Stored in your browser. Applied automatically on Start.</p>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-6 mb-6">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold">Topology</h2>
         <span class="text-xs text-gray-500">drag bubbles · scroll to zoom</span>
@@ -71,11 +82,12 @@
 
     <section class="bg-white rounded-lg shadow p-6 mb-6">
       <h2 class="text-lg font-semibold mb-4">Counters</h2>
-      <div id="counters" class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+      <div id="counters" class="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
         <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx packets</div><div class="font-mono text-base" id="tx-packets">0</div></div>
         <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx bytes</div><div class="font-mono text-base" id="tx-bytes">0</div></div>
         <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx packets</div><div class="font-mono text-base" id="rx-packets">0</div></div>
         <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx bytes</div><div class="font-mono text-base" id="rx-bytes">0</div></div>
+        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">dropped by filter</div><div class="font-mono text-base" id="dropped-inbound">0</div></div>
       </div>
     </section>
 

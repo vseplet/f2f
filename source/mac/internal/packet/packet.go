@@ -9,6 +9,30 @@ import (
 	"net/netip"
 )
 
+// ExtractDst returns the destination address from a raw IPv4 or IPv6 packet.
+// Returns the zero Addr if the buffer is malformed or the version is not
+// recognized — callers should treat that as "unknown, do not filter".
+func ExtractDst(buf []byte) netip.Addr {
+	if len(buf) == 0 {
+		return netip.Addr{}
+	}
+	switch buf[0] >> 4 {
+	case 4:
+		if len(buf) < 20 {
+			return netip.Addr{}
+		}
+		a, _ := netip.AddrFromSlice(buf[16:20])
+		return a
+	case 6:
+		if len(buf) < 40 {
+			return netip.Addr{}
+		}
+		a, _ := netip.AddrFromSlice(buf[24:40])
+		return a
+	}
+	return netip.Addr{}
+}
+
 // Summary returns a human-readable description of the first IP packet in buf,
 // or a short diagnostic if the buffer is malformed.
 func Summary(buf []byte) string {
