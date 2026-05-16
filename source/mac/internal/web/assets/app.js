@@ -383,20 +383,60 @@ $(function () {
     if (e.key === 'Enter') $btnAdd.click();
   });
 
-  $btnClearLog.on('click', () => $log.empty());
+  // Under heavy traffic the engine emits log lines faster than the browser
+  // can lay out individual DOM appends. Batch incoming messages and flush
+  // once per animation frame to keep the main thread responsive.
+  const logEl = $log[0];
+  const LOG_MAX = 1000;
+  let logQueue = [];
+  let logFlushScheduled = false;
+  let logLineCount = 0;
+
+  function flushLogs() {
+    logFlushScheduled = false;
+    if (logQueue.length === 0) return;
+    const atBottom = (logEl.scrollTop + logEl.clientHeight) >= (logEl.scrollHeight - 16);
+
+    // If the queue alone exceeds the cap, drop the oldest queued lines so
+    // we never build a giant fragment we're about to throw away.
+    if (logQueue.length > LOG_MAX) {
+      logQueue = logQueue.slice(logQueue.length - LOG_MAX);
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const msg of logQueue) {
+      const div = document.createElement('div');
+      div.textContent = msg;
+      frag.appendChild(div);
+    }
+    logLineCount += logQueue.length;
+    logQueue = [];
+    logEl.appendChild(frag);
+
+    while (logLineCount > LOG_MAX && logEl.firstChild) {
+      logEl.removeChild(logEl.firstChild);
+      logLineCount--;
+    }
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+  function scheduleLogFlush() {
+    if (logFlushScheduled) return;
+    logFlushScheduled = true;
+    requestAnimationFrame(flushLogs);
+  }
+  $btnClearLog.on('click', () => {
+    logQueue = [];
+    logLineCount = 0;
+    $log.empty();
+  });
 
   function startLogStream() {
     const es = new EventSource('/api/log/stream');
     es.onmessage = (e) => {
       try {
         const entry = JSON.parse(e.data);
-        const atBottom = ($log[0].scrollTop + $log[0].clientHeight) >= ($log[0].scrollHeight - 16);
-        const $line = $('<div>').text(entry.message);
-        $log.append($line);
-        // Cap visible log at 1000 lines.
-        const $lines = $log.children();
-        if ($lines.length > 1000) $lines.first().remove();
-        if (atBottom) $log[0].scrollTop = $log[0].scrollHeight;
+        logQueue.push(entry.message);
+        scheduleLogFlush();
       } catch (err) {
         console.error(err);
       }
@@ -414,6 +454,7 @@ $(function () {
 
   const g = svg.append('g');
   const zoomBehavior = d3.zoom().scaleExtent([0.3, 3])
+    .filter((e) => e.type !== 'wheel' || e.ctrlKey)
     .on('zoom', (e) => g.attr('transform', e.transform));
   svg.call(zoomBehavior);
   // Start zoomed out a bit so 3-4 bubbles fit without scrolling.
@@ -435,6 +476,7 @@ $(function () {
 
   // Keep a stable view of nodes so positions survive refresh.
   let nodeMap = new Map();
+  let lastTopologyKey = '';
 
   function bubbleRadius(n) {
     if (n.kind === 'self') return 28;
@@ -464,6 +506,17 @@ $(function () {
   function refreshTopology() {
     $.getJSON('/api/topology', (data) => {
       const incoming = data.nodes || [];
+      const incomingEdges = data.edges || [];
+
+      // Detect whether the structure (not byte counts) actually changed.
+      // If not, skip the d3 selection/simulation work — restarting alpha
+      // every 2s on an unchanged graph keeps the physics loop running
+      // forever and starves the main thread under heavy log volume.
+      const structureKey = incoming.map((n) => n.id).sort().join(',') + '|' +
+        incomingEdges.map((e) => e.source + '>' + e.target).sort().join(',');
+      const structureChanged = structureKey !== lastTopologyKey;
+      lastTopologyKey = structureKey;
+
       const newMap = new Map();
       incoming.forEach((n) => {
         const existing = nodeMap.get(n.id);
@@ -478,7 +531,7 @@ $(function () {
       nodeMap = newMap;
 
       const nodes = Array.from(nodeMap.values());
-      const links = (data.edges || []).map((e) => ({ ...e }));
+      const links = incomingEdges.map((e) => ({ ...e }));
 
       const linkSel = linksLayer.selectAll('line').data(links, (e) => e.source + '|' + e.target);
       linkSel.exit().remove();
@@ -527,7 +580,7 @@ $(function () {
         allNodes.attr('transform', (d) => `translate(${d.x},${d.y})`);
       });
       sim.force('link').links(links);
-      sim.alpha(0.4).restart();
+      if (structureChanged) sim.alpha(0.4).restart();
     });
   }
 
