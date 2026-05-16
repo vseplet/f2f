@@ -209,6 +209,8 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.peerToTunLoop(ctx)
 	}
+	e.workers.Add(1)
+	go e.domainRefreshLoop(ctx)
 	return nil
 }
 
@@ -355,6 +357,16 @@ func (e *Engine) RemoveIntercept(id string) error {
 	return nil
 }
 
+func isDomainSpec(spec string) bool {
+	if _, err := netip.ParsePrefix(spec); err == nil {
+		return false
+	}
+	if _, err := netip.ParseAddr(spec); err == nil {
+		return false
+	}
+	return true
+}
+
 // AddInboundAllow adds an entry to the inbound whitelist. When the
 // whitelist is non-empty, packets arriving from the peer whose destination
 // is NOT in any whitelist prefix are dropped (and counted in DroppedInbound).
@@ -454,6 +466,98 @@ func (e *Engine) addInterceptLocked(spec string) (InterceptInfo, error) {
 	}
 	e.intercepts[id] = info
 	return *info, nil
+}
+
+func (e *Engine) domainRefreshLoop(ctx context.Context) {
+	defer e.workers.Done()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.refreshDomainRoutes()
+		}
+	}
+}
+
+func (e *Engine) refreshDomainRoutes() {
+	e.mu.Lock()
+	type entry struct {
+		id  string
+		spec string
+		old []string
+	}
+	var domains []entry
+	for id, info := range e.intercepts {
+		if isDomainSpec(info.Spec) {
+			domains = append(domains, entry{id: id, spec: info.Spec, old: append([]string(nil), info.Prefixes...)})
+		}
+	}
+	e.mu.Unlock()
+
+	for _, d := range domains {
+		newPrefixes, err := resolveSpec(d.spec)
+		if err != nil {
+			log.Printf("WARN: refresh %s: %v", d.spec, err)
+			continue
+		}
+
+		newSet := make(map[string]netip.Prefix, len(newPrefixes))
+		for _, p := range newPrefixes {
+			newSet[p.String()] = p
+		}
+		oldSet := make(map[string]struct{}, len(d.old))
+		for _, s := range d.old {
+			oldSet[strings.TrimSuffix(s, " (reject)")] = struct{}{}
+		}
+		changed := len(newSet) != len(oldSet)
+		if !changed {
+			for s := range oldSet {
+				if _, ok := newSet[s]; !ok {
+					changed = true
+					break
+				}
+			}
+		}
+		if !changed {
+			continue
+		}
+
+		e.mu.Lock()
+		info, ok := e.intercepts[d.id]
+		if !ok {
+			e.mu.Unlock()
+			continue
+		}
+		for _, prefStr := range info.Prefixes {
+			prefStr = strings.TrimSuffix(prefStr, " (reject)")
+			if p, err := netip.ParsePrefix(prefStr); err == nil {
+				if err := e.routes.Remove(p); err != nil {
+					log.Printf("WARN: refresh remove route %s: %v", p, err)
+				}
+			}
+		}
+		info.Prefixes = nil
+		for _, p := range newPrefixes {
+			if p.Addr().Is6() {
+				if err := e.routes.AddReject(p); err != nil {
+					log.Printf("WARN: refresh route -reject %s: %v", p, err)
+					continue
+				}
+				info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
+				continue
+			}
+			if err := e.routes.Add(p); err != nil {
+				log.Printf("WARN: refresh route %s: %v", p, err)
+				continue
+			}
+			info.Prefixes = append(info.Prefixes, p.String())
+		}
+		log.Printf("refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
+		e.mu.Unlock()
+	}
 }
 
 func resolveSpec(spec string) ([]netip.Prefix, error) {
