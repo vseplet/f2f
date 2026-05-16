@@ -35,6 +35,24 @@ func (m *Manager) Add(p netip.Prefix) error {
 	return nil
 }
 
+// Remove deletes a previously added route. Idempotent for entries not
+// currently tracked.
+func (m *Manager) Remove(p netip.Prefix) error {
+	out, err := exec.Command("/sbin/route", routeArgs("delete", p, m.iface)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route delete %s: %w: %s", p, err, out)
+	}
+	m.mu.Lock()
+	for i, existing := range m.added {
+		if existing == p {
+			m.added = append(m.added[:i], m.added[i+1:]...)
+			break
+		}
+	}
+	m.mu.Unlock()
+	return nil
+}
+
 // Cleanup removes every route this manager added. It always attempts every
 // entry; the returned slice collects per-entry failures.
 func (m *Manager) Cleanup() []error {

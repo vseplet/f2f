@@ -2,32 +2,25 @@
 
 // f2f-mac is the macOS-side CLI for the f2f UDP tunnel.
 //
-// The `run` subcommand opens a utun interface, optionally installs host
-// routes for --intercept, and (when --listen + --peer are set) shuttles
-// packets between utun and a UDP peer. The exact same binary plays both
-// ends of the tunnel; the only difference is which flags you pass.
+// Subcommand `run` is the thin CLI wrapper around internal/engine. The
+// engine handles utun, UDP, routes, and (optionally) egress NAT setup; the
+// CLI just parses flags and orchestrates start/signal/stop.
 //
-// run needs sudo (utun + routing).
+// Needs sudo (utun + routing + pf).
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-	"net"
-	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
-	"sync/atomic"
 	"syscall"
 
-	"github.com/vseplet/f2f/source/mac/internal/egress"
-	"github.com/vseplet/f2f/source/mac/internal/packet"
-	"github.com/vseplet/f2f/source/mac/internal/route"
-	"github.com/vseplet/f2f/source/mac/internal/tunnel"
+	"github.com/vseplet/f2f/source/mac/internal/engine"
 )
 
 func main() {
@@ -90,198 +83,48 @@ func runCmd(args []string) error {
 	intercept := fs.String("intercept", "", "comma-separated list of IPs, CIDRs, and domains to route into the tunnel")
 	localIP := fs.String("local-ip", "10.99.0.1", "local end of the point-to-point address on utun")
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
-	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000); pair with --peer to enable peer mode")
-	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001); pair with --listen to enable peer mode")
-	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (enables egress mode, e.g. en0)")
-	egressSubnet := fs.String("egress-subnet", "10.99.0.0/24", "subnet to NAT out of --egress-iface; must contain --local-ip/--peer-ip")
+	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000)")
+	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001)")
+	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (enables egress mode)")
+	egressSubnet := fs.String("egress-subnet", "10.99.0.0/24", "subnet to NAT out of --egress-iface")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if (*listen == "") != (*peerAddr == "") {
-		return errors.New("--listen and --peer must both be set or both be empty")
+
+	eng := engine.New()
+	// Route global log output through the engine's tap as well, so the UI
+	// (and any future subscriber) sees the same lines that go to stderr.
+	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
+
+	cfg := engine.Config{
+		LocalIP:      *localIP,
+		PeerIP:       *peerIP,
+		Listen:       *listen,
+		Peer:         *peerAddr,
+		Intercepts:   splitCSV(*intercept),
+		EgressIface:  *egressIface,
+		EgressSubnet: *egressSubnet,
 	}
-	prefixes, err := parseIntercept(*intercept)
-	if err != nil {
+	if err := eng.Start(cfg); err != nil {
 		return err
-	}
-
-	// Egress (NAT) setup goes up first so its rollback runs last via defer —
-	// system state should be the last thing we touch on the way down.
-	var eg *egress.Egress
-	if *egressIface != "" {
-		subnet, err := netip.ParsePrefix(*egressSubnet)
-		if err != nil {
-			return fmt.Errorf("--egress-subnet: %w", err)
-		}
-		eg, err = egress.Open(*egressIface, subnet)
-		if err != nil {
-			return fmt.Errorf("egress setup: %w", err)
-		}
-		defer func() {
-			if err := eg.Close(); err != nil {
-				log.Printf("WARN: egress cleanup: %v", err)
-			}
-		}()
-		log.Printf("egress: NAT %s → %s via pf anchor %q, ip.forwarding=1",
-			subnet, *egressIface, eg.Anchor())
-	}
-
-	peerMode := *listen != ""
-	var udpConn *net.UDPConn
-	// peer holds the address the next outbound UDP datagram will be sent to.
-	// It is seeded from --peer and then refreshed whenever a datagram arrives
-	// from a different (host, port) — this survives DHCP IP changes on the
-	// far side and is exactly the discovery model we need for hole punching.
-	var peer atomic.Pointer[net.UDPAddr]
-	if peerMode {
-		laddr, err := net.ResolveUDPAddr("udp", *listen)
-		if err != nil {
-			return fmt.Errorf("resolve --listen: %w", err)
-		}
-		initialPeer, err := net.ResolveUDPAddr("udp", *peerAddr)
-		if err != nil {
-			return fmt.Errorf("resolve --peer: %w", err)
-		}
-		peer.Store(initialPeer)
-		udpConn, err = net.ListenUDP("udp", laddr)
-		if err != nil {
-			return fmt.Errorf("listen udp: %w", err)
-		}
-		defer udpConn.Close()
-	}
-
-	tun, err := tunnel.Open(*localIP, *peerIP)
-	if err != nil {
-		return fmt.Errorf("open tunnel: %w", err)
-	}
-	log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), *localIP, *peerIP, tunnel.MTU)
-	if peerMode {
-		log.Printf("UDP listening on %s, forwarding to peer %s", udpConn.LocalAddr(), peer.Load())
-	}
-
-	rm := route.New(tun.Name())
-	for _, p := range prefixes {
-		if err := rm.Add(p); err != nil {
-			log.Printf("WARN: %v", err)
-			continue
-		}
-		log.Printf("route %s → %s", p, tun.Name())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// utun → UDP (or drop, if no peer)
-	tunErr := make(chan error, 1)
-	go func() {
-		for {
-			pkt, err := tun.Read()
-			if err != nil {
-				tunErr <- err
-				return
-			}
-			if len(pkt) == 0 {
-				continue
-			}
-			summary := packet.Summary(pkt)
-			action := "drop"
-			if peerMode {
-				if _, werr := udpConn.WriteToUDP(pkt, peer.Load()); werr != nil {
-					log.Printf("WARN: udp send: %v", werr)
-					action = "→peer-failed"
-				} else {
-					action = "→peer"
-				}
-			}
-			log.Printf("[%s] %s [%s]", tun.Name(), summary, action)
-		}
-	}()
-
-	// UDP → utun
-	udpErr := make(chan error, 1)
-	if peerMode {
-		go func() {
-			buf := make([]byte, tunnel.MTU)
-			for {
-				n, from, err := udpConn.ReadFromUDP(buf)
-				if err != nil {
-					udpErr <- err
-					return
-				}
-				if cur := peer.Load(); !sameUDPAddr(cur, from) {
-					log.Printf("peer address updated: %s → %s", cur, from)
-					peer.Store(from)
-				}
-				pkt := buf[:n]
-				summary := packet.Summary(pkt)
-				if werr := tun.Write(pkt); werr != nil {
-					log.Printf("WARN: utun write from %s: %v", from, werr)
-					log.Printf("[udp %s] %s [→utun-failed]", from, summary)
-				} else {
-					log.Printf("[udp %s] %s [→utun]", from, summary)
-				}
-			}
-		}()
-	}
-
-	select {
-	case <-ctx.Done():
-		log.Println("shutting down…")
-	case err := <-tunErr:
-		log.Printf("tun read stopped: %v", err)
-	case err := <-udpErr:
-		log.Printf("udp read stopped: %v", err)
-	}
-
-	if errs := rm.Cleanup(); len(errs) > 0 {
-		for _, e := range errs {
-			log.Printf("WARN: %v", e)
-		}
-	}
-	if err := tun.Close(); err != nil {
-		log.Printf("WARN: tun close: %v", err)
+	<-ctx.Done()
+	log.Println("shutting down…")
+	if err := eng.Stop(); err != nil {
+		return fmt.Errorf("stop: %w", err)
 	}
 	return nil
 }
 
-func sameUDPAddr(a, b *net.UDPAddr) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.Port == b.Port && a.IP.Equal(b.IP)
-}
-
-func parseIntercept(s string) ([]netip.Prefix, error) {
-	var prefixes []netip.Prefix
-	for _, raw := range strings.Split(s, ",") {
-		item := strings.TrimSpace(raw)
-		if item == "" {
-			continue
-		}
-		if p, err := netip.ParsePrefix(item); err == nil {
-			prefixes = append(prefixes, p)
-			continue
-		}
-		if a, err := netip.ParseAddr(item); err == nil {
-			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
-			continue
-		}
-		ips, err := net.LookupIP(item)
-		if err != nil {
-			return nil, fmt.Errorf("resolve %q: %w", item, err)
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("resolve %q: no records", item)
-		}
-		for _, ip := range ips {
-			a, ok := netip.AddrFromSlice(ip)
-			if !ok {
-				continue
-			}
-			a = a.Unmap()
-			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
-			log.Printf("resolved %s → %s", item, a)
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
 		}
 	}
-	return prefixes, nil
+	return out
 }
