@@ -7,7 +7,33 @@ $(function () {
   const $list = $('#intercept-list');
   const $log = $('#log');
   const $interceptInput = $('#intercept-input');
-  const $hint = $('#intercept-hint');
+
+  // The intercept list is owned by the frontend and persisted in
+  // localStorage. The engine has its own copy while running (the "live"
+  // entries with IDs and resolved prefixes) — we reconcile the two on
+  // every status refresh.
+  const INTERCEPTS_KEY = 'f2f:intercepts';
+  function getStoredSpecs() {
+    try {
+      const raw = localStorage.getItem(INTERCEPTS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string') : [];
+    } catch (_) { return []; }
+  }
+  function setStoredSpecs(arr) {
+    localStorage.setItem(INTERCEPTS_KEY, JSON.stringify(arr));
+  }
+  function addStoredSpec(spec) {
+    const list = getStoredSpecs();
+    if (!list.includes(spec)) list.push(spec);
+    setStoredSpecs(list);
+  }
+  function removeStoredSpec(spec) {
+    setStoredSpecs(getStoredSpecs().filter((s) => s !== spec));
+  }
+
+  let liveIntercepts = []; // last seen from /api/status
 
   // Persist config form values across reloads. Each field has a localStorage
   // key; we restore on load and save on every change. Engine-driven updates
@@ -50,9 +76,6 @@ $(function () {
       $btnStart.addClass('hidden');
       $btnStop.removeClass('hidden');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', true);
-      $hint.addClass('hidden');
-      $interceptInput.prop('disabled', false);
-      $btnAdd.prop('disabled', false);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
         '#local-ip': s.local_ip,
@@ -73,12 +96,13 @@ $(function () {
       $btnStart.removeClass('hidden');
       $btnStop.addClass('hidden');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', false);
-      $hint.removeClass('hidden');
-      $interceptInput.prop('disabled', true);
-      $btnAdd.prop('disabled', true);
     }
+    // Intercept management is always available — list lives in the browser.
+    $interceptInput.prop('disabled', false);
+    $btnAdd.prop('disabled', false);
 
-    renderIntercepts(s.intercepts || []);
+    liveIntercepts = s.intercepts || [];
+    renderIntercepts();
 
     $('#tx-packets').text(s.tx_packets || 0);
     $('#rx-packets').text(s.rx_packets || 0);
@@ -86,29 +110,70 @@ $(function () {
     $('#rx-bytes').text(fmtBytes(s.rx_bytes || 0));
   }
 
-  function renderIntercepts(items) {
+  function renderIntercepts() {
     $list.empty();
+    const stored = getStoredSpecs();
+    const liveBySpec = {};
+    liveIntercepts.forEach((l) => { liveBySpec[l.spec] = l; });
+
+    const seen = new Set();
+    const items = stored.map((spec) => {
+      seen.add(spec);
+      const live = liveBySpec[spec];
+      return { spec, live: live || null };
+    });
+    // Engine-side intercepts that aren't tracked locally (rare — e.g.,
+    // started from CLI with --intercept). Show them too so they're visible.
+    liveIntercepts.forEach((l) => {
+      if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
+    });
+
     if (items.length === 0) {
-      $list.append('<div class="text-sm text-gray-500">No intercepts.</div>');
+      $list.append('<div class="text-sm text-gray-500">No intercepts yet. Add one below.</div>');
       return;
     }
+
     items.forEach((it) => {
       const $row = $('<div class="flex items-center justify-between bg-gray-50 rounded p-3">');
       const $info = $('<div>');
-      $info.append($('<div class="font-medium text-sm">').text(it.spec));
-      $info.append($('<div class="text-xs text-gray-500 font-mono">').text((it.prefixes || []).join(', ')));
+      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
+      $title.append($('<span>').text(it.spec));
+      if (it.live) {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
+      } else {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
+      }
+      if (it.orphan) {
+        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
+      }
+      $info.append($title);
+      const prefixes = it.live ? (it.live.prefixes || []) : [];
+      if (prefixes.length) {
+        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+      }
       $row.append($info);
 
       const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
-      $btn.on('click', () => {
-        $.ajax({ url: '/api/intercepts/' + encodeURIComponent(it.id), method: 'DELETE' })
-          .done(refreshStatus)
-          .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
-      });
+      $btn.on('click', () => removeSpec(it.spec, it.live));
       $row.append($btn);
 
       $list.append($row);
     });
+  }
+
+  function removeSpec(spec, live) {
+    removeStoredSpec(spec);
+    const after = () => { refreshStatus(); };
+    if (live && live.id) {
+      $.ajax({ url: '/api/intercepts/' + encodeURIComponent(live.id), method: 'DELETE' })
+        .done(after)
+        .fail((xhr) => {
+          alert('Remove failed: ' + errorOf(xhr));
+          after();
+        });
+    } else {
+      renderIntercepts();
+    }
   }
 
   function loadIfaces() {
@@ -131,7 +196,9 @@ $(function () {
       peer_ip: $('#peer-ip').val().trim(),
       listen: $('#listen').val().trim(),
       peer: $('#peer-udp').val().trim(),
-      intercepts: [],
+      // Seed the engine with whatever the user has saved locally — that
+      // way pending intercepts become active immediately on Start.
+      intercepts: getStoredSpecs(),
       egress_iface: $('#egress-iface').val(),
       egress_subnet: $('#egress-subnet').val().trim()
     };
@@ -163,15 +230,24 @@ $(function () {
     const specs = raw.split(',').map((s) => s.trim()).filter(Boolean);
     if (specs.length === 0) return;
 
+    // Save locally first — this is the source of truth for the next Start
+    // and survives engine restarts.
+    specs.forEach(addStoredSpec);
+    $interceptInput.val('');
+    renderIntercepts();
+
+    // If the engine is currently running, apply the new entries live so
+    // the user doesn't have to Stop/Start.
+    const stoppedNow = $btnStart.is(':visible');
+    if (stoppedNow) return;
+
     const errors = [];
     const requests = specs.map((spec) =>
       addOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`))
     );
-
     $.when(...requests).always(() => {
-      $interceptInput.val('');
       refreshStatus();
-      if (errors.length) alert('Some intercepts failed:\n' + errors.join('\n'));
+      if (errors.length) alert('Some intercepts failed to apply live:\n' + errors.join('\n'));
     });
   });
 
