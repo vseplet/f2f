@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>f2f-mac</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="/vendor/tailwind.min.js"></script>
+  <script src="/vendor/jquery.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <div class="max-w-5xl mx-auto p-6">
+    <header class="mb-6 flex items-center justify-between">
+      <h1 class="text-2xl font-bold tracking-tight">f2f-mac</h1>
+      <div id="status-indicator" class="px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700">loading…</div>
+    </header>
+
+    <section class="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 class="text-lg font-semibold mb-4">Configuration</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Local tunnel IP</label>
+          <input id="local-ip" type="text" value="10.99.0.1" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Peer tunnel IP</label>
+          <input id="peer-ip" type="text" value="10.99.0.2" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Listen UDP</label>
+          <input id="listen" type="text" value=":9000" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder=":9000">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Peer UDP</label>
+          <input id="peer-udp" type="text" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder="host:9000">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Egress interface (NAT to internet)</label>
+          <select id="egress-iface" class="w-full border border-gray-300 rounded px-3 py-2 text-sm bg-white">
+            <option value="">— disabled —</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Egress subnet</label>
+          <input id="egress-subnet" type="text" value="10.99.0.0/24" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+        </div>
+      </div>
+      <div class="mt-6 flex gap-3">
+        <button id="btn-start" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Start</button>
+        <button id="btn-stop" class="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded font-medium hidden">Stop</button>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 class="text-lg font-semibold mb-4">Intercepts</h2>
+      <div id="intercept-list" class="space-y-2 mb-4"></div>
+      <div class="flex gap-2">
+        <input id="intercept-input" type="text" placeholder="ya.ru, 1.1.1.1, 10.0.0.0/24" class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm">
+        <button id="btn-add-intercept" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>
+      </div>
+      <p id="intercept-hint" class="text-xs text-gray-500 mt-2 hidden">Start the engine to add intercepts.</p>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 class="text-lg font-semibold mb-4">Counters</h2>
+      <div id="counters" class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx packets</div><div class="font-mono text-base" id="tx-packets">0</div></div>
+        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx bytes</div><div class="font-mono text-base" id="tx-bytes">0</div></div>
+        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx packets</div><div class="font-mono text-base" id="rx-packets">0</div></div>
+        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx bytes</div><div class="font-mono text-base" id="rx-bytes">0</div></div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold">Log</h2>
+        <button id="btn-clear-log" class="text-xs text-gray-500 hover:text-gray-800">clear</button>
+      </div>
+      <pre id="log" class="bg-gray-900 text-green-300 font-mono text-xs p-3 rounded h-96 overflow-y-auto whitespace-pre-wrap"></pre>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

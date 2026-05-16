@@ -11,16 +11,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/vseplet/f2f/source/mac/internal/engine"
+	"github.com/vseplet/f2f/source/mac/internal/web"
 )
 
 func main() {
@@ -33,6 +37,10 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		if err := runCmd(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+	case "ui":
+		if err := uiCmd(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
 	case "-h", "--help", "help":
@@ -51,6 +59,10 @@ Usage:
   sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
                    [--egress-iface en0 [--egress-subnet 10.99.0.0/24]]
+  sudo f2f-mac ui  [--bind 127.0.0.1:8080]
+
+  ui              Start the local web UI. Configure and operate the engine
+                  from a browser. Same engine as 'run', just driven over HTTP.
 
   --intercept     comma-separated IPs/CIDRs/domains routed into utun.
                   Omit on the egress side.
@@ -115,6 +127,45 @@ func runCmd(args []string) error {
 	log.Println("shutting down…")
 	if err := eng.Stop(); err != nil {
 		return fmt.Errorf("stop: %w", err)
+	}
+	return nil
+}
+
+func uiCmd(args []string) error {
+	fs := flag.NewFlagSet("ui", flag.ExitOnError)
+	bind := fs.String("bind", "127.0.0.1:8080", "HTTP bind address; 127.0.0.1 by default to keep the UI local")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	eng := engine.New()
+	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
+
+	srv := web.New(eng, *bind)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("UI listening on http://%s", *bind)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("shutting down…")
+	case err := <-serverErr:
+		log.Printf("HTTP server error: %v", err)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutCtx)
+	if err := eng.Stop(); err != nil {
+		log.Printf("WARN: engine stop: %v", err)
 	}
 	return nil
 }
