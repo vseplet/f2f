@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/vseplet/f2f/source/mac/internal/packet"
@@ -93,16 +94,21 @@ func runCmd(args []string) error {
 
 	peerMode := *listen != ""
 	var udpConn *net.UDPConn
-	var peer *net.UDPAddr
+	// peer holds the address the next outbound UDP datagram will be sent to.
+	// It is seeded from --peer and then refreshed whenever a datagram arrives
+	// from a different (host, port) — this survives DHCP IP changes on the
+	// far side and is exactly the discovery model we need for hole punching.
+	var peer atomic.Pointer[net.UDPAddr]
 	if peerMode {
 		laddr, err := net.ResolveUDPAddr("udp", *listen)
 		if err != nil {
 			return fmt.Errorf("resolve --listen: %w", err)
 		}
-		peer, err = net.ResolveUDPAddr("udp", *peerAddr)
+		initialPeer, err := net.ResolveUDPAddr("udp", *peerAddr)
 		if err != nil {
 			return fmt.Errorf("resolve --peer: %w", err)
 		}
+		peer.Store(initialPeer)
 		udpConn, err = net.ListenUDP("udp", laddr)
 		if err != nil {
 			return fmt.Errorf("listen udp: %w", err)
@@ -116,7 +122,7 @@ func runCmd(args []string) error {
 	}
 	log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), *localIP, *peerIP, tunnel.MTU)
 	if peerMode {
-		log.Printf("UDP listening on %s, forwarding to peer %s", udpConn.LocalAddr(), peer)
+		log.Printf("UDP listening on %s, forwarding to peer %s", udpConn.LocalAddr(), peer.Load())
 	}
 
 	rm := route.New(tun.Name())
@@ -146,7 +152,7 @@ func runCmd(args []string) error {
 			summary := packet.Summary(pkt)
 			action := "drop"
 			if peerMode {
-				if _, werr := udpConn.WriteToUDP(pkt, peer); werr != nil {
+				if _, werr := udpConn.WriteToUDP(pkt, peer.Load()); werr != nil {
 					log.Printf("WARN: udp send: %v", werr)
 					action = "→peer-failed"
 				} else {
@@ -167,6 +173,10 @@ func runCmd(args []string) error {
 				if err != nil {
 					udpErr <- err
 					return
+				}
+				if cur := peer.Load(); !sameUDPAddr(cur, from) {
+					log.Printf("peer address updated: %s → %s", cur, from)
+					peer.Store(from)
 				}
 				pkt := buf[:n]
 				summary := packet.Summary(pkt)
@@ -198,6 +208,13 @@ func runCmd(args []string) error {
 		log.Printf("WARN: tun close: %v", err)
 	}
 	return nil
+}
+
+func sameUDPAddr(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
 func parseIntercept(s string) ([]netip.Prefix, error) {
