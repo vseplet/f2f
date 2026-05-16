@@ -214,21 +214,30 @@ func (e *Engine) Stop() error {
 	e.mu.Unlock()
 
 	cancel()
-	// Closing tun/udp aborts the blocking Read calls in the workers.
-	if tun != nil {
-		_ = tun.Close()
-	}
+	// Close UDP first; this aborts the peerToTun worker. It is independent
+	// of utun and routes, so it's safe to do early.
 	if udp != nil {
 		_ = udp.Close()
 	}
-	e.workers.Wait()
 
 	var errs []error
+	// Routes have to be deleted *while utun is still up*. Once tun.Close()
+	// removes the interface, the kernel evicts its routes anyway, but our
+	// `-interface utunN` delete commands then fail with "bad address" and
+	// (more importantly) our -reject routes — which live on lo0, not on
+	// utun — would never get deleted.
 	if routes != nil {
 		for _, err := range routes.Cleanup() {
 			errs = append(errs, err)
 		}
 	}
+
+	// Now tear utun down. The tunToPeer worker will see Read fail and exit.
+	if tun != nil {
+		_ = tun.Close()
+	}
+	e.workers.Wait()
+
 	if egr != nil {
 		if err := egr.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("egress: %w", err))
