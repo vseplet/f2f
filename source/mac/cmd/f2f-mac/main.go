@@ -2,16 +2,12 @@
 
 // f2f-mac is the macOS-side CLI for the f2f UDP tunnel.
 //
-// Two subcommands:
+// The `run` subcommand opens a utun interface, optionally installs host
+// routes for --intercept, and (when --listen + --peer are set) shuttles
+// packets between utun and a UDP peer. The exact same binary plays both
+// ends of the tunnel; the only difference is which flags you pass.
 //
-//	run   opens a utun interface, installs host routes for --intercept,
-//	      and (when --peer is set) shuttles packets between utun and a
-//	      UDP peer.
-//	echo  UDP-only debug helper. Receives a packet, rewrites it as an
-//	      ICMP Echo Reply, sends it back. Used as the "other end" of the
-//	      tunnel during local two-process testing.
-//
-// run needs sudo (utun + routing). echo does not.
+// run needs sudo (utun + routing).
 package main
 
 import (
@@ -27,7 +23,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/vseplet/f2f/source/mac/internal/icmp"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
@@ -45,10 +40,6 @@ func main() {
 		if err := runCmd(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
-	case "echo":
-		if err := echoCmd(os.Args[2:]); err != nil {
-			log.Fatal(err)
-		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -62,19 +53,23 @@ func usage() {
 	fmt.Fprint(os.Stderr, `f2f-mac — macOS-side traffic interceptor
 
 Usage:
-  sudo f2f-mac run --intercept <list> [--listen :PORT --peer HOST:PORT]
-                   [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2] [--echo-icmp]
-  f2f-mac echo [--listen :PORT]
+  sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
+                   [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
 
-Examples:
-  # Local two-process loop (no internet involved):
-  sudo f2f-mac run  --intercept 198.51.100.5 --listen :9000 --peer 127.0.0.1:9001
-       f2f-mac echo --listen :9001
-  ping 198.51.100.5
+  --intercept   comma-separated IPs/CIDRs/domains routed into utun.
+                Optional — omit on the egress side.
+  --listen      UDP address to receive from peer (e.g. :9000).
+  --peer        UDP address of the remote peer (e.g. 10.0.0.5:9000).
 
-  # Single-process test (no peer):
-  sudo f2f-mac run --intercept 1.1.1.1 --echo-icmp
-  ping 1.1.1.1
+Example (symmetric two-instance setup):
+  # A (ingress side, routes some IPs into the tunnel):
+  sudo f2f-mac run --intercept 198.51.100.5 \
+                   --local-ip 10.99.0.1 --peer-ip 10.99.0.2 \
+                   --listen :9000 --peer 10.0.0.5:9000
+
+  # B (egress side, no intercept yet — just a tunnel endpoint):
+  sudo f2f-mac run --local-ip 10.99.0.2 --peer-ip 10.99.0.1 \
+                   --listen :9000 --peer A_PUBLIC_IP:9000
 `)
 }
 
@@ -83,14 +78,10 @@ func runCmd(args []string) error {
 	intercept := fs.String("intercept", "", "comma-separated list of IPs, CIDRs, and domains to route into the tunnel")
 	localIP := fs.String("local-ip", "10.99.0.1", "local end of the point-to-point address on utun")
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
-	echoICMP := fs.Bool("echo-icmp", false, "with no --peer: reply to ICMP Echo Requests locally instead of dropping them")
-	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000); enables peer mode together with --peer")
-	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001); enables peer mode together with --listen")
+	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000); pair with --peer to enable peer mode")
+	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001); pair with --listen to enable peer mode")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	if strings.TrimSpace(*intercept) == "" {
-		return errors.New("--intercept is required")
 	}
 	if (*listen == "") != (*peerAddr == "") {
 		return errors.New("--listen and --peer must both be set or both be empty")
@@ -98,9 +89,6 @@ func runCmd(args []string) error {
 	prefixes, err := parseIntercept(*intercept)
 	if err != nil {
 		return err
-	}
-	if len(prefixes) == 0 {
-		return errors.New("no IPs to intercept after parsing --intercept")
 	}
 
 	peerMode := *listen != ""
@@ -143,7 +131,7 @@ func runCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// utun → (UDP | local echo | drop)
+	// utun → UDP (or drop, if no peer)
 	tunErr := make(chan error, 1)
 	go func() {
 		for {
@@ -157,20 +145,12 @@ func runCmd(args []string) error {
 			}
 			summary := packet.Summary(pkt)
 			action := "drop"
-			switch {
-			case peerMode:
+			if peerMode {
 				if _, werr := udpConn.WriteToUDP(pkt, peer); werr != nil {
 					log.Printf("WARN: udp send: %v", werr)
 					action = "→peer-failed"
 				} else {
 					action = "→peer"
-				}
-			case *echoICMP && icmp.MakeEchoReply(pkt):
-				if werr := tun.Write(pkt); werr != nil {
-					log.Printf("WARN: write reply: %v", werr)
-					action = "echo-failed"
-				} else {
-					action = "echo"
 				}
 			}
 			log.Printf("[%s] %s [%s]", tun.Name(), summary, action)
@@ -216,60 +196,6 @@ func runCmd(args []string) error {
 	}
 	if err := tun.Close(); err != nil {
 		log.Printf("WARN: tun close: %v", err)
-	}
-	return nil
-}
-
-func echoCmd(args []string) error {
-	fs := flag.NewFlagSet("echo", flag.ExitOnError)
-	listen := fs.String("listen", ":9001", "UDP address to listen on")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	laddr, err := net.ResolveUDPAddr("udp", *listen)
-	if err != nil {
-		return fmt.Errorf("resolve --listen: %w", err)
-	}
-	conn, err := net.ListenUDP("udp", laddr)
-	if err != nil {
-		return fmt.Errorf("listen udp: %w", err)
-	}
-	defer conn.Close()
-	log.Printf("echo: UDP listening on %s", conn.LocalAddr())
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	readErr := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, from, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				readErr <- err
-				return
-			}
-			pkt := buf[:n]
-			summary := packet.Summary(pkt)
-			action := "drop-not-echo"
-			if icmp.MakeEchoReply(pkt) {
-				if _, werr := conn.WriteToUDP(pkt, from); werr != nil {
-					log.Printf("WARN: send reply to %s: %v", from, werr)
-					action = "echo-failed"
-				} else {
-					action = "echo"
-				}
-			}
-			log.Printf("[udp %s] %s [%s]", from, summary, action)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Println("shutting down…")
-	case err := <-readErr:
-		log.Printf("udp read stopped: %v", err)
 	}
 	return nil
 }
