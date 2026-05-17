@@ -1,0 +1,49 @@
+# fly.io config for f2f-camp (rendezvous server).
+#
+# State is in-memory and per-process. Two machines would split peer
+# registries — A's "hello" lands on machine-1, B's on machine-2, they
+# never see each other. So: pinned to one machine in one region.
+# When we need to scale, switch to sticky routing by room hash via
+# `fly-replay` header or move state to Redis.
+
+app = "f2f"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Never auto-stop — peers need always-on rendezvous. auto_start kept on
+  # so a manual `flyctl machines stop` is still recoverable.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+    protocol = "http"
+
+# UDP service for STUN-like reflexive address discovery. Lets peers behind
+# symmetric NAT learn the public IP:port that their UDP socket actually
+# maps to from the outside, which the WebSocket-only path can't tell them.
+[[services]]
+  protocol = "udp"
+  internal_port = 3478
+
+  [[services.ports]]
+    port = 3478
+
+[deploy]
+  # Single instance + stateful — accept ~5–10s downtime per deploy
+  # rather than running two machines briefly during rollover.
+  strategy = "immediate"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
