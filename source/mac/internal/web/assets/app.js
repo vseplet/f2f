@@ -1,4 +1,19 @@
 $(function () {
+  // Tab switching. Kept dead-simple so it can't possibly break the tunnel
+  // tab's existing wiring — we only toggle visibility classes.
+  $('.tab-btn').on('click', function () {
+    const tab = $(this).data('tab');
+    $('.tab-btn')
+      .removeClass('border-blue-500 text-blue-600 bg-blue-50')
+      .addClass('border-transparent text-gray-600');
+    $(this)
+      .removeClass('border-transparent text-gray-600')
+      .addClass('border-blue-500 text-blue-600 bg-blue-50');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-' + tab).removeClass('hidden');
+    $(document).trigger('f2f:tab-changed', [tab]);
+  });
+
   const $status = $('#status-indicator');
   const $btnStart = $('#btn-start');
   const $btnStop = $('#btn-stop');

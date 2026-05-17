@@ -5,15 +5,19 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vseplet/f2f/source/mac/internal/engine"
@@ -27,10 +31,20 @@ type Server struct {
 	engine *engine.Engine
 	addr   string
 	srv    *http.Server
+
+	signals    *signalHub
+	signalHTTP *http.Client
 }
 
 func New(eng *engine.Engine, addr string) *Server {
-	return &Server{engine: eng, addr: addr}
+	return &Server{
+		engine:  eng,
+		addr:    addr,
+		signals: newSignalHub(),
+		signalHTTP: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}
 }
 
 // Addr returns the configured bind address.
@@ -74,6 +88,161 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+
+	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
+	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
+	// verbatim; only the browsers care about their contents.
+	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
+	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
+	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
+}
+
+// signalHub is a tiny in-memory broadcaster. Every browser connected to
+// /api/signal/stream gets its own channel; signals arriving from the peer
+// are fanned out to all of them.
+type signalHub struct {
+	mu          sync.Mutex
+	subscribers map[chan []byte]struct{}
+}
+
+func newSignalHub() *signalHub {
+	return &signalHub{subscribers: map[chan []byte]struct{}{}}
+}
+
+func (h *signalHub) subscribe() (<-chan []byte, func()) {
+	ch := make(chan []byte, 32)
+	h.mu.Lock()
+	h.subscribers[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch, func() {
+		h.mu.Lock()
+		if _, ok := h.subscribers[ch]; ok {
+			delete(h.subscribers, ch)
+			close(ch)
+		}
+		h.mu.Unlock()
+	}
+}
+
+func (h *signalHub) broadcast(data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subscribers {
+		select {
+		case ch <- data:
+		default:
+			// Subscriber too slow; drop. Browsers will reconnect on stream
+			// error if they really fell behind.
+		}
+	}
+}
+
+// mdnsHostCandidateRE matches the address inside a WebRTC ICE candidate
+// of type "host" that uses an mDNS hostname (e.g. "abc-123.local"). Chrome
+// and Firefox both mask local IPs this way for privacy, which breaks our
+// no-STUN setup because *.local names are only resolvable on the
+// originating machine. We rewrite those addresses to our tunnel IP on the
+// way out, so the peer sees a candidate it can actually reach.
+var mdnsHostCandidateRE = regexp.MustCompile(`(?i)((?:udp|tcp)\s+\d+\s+)([A-Za-z0-9.-]+\.local)(\s+\d+\s+typ\s+host)`)
+
+func rewriteMDNS(body []byte, tunnelIP string) []byte {
+	if tunnelIP == "" {
+		return body
+	}
+	return mdnsHostCandidateRE.ReplaceAll(body, []byte("${1}"+tunnelIP+"${3}"))
+}
+
+// handleSignalOutbox accepts a JSON signalling message from the local
+// browser and forwards it as-is to the peer's /api/signal/inbox over the
+// tunnel. The peer IP comes from the engine config; the port is assumed
+// to match ours (both sides run the UI on the same port).
+func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	st := s.engine.Status()
+	if !st.Running || st.PeerIP == "" {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running or peer IP unknown"))
+		return
+	}
+	// Strip mDNS masking from any host candidates before forwarding, so the
+	// peer's WebRTC stack sees our real tunnel IP and can actually pair.
+	body = rewriteMDNS(body, st.LocalIP)
+	_, port, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
+		return
+	}
+	url := "http://" + net.JoinHostPort(st.PeerIP, port) + "/api/signal/inbox"
+	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.signalHTTP.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("forward to peer: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("peer returned %s", resp.Status))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSignalInbox receives forwarded signalling messages from the peer
+// and broadcasts them to local browser subscribers.
+func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.signals.broadcast(body)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSignalStream is an SSE endpoint so the browser can receive
+// signalling messages from the peer.
+func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.signals.subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 // topologyNode and topologyEdge feed the d3 force graph in the UI. The
