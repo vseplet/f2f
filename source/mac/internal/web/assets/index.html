@@ -7,18 +7,20 @@
   <script src="/vendor/tailwind.min.js"></script>
   <script src="/vendor/jquery.min.js"></script>
   <script src="/vendor/d3.min.js"></script>
+  <link rel="stylesheet" href="/audio.css">
 </head>
-<body class="bg-gray-100 min-h-screen">
+<body class="min-h-screen" style="background:#0c0a08;background-image:radial-gradient(circle,#1a1816 1px,transparent 1px);background-size:24px 24px">
   <div class="max-w-5xl mx-auto p-6">
-    <header class="mb-6 flex items-center justify-between">
-      <h1 class="text-2xl font-bold tracking-tight">f2f-mac</h1>
-      <div id="status-indicator" class="px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700">loading…</div>
-    </header>
-
-    <nav class="bg-white rounded-lg shadow mb-6 flex overflow-hidden">
-      <button data-tab="tunnel" class="tab-btn flex-1 px-6 py-3 font-medium text-sm border-b-2 border-blue-500 text-blue-600 bg-blue-50">Tunnel</button>
-      <button data-tab="audio" class="tab-btn flex-1 px-6 py-3 font-medium text-sm border-b-2 border-transparent text-gray-600 hover:text-gray-800 hover:bg-gray-50">Audio</button>
-    </nav>
+    <div class="ax-frame ax-tabbar">
+      <div class="ax-header">
+        <div class="ax-tabs">
+          <button type="button" data-tab="tunnel" class="ax-tab ax-tab-active">tunnel</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="audio" class="ax-tab">call<span class="ax-star" id="ax-star"> *</span></button>
+        </div>
+        <div id="status-indicator" class="ax-status ax-status-stopped">loading…</div>
+      </div>
+    </div>
 
     <div id="tab-tunnel" class="tab-panel">
     <section class="bg-white rounded-lg shadow p-6 mb-6">
@@ -130,37 +132,97 @@
     </div><!-- /#tab-tunnel -->
 
     <div id="tab-audio" class="tab-panel hidden">
-      <section class="bg-white rounded-lg shadow p-6">
-        <div class="flex items-center justify-between mb-6">
-          <h2 class="text-lg font-semibold">Audio call</h2>
-          <span id="audio-status" class="text-sm text-gray-500">idle</span>
+      <div class="ax-frame">
+        <div class="ax-panes">
+          <div class="ax-pane" id="ax-pane-you" data-pane="you">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-you-host">you @ localhost</span></span>
+            </div>
+            <video id="ax-video-you" autoplay muted playsinline></video>
+            <div class="ax-cam-off">
+              <svg viewBox="0 0 40 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="26" height="20" rx="2" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M28 11L38 6v18l-10-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              </svg>
+              <span>camera off</span>
+            </div>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-you">—</span>
+            </div>
+          </div>
+
+          <div class="ax-pane" id="ax-pane-peer" data-pane="peer">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-peer-host">peer @ —</span></span>
+            </div>
+            <video id="ax-video-peer" autoplay playsinline></video>
+            <div class="ax-cam-off">
+              <svg viewBox="0 0 40 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="26" height="20" rx="2" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M28 11L38 6v18l-10-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              </svg>
+              <span>camera off</span>
+            </div>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-peer">—</span>
+            </div>
+          </div>
         </div>
 
-        <button id="audio-toggle-btn" class="w-full px-6 py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium text-lg">
-          Call peer
-        </button>
+        <div class="ax-db">
+          <span class="ax-db-min">—12 dB</span>
+          <div class="ax-db-bars" id="ax-db-bars"></div>
+          <span class="ax-db-max">+6</span>
+        </div>
 
-        <div id="audio-controls" class="hidden flex items-center gap-4 mt-5">
-          <button id="audio-mic-btn" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded font-medium text-sm">
-            Mute mic
+        <div class="ax-controls">
+          <button id="ax-call-btn" class="ax-btn ax-btn-call">
+            <span class="ax-btn-state">▶</span>
+            <span class="ax-btn-label">call peer</span>
+            <span class="ax-btn-meta" id="ax-call-meta"></span>
+            <span class="ax-btn-kbd ax-kbd">↵</span>
           </button>
-          <div class="flex-1 flex items-center gap-3">
-            <span class="text-sm text-gray-500 select-none">Volume</span>
-            <input id="audio-volume" type="range" min="0" max="100" value="80" class="flex-1">
-            <span id="audio-volume-label" class="text-sm text-gray-600 font-mono w-8 text-right">80</span>
+          <button id="ax-mic-btn" class="ax-btn ax-btn-mic" disabled>
+            <span class="ax-btn-state">●</span>
+            <span>mic</span>
+            <span class="ax-btn-kbd ax-kbd">m</span>
+          </button>
+          <button id="ax-cam-btn" class="ax-btn ax-btn-cam" disabled>
+            <span class="ax-btn-state">□</span>
+            <span>cam</span>
+            <span class="ax-btn-kbd ax-kbd">v</span>
+          </button>
+          <div class="ax-vol">
+            <span class="ax-vol-label">vol</span>
+            <div class="ax-vol-track" id="ax-vol-track">
+              <div class="ax-vol-fill" id="ax-vol-fill"></div>
+            </div>
+            <span class="ax-vol-value" id="ax-vol-value">80</span>
           </div>
         </div>
 
-        <audio id="audio-remote" autoplay class="hidden"></audio>
-
-        <details class="mt-6">
-          <summary class="cursor-pointer text-xs text-gray-500 select-none">Debug log</summary>
-          <div class="flex items-center justify-end mt-2 mb-1">
-            <button id="audio-clear-log" class="text-xs text-gray-500 hover:text-gray-800">clear</button>
+        <div class="ax-log">
+          <div class="ax-log-header">
+            <span>— stream · <span id="ax-log-count">0</span> lines</span>
+            <button id="ax-log-clear" class="ax-log-clear">clear <span class="ax-kbd">c</span></button>
           </div>
-          <pre id="audio-log" class="bg-gray-900 text-amber-200 font-mono text-xs p-3 rounded h-48 overflow-y-auto whitespace-pre-wrap"></pre>
-        </details>
-      </section>
+          <div class="ax-log-body" id="ax-log-body"></div>
+          <div class="ax-chat-input">
+            <span class="ax-chat-prompt">›</span>
+            <input id="ax-chat-input" type="text" autocomplete="off" placeholder="connect to chat" disabled />
+            <span class="ax-kbd">↵</span>
+          </div>
+        </div>
+
+        <div class="ax-footer">
+          <div class="ax-shortcuts">
+            <span class="ax-shortcut"><span class="ax-kbd">↵</span>call</span>
+            <span class="ax-shortcut"><span class="ax-kbd">m</span>mute</span>
+            <span class="ax-shortcut"><span class="ax-kbd">v</span>cam</span>
+            <span class="ax-shortcut"><span class="ax-kbd">⌘.</span>hang</span>
+          </div>
+        </div>
+      </div>
     </div><!-- /#tab-audio -->
   </div>
 

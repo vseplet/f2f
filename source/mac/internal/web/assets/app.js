@@ -1,14 +1,11 @@
 $(function () {
-  // Tab switching. Kept dead-simple so it can't possibly break the tunnel
-  // tab's existing wiring — we only toggle visibility classes.
-  $('.tab-btn').on('click', function () {
+  // Tab switching. The terminal-styled tabbar at the top is the only UI:
+  // we toggle .ax-tab-active on the clicked button and swap visible panels.
+  $('.ax-tab').on('click', function () {
     const tab = $(this).data('tab');
-    $('.tab-btn')
-      .removeClass('border-blue-500 text-blue-600 bg-blue-50')
-      .addClass('border-transparent text-gray-600');
-    $(this)
-      .removeClass('border-transparent text-gray-600')
-      .addClass('border-blue-500 text-blue-600 bg-blue-50');
+    if (!tab) return;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $(this).addClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-' + tab).removeClass('hidden');
     $(document).trigger('f2f:tab-changed', [tab]);
@@ -92,15 +89,30 @@ $(function () {
 
   const errorOf = (xhr) => (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || 'unknown error';
 
+  function setStatusPill(text, cls) {
+    $status.text(text).removeClass('ax-status-running ax-status-stopped ax-status-error').addClass(cls);
+  }
   function refreshStatus() {
-    $.getJSON('/api/status', applyStatus).fail(() => {
-      $status.text('API error').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-rose-200 text-rose-800');
-    });
+    $.getJSON('/api/status', applyStatus).fail(() => setStatusPill('API error', 'ax-status-error'));
+  }
+
+  // Auto-start fires once after the first /api/status response that says
+  // the engine is stopped *and* we have a camp identity stored. After
+  // that, the user is in control via the Start/Stop buttons.
+  let autoStarted = false;
+  function maybeAutoStart(s) {
+    if (autoStarted || s.running) return;
+    const name = $('#camp-name').val().trim();
+    const room = $('#camp-room').val().trim();
+    if (!name || !room) return;
+    autoStarted = true;
+    $btnStart.click();
   }
 
   function applyStatus(s) {
+    maybeAutoStart(s);
     if (s.running) {
-      $status.text('Running · ' + (s.utun_name || '?')).removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-emerald-200 text-emerald-800');
+      setStatusPill('running · ' + (s.utun_name || '?'), 'ax-status-running');
       $btnStart.addClass('hidden');
       $btnStop.removeClass('hidden');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', true);
@@ -120,7 +132,7 @@ $(function () {
         }
       });
     } else {
-      $status.text('Stopped').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700');
+      setStatusPill('stopped', 'ax-status-stopped');
       $btnStart.removeClass('hidden');
       $btnStop.addClass('hidden');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', false);
