@@ -137,18 +137,20 @@ $(function () {
       $btnStop.addClass('hidden');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', false);
     }
-    // Camp status row.
+    // Camp status row — shown only when camp is actually active.
     const $campStatus = $('#camp-status');
     if (s.camp_active) {
       const lines = [
         `connected as ${s.camp_name}@${s.camp_room}`,
-        s.camp_reflex ? `our reflex: ${s.camp_reflex}` : '',
-        s.camp_peer_name ? `peer: ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
+        s.camp_reflex ? `reflex ${s.camp_reflex}` : '',
+        s.camp_peer_name ? `peer ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
       ].filter(Boolean);
-      $campStatus.text(lines.join('  ·  '));
+      $campStatus.text(lines.join(' · ')).addClass('live');
     } else {
-      $campStatus.text('');
+      $campStatus.text('').removeClass('live');
     }
+    // Identity meta in section title shows compact running indicator.
+    $('#identity-meta').text(s.running ? (s.utun_name || '') : '');
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
     $btnAdd.prop('disabled', false);
@@ -177,41 +179,34 @@ $(function () {
       const live = liveBySpec[spec];
       return { spec, live: live || null };
     });
-    // Engine-side intercepts that aren't tracked locally (rare — e.g.,
-    // started from CLI with --intercept). Show them too so they're visible.
     liveIntercepts.forEach((l) => {
       if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
     });
 
+    $('#intercept-meta').text(items.length);
+
     if (items.length === 0) {
-      $list.append('<div class="text-sm text-gray-500">No intercepts yet. Add one below.</div>');
+      $list.append('<div class="ax-list-empty">no intercepts. add one below.</div>');
       return;
     }
 
     items.forEach((it) => {
-      const $row = $('<div class="flex items-center justify-between bg-gray-50 rounded p-3">');
-      const $info = $('<div>');
-      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
-      $title.append($('<span>').text(it.spec));
-      if (it.live) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
-      } else {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
-      }
-      if (it.orphan) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
-      }
-      $info.append($title);
+      const $row = $('<div class="ax-list-item">');
+      $row.append('<span class="ax-list-icon">›</span>');
+      const $main = $('<div class="ax-list-main">');
+      const $spec = $('<div class="ax-list-spec">').text(it.spec);
+      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
+      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
+      if (it.orphan) $spec.append('<span class="ax-pill ax-pill-pending">unsaved</span>');
+      $main.append($spec);
       const prefixes = it.live ? (it.live.prefixes || []) : [];
       if (prefixes.length) {
-        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
       }
-      $row.append($info);
-
-      const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
+      $row.append($main);
+      const $btn = $('<button class="ax-list-remove">remove</button>');
       $btn.on('click', () => removeSpec(it.spec, it.live));
       $row.append($btn);
-
       $list.append($row);
     });
   }
@@ -251,35 +246,29 @@ $(function () {
       if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
     });
 
+    $('#allow-meta').text(items.length);
+
     if (items.length === 0) {
-      $allowList.append('<div class="text-sm text-gray-500">No filter — peer can reach any destination. Add an entry to switch to whitelist mode.</div>');
+      $allowList.append('<div class="ax-list-empty">no filter — peer can reach any destination through us.</div>');
       return;
     }
 
     items.forEach((it) => {
-      const $row = $('<div class="flex items-center justify-between bg-purple-50 rounded p-3">');
-      const $info = $('<div>');
-      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
-      $title.append($('<span>').text(it.spec));
-      if (it.live) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
-      } else {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
-      }
-      if (it.orphan) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
-      }
-      $info.append($title);
+      const $row = $('<div class="ax-list-item">');
+      $row.append('<span class="ax-list-icon">›</span>');
+      const $main = $('<div class="ax-list-main">');
+      const $spec = $('<div class="ax-list-spec">').text(it.spec);
+      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
+      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
+      $main.append($spec);
       const prefixes = it.live ? (it.live.prefixes || []) : [];
       if (prefixes.length) {
-        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
       }
-      $row.append($info);
-
-      const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
+      $row.append($main);
+      const $btn = $('<button class="ax-list-remove">remove</button>');
       $btn.on('click', () => removeAllowSpec(it.spec, it.live));
       $row.append($btn);
-
       $allowList.append($row);
     });
   }
@@ -595,7 +584,7 @@ $(function () {
       nodeEnter.append('text')
         .attr('text-anchor', 'middle')
         .attr('font-size', '12px')
-        .attr('fill', '#0f172a')
+        .attr('fill', '#9a8e7a')
         .attr('font-weight', '500')
         .style('pointer-events', 'none');
       nodeEnter.append('title');
