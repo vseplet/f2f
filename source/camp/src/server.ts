@@ -184,16 +184,23 @@ function handleHello(
     name,
     public_ip: publicIP,
     udp_port: msg.udp_port,
+    tunnel_ip: "", // filled by hub.join
     joined_at: Date.now(),
   });
   const peer: Peer = { ws, room, info };
-  const { existing } = hub.join(room, peer);
+  let joined;
+  try {
+    joined = hub.join(room, peer);
+  } catch (err) {
+    fail(ws, "room_full", (err as Error).message);
+    return;
+  }
   ws.data.peer = peer;
 
-  send(ws, { type: "welcome", you: info, room, peers: existing });
+  send(ws, { type: "welcome", you: info, room, peers: joined.existing });
   hub.broadcast(room, { type: "peer-joined", peer: info }, name);
   console.log(
-    `join: ${name}@${room} from ${publicIP}${info.udp_port ? `:${info.udp_port}` : ""}`,
+    `join: ${name}@${room} ${joined.tunnelIP} from ${publicIP}${info.udp_port ? `:${info.udp_port}` : ""}`,
   );
 }
 

@@ -11,6 +11,10 @@ export type PeerInfo = {
   // open and the peer's first `announce`.
   udp_port?: number;
   udp_endpoint?: string;
+  // Camp-assigned IP inside the room's virtual subnet (e.g. 10.99.0.3).
+  // The peer puts this on its local utun; other peers' tunnel_ip values
+  // are how it reaches them through the overlay.
+  tunnel_ip: string;
   joined_at: number;
 };
 

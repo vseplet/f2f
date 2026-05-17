@@ -17,51 +17,80 @@ export type SocketData = {
   peer: Peer | null;
 };
 
-export class Hub {
-  // room name → peer name → peer
-  private rooms = new Map<string, Map<string, Peer>>();
+// Each room is its own /24 overlay (10.99.0.0/24): peers reserve a
+// 10.99.0.X within the room when they join, and release it when they
+// leave. The 0th address is reserved as the subnet's network address;
+// .255 is reserved as broadcast. Two rooms can both use .1, .2 — they
+// never share a subnet between them at the wire level.
+const SUBNET_PREFIX = "10.99.0";
+const FIRST_HOST = 1;
+const LAST_HOST = 254;
 
-  // Add peer to its room. Returns the snapshot of peers already present
-  // (excluding the new one) so the caller can build the Welcome message
-  // before broadcasting peer-joined.
-  join(room: string, peer: Peer): { existing: PeerInfo[] } {
-    let r = this.rooms.get(room);
+type Room = {
+  peers: Map<string, Peer>;
+  allocated: Set<number>; // last octet of in-use IPs
+};
+
+export class Hub {
+  private rooms = new Map<string, Room>();
+
+  // Add peer to its room and assign a tunnel_ip from the room's pool.
+  // The chosen address is written back into peer.info.tunnel_ip so the
+  // caller sees it for the welcome message. Throws if the pool is full.
+  join(roomName: string, peer: Peer): { existing: PeerInfo[]; tunnelIP: string } {
+    let r = this.rooms.get(roomName);
     if (!r) {
-      r = new Map();
-      this.rooms.set(room, r);
+      r = { peers: new Map(), allocated: new Set() };
+      this.rooms.set(roomName, r);
     }
-    const existing = Array.from(r.values()).map((p) => p.info);
-    r.set(peer.info.name, peer);
-    return { existing };
+    const octet = this.nextOctet(r);
+    if (octet < 0) throw new Error(`room ${roomName} is full`);
+    r.allocated.add(octet);
+    const tunnelIP = `${SUBNET_PREFIX}.${octet}`;
+    peer.info.tunnel_ip = tunnelIP;
+    const existing = Array.from(r.peers.values()).map((p) => p.info);
+    r.peers.set(peer.info.name, peer);
+    return { existing, tunnelIP };
   }
 
-  // Remove peer from its room. Returns true if anything was removed.
-  // Empty rooms are dropped from the map so memory doesn't leak on
-  // long-lived servers.
-  leave(room: string, name: string): boolean {
-    const r = this.rooms.get(room);
+  private nextOctet(r: Room): number {
+    for (let i = FIRST_HOST; i <= LAST_HOST; i++) {
+      if (!r.allocated.has(i)) return i;
+    }
+    return -1;
+  }
+
+  // Remove peer from its room and release its tunnel_ip. Returns true if
+  // anything was removed. Empty rooms are dropped from the map so memory
+  // doesn't leak on long-lived servers.
+  leave(roomName: string, name: string): boolean {
+    const r = this.rooms.get(roomName);
     if (!r) return false;
-    const ok = r.delete(name);
-    if (r.size === 0) this.rooms.delete(room);
-    return ok;
+    const peer = r.peers.get(name);
+    if (!peer) return false;
+    r.peers.delete(name);
+    const octet = parseOctet(peer.info.tunnel_ip);
+    if (octet >= 0) r.allocated.delete(octet);
+    if (r.peers.size === 0) this.rooms.delete(roomName);
+    return true;
   }
 
   // Find a specific peer in a room (for direct signal forwarding).
-  get(room: string, name: string): Peer | undefined {
-    return this.rooms.get(room)?.get(name);
+  get(roomName: string, name: string): Peer | undefined {
+    return this.rooms.get(roomName)?.peers.get(name);
   }
 
   // True if a peer with this name already lives in the room.
-  has(room: string, name: string): boolean {
-    return this.rooms.get(room)?.has(name) ?? false;
+  has(roomName: string, name: string): boolean {
+    return this.rooms.get(roomName)?.peers.has(name) ?? false;
   }
 
   // Send a message to every peer in the room *except* the excluded one.
-  broadcast(room: string, msg: ServerMsg, excludeName?: string): void {
-    const r = this.rooms.get(room);
+  broadcast(roomName: string, msg: ServerMsg, excludeName?: string): void {
+    const r = this.rooms.get(roomName);
     if (!r) return;
     const data = JSON.stringify(msg);
-    for (const p of r.values()) {
+    for (const p of r.peers.values()) {
       if (p.info.name === excludeName) continue;
       try {
         p.ws.send(data);
@@ -75,9 +104,17 @@ export class Hub {
   // Snapshot of the whole hub — used by /api/stats for ops visibility.
   stats() {
     const rooms: Array<{ name: string; peers: string[] }> = [];
-    for (const [name, members] of this.rooms.entries()) {
-      rooms.push({ name, peers: Array.from(members.keys()) });
+    for (const [name, room] of this.rooms.entries()) {
+      rooms.push({ name, peers: Array.from(room.peers.keys()) });
     }
     return { rooms, total_peers: rooms.reduce((s, r) => s + r.peers.length, 0) };
   }
+}
+
+function parseOctet(ip: string | undefined): number {
+  if (!ip) return -1;
+  const parts = ip.split(".");
+  if (parts.length !== 4) return -1;
+  const n = Number(parts[3]);
+  return Number.isInteger(n) && n >= 0 && n <= 255 ? n : -1;
 }

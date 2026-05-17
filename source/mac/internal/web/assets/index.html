@@ -51,6 +51,29 @@
           <input id="egress-subnet" type="text" value="10.99.0.0/24" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
         </div>
       </div>
+      <details class="mt-6 border-t pt-4">
+        <summary class="cursor-pointer text-sm font-medium text-gray-700 select-none">Camp</summary>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">URL</label>
+            <input id="camp-url" type="text" value="wss://f2f-camp.fly.dev/ws" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">STUN</label>
+            <input id="camp-stun" type="text" value="f2f-camp.fly.dev:3478" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input id="camp-name" type="text" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder="vasya">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Room</label>
+            <input id="camp-room" type="text" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder="beer">
+          </div>
+        </div>
+        <div id="camp-status" class="text-xs text-gray-500 font-mono mt-3"></div>
+      </details>
+
       <div class="mt-6 flex gap-3">
         <button id="btn-start" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Start</button>
         <button id="btn-stop" class="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded font-medium hidden">Stop</button>

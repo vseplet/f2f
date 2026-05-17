@@ -69,6 +69,7 @@ $(function () {
   const FIELDS = [
     '#local-ip', '#peer-ip', '#listen', '#peer-udp',
     '#egress-iface', '#egress-subnet',
+    '#camp-url', '#camp-stun', '#camp-name', '#camp-room',
   ];
   const storageKey = (sel) => 'f2f:' + sel.slice(1);
   function restoreForm() {
@@ -102,7 +103,7 @@ $(function () {
       $status.text('Running · ' + (s.utun_name || '?')).removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-emerald-200 text-emerald-800');
       $btnStart.addClass('hidden');
       $btnStop.removeClass('hidden');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', true);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
         '#local-ip': s.local_ip,
@@ -122,7 +123,19 @@ $(function () {
       $status.text('Stopped').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700');
       $btnStart.removeClass('hidden');
       $btnStop.addClass('hidden');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', false);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', false);
+    }
+    // Camp status row.
+    const $campStatus = $('#camp-status');
+    if (s.camp_active) {
+      const lines = [
+        `connected as ${s.camp_name}@${s.camp_room}`,
+        s.camp_reflex ? `our reflex: ${s.camp_reflex}` : '',
+        s.camp_peer_name ? `peer: ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
+      ].filter(Boolean);
+      $campStatus.text(lines.join('  ·  '));
+    } else {
+      $campStatus.text('');
     }
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
@@ -343,7 +356,11 @@ $(function () {
       intercepts: getStoredSpecs(),
       inbound_allow: allows.get(),
       egress_iface: $('#egress-iface').val(),
-      egress_subnet: $('#egress-subnet').val().trim()
+      egress_subnet: $('#egress-subnet').val().trim(),
+      camp_url: $('#camp-url').val().trim(),
+      camp_stun: $('#camp-stun').val().trim(),
+      camp_name: $('#camp-name').val().trim(),
+      camp_room: $('#camp-room').val().trim(),
     };
     $.ajax({
       url: '/api/start',

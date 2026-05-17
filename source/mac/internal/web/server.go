@@ -316,14 +316,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type startRequest struct {
-	LocalIP       string   `json:"local_ip"`
-	PeerIP        string   `json:"peer_ip"`
-	Listen        string   `json:"listen"`
-	Peer          string   `json:"peer"`
-	Intercepts    []string `json:"intercepts"`
-	InboundAllow  []string `json:"inbound_allow"`
-	EgressIface   string   `json:"egress_iface"`
-	EgressSubnet  string   `json:"egress_subnet"`
+	LocalIP      string   `json:"local_ip"`
+	PeerIP       string   `json:"peer_ip"`
+	Listen       string   `json:"listen"`
+	Peer         string   `json:"peer"`
+	Intercepts   []string `json:"intercepts"`
+	InboundAllow []string `json:"inbound_allow"`
+	EgressIface  string   `json:"egress_iface"`
+	EgressSubnet string   `json:"egress_subnet"`
+	CampURL      string   `json:"camp_url"`
+	CampStun     string   `json:"camp_stun"`
+	CampName     string   `json:"camp_name"`
+	CampRoom     string   `json:"camp_room"`
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -333,14 +337,30 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:       req.LocalIP,
-		PeerIP:        req.PeerIP,
-		Listen:        req.Listen,
-		Peer:          req.Peer,
-		Intercepts:    req.Intercepts,
-		InboundAllow:  req.InboundAllow,
-		EgressIface:   req.EgressIface,
-		EgressSubnet:  req.EgressSubnet,
+		LocalIP:      req.LocalIP,
+		PeerIP:       req.PeerIP,
+		Listen:       req.Listen,
+		Peer:         req.Peer,
+		Intercepts:   req.Intercepts,
+		InboundAllow: req.InboundAllow,
+		EgressIface:  req.EgressIface,
+		EgressSubnet: req.EgressSubnet,
+	}
+	if req.CampName != "" && req.CampRoom != "" {
+		url := req.CampURL
+		if url == "" {
+			url = "wss://f2f-camp.fly.dev/ws"
+		}
+		stun := req.CampStun
+		if stun == "" {
+			stun = "f2f-camp.fly.dev:3478"
+		}
+		cfg.Camp = &engine.CampConfig{
+			URL:      url,
+			StunAddr: stun,
+			Name:     req.CampName,
+			Room:     req.CampRoom,
+		}
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)

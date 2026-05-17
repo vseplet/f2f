@@ -21,20 +21,33 @@ import (
 
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
+	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
 )
+
+// CampConfig points the engine at a rendezvous (camp) server: instead of
+// the user supplying the peer's UDP endpoint via --peer, we discover our
+// own external endpoint via STUN, register with camp under (Name, Room),
+// and adopt the other peer in the same room when it announces an endpoint.
+type CampConfig struct {
+	URL      string // wss://f2f-camp.fly.dev/ws
+	Name     string // our identity within Room
+	Room     string // shared room name
+	StunAddr string // host:port for the UDP STUN probe (e.g. f2f-camp.fly.dev:3478)
+}
 
 // Config is the input to Start.
 type Config struct {
 	LocalIP       string   // utun local point-to-point address
 	PeerIP        string   // utun remote point-to-point address
 	Listen        string   // UDP listen address (":9000"), empty = no peer mode
-	Peer          string   // UDP peer address ("host:9000"), empty = no peer mode
+	Peer          string   // UDP peer address ("host:9000"); ignored when Camp is set
 	Intercepts    []string // user-provided IPs/CIDRs/domains, resolved at Start
 	InboundAllow  []string // whitelist of destinations the peer is allowed to reach via us
 	EgressIface   string   // physical interface for NAT (empty = no egress)
 	EgressSubnet  string   // CIDR to NAT (default "10.99.0.0/24")
+	Camp          *CampConfig // optional: use a rendezvous server instead of static Peer
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
@@ -50,6 +63,12 @@ type Status struct {
 	EgressIface    string          `json:"egress_iface,omitempty"`
 	EgressAnchor   string          `json:"egress_anchor,omitempty"`
 	EgressSubnet   string          `json:"egress_subnet,omitempty"`
+	CampActive     bool            `json:"camp_active"`
+	CampURL        string          `json:"camp_url,omitempty"`
+	CampName       string          `json:"camp_name,omitempty"`
+	CampRoom       string          `json:"camp_room,omitempty"`
+	CampPeerName   string          `json:"camp_peer_name,omitempty"`     // adopted peer's name in the room
+	CampReflex     string          `json:"camp_reflex,omitempty"`        // our own external endpoint per STUN
 	Intercepts     []InterceptInfo `json:"intercepts"`
 	InboundAllow   []InterceptInfo `json:"inbound_allow"`
 	StartedAt      time.Time       `json:"started_at,omitempty"`
@@ -74,11 +93,14 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun     *tunnel.Tunnel
-	udp     *net.UDPConn
-	routes  *route.Manager
-	egr     *egress.Egress
-	peerPtr atomic.Pointer[net.UDPAddr]
+	tun          *tunnel.Tunnel
+	udp          *net.UDPConn
+	routes       *route.Manager
+	egr          *egress.Egress
+	camp         *rendezvous.Client
+	campReflex   string // our own external endpoint per STUN (display only)
+	campPeerName string // adopted peer's name from camp
+	peerPtr      atomic.Pointer[net.UDPAddr]
 
 	intercepts   map[string]*InterceptInfo
 	inboundAllow map[string]*InterceptInfo
@@ -124,7 +146,16 @@ func (e *Engine) Start(cfg Config) error {
 	if e.running {
 		return errors.New("engine already running")
 	}
-	if (cfg.Listen == "") != (cfg.Peer == "") {
+	if cfg.Camp != nil {
+		// With Camp, peer is auto-discovered; we still need a UDP socket
+		// to receive on.
+		if cfg.Listen == "" {
+			return errors.New("Camp mode requires Listen")
+		}
+		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.Room == "" || cfg.Camp.StunAddr == "" {
+			return errors.New("Camp.{URL,Name,Room,StunAddr} all required")
+		}
+	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
 	}
 
@@ -155,28 +186,89 @@ func (e *Engine) Start(cfg Config) error {
 			e.rollbackPartial()
 			return fmt.Errorf("resolve listen: %w", err)
 		}
-		initialPeer, err := net.ResolveUDPAddr("udp", cfg.Peer)
-		if err != nil {
-			e.rollbackPartial()
-			return fmt.Errorf("resolve peer: %w", err)
-		}
-		e.peerPtr.Store(initialPeer)
 		udp, err := net.ListenUDP("udp", laddr)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("listen udp: %w", err)
 		}
 		e.udp = udp
+		// In Camp mode, peerPtr starts nil — campLoop adopts the peer
+		// when it announces an endpoint. In static mode, resolve now.
+		if cfg.Camp == nil && cfg.Peer != "" {
+			initialPeer, err := net.ResolveUDPAddr("udp", cfg.Peer)
+			if err != nil {
+				e.rollbackPartial()
+				return fmt.Errorf("resolve peer: %w", err)
+			}
+			e.peerPtr.Store(initialPeer)
+		}
 	}
 
-	// utun.
-	tun, err := tunnel.Open(cfg.LocalIP, cfg.PeerIP)
-	if err != nil {
-		e.rollbackPartial()
-		return fmt.Errorf("open tunnel: %w", err)
+	// Camp: discover external endpoint via STUN, then connect to the
+	// rendezvous WebSocket. Welcome carries our camp-assigned tunnel IP,
+	// which utun will be opened with below.
+	var (
+		welcome  *rendezvous.Welcome
+		localIP  = cfg.LocalIP
+		peerIP   = cfg.PeerIP
+	)
+	if cfg.Camp != nil {
+		reflex, err := rendezvous.Probe(e.udp, cfg.Camp.StunAddr, 5*time.Second)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("camp stun: %w", err)
+		}
+		log.Printf("camp: STUN reflex %s (advertised port %d)", reflex, reflex.Port)
+
+		dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		client, w, err := rendezvous.Dial(dialCtx, cfg.Camp.URL, cfg.Camp.Name, cfg.Camp.Room, reflex.Port)
+		dialCancel()
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("camp dial: %w", err)
+		}
+		if w.You.TunnelIP == "" {
+			_ = client.Close()
+			e.rollbackPartial()
+			return fmt.Errorf("camp welcome did not assign a tunnel_ip")
+		}
+		e.camp = client
+		e.campReflex = reflex.String()
+		welcome = w
+		localIP = w.You.TunnelIP
+		// peerIP stays as the user-provided value; it's only used for
+		// utun's point-to-point pair in static mode. In Camp mode utun
+		// is opened as a subnet so peerIP doesn't matter.
+		log.Printf("camp: registered as %s in room %s, tunnel_ip=%s", cfg.Camp.Name, cfg.Camp.Room, localIP)
+	}
+
+	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
+	// overlay; static mode keeps the legacy point-to-point form.
+	var tun *tunnel.Tunnel
+	if cfg.Camp != nil {
+		t, err := tunnel.OpenSubnet(localIP, 24)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("open tunnel: %w", err)
+		}
+		tun = t
+		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, tunnel.MTU)
+	} else {
+		t, err := tunnel.Open(localIP, peerIP)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("open tunnel: %w", err)
+		}
+		tun = t
+		log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, tunnel.MTU)
 	}
 	e.tun = tun
-	log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), cfg.LocalIP, cfg.PeerIP, tunnel.MTU)
+	// Reflect the actual addresses we ended up using back into the
+	// stored config so Status() shows ground truth, not user intent.
+	cfg.LocalIP = localIP
+	if cfg.Camp == nil {
+		cfg.PeerIP = peerIP
+	}
 	if e.udp != nil {
 		log.Printf("UDP listening on %s, forwarding to peer %s", e.udp.LocalAddr(), e.peerPtr.Load())
 	}
@@ -196,6 +288,18 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
+	// If camp's welcome told us about peers already in the room, adopt
+	// the first one with a known UDP endpoint — two-party tunnel for now.
+	if welcome != nil {
+		log.Printf("camp: %d existing peer(s) in room", len(welcome.Peers))
+		for _, p := range welcome.Peers {
+			if p.UDPEndpoint != "" {
+				e.adoptCampPeer(p)
+				break
+			}
+		}
+	}
+
 	// Workers.
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
@@ -211,6 +315,10 @@ func (e *Engine) Start(cfg Config) error {
 	}
 	e.workers.Add(1)
 	go e.domainRefreshLoop(ctx)
+	if e.camp != nil {
+		e.workers.Add(1)
+		go e.campLoop(ctx, e.camp)
+	}
 	return nil
 }
 
@@ -226,9 +334,15 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
+	camp := e.camp
 	e.mu.Unlock()
 
 	cancel()
+	// Close the camp WebSocket early so its read loop unblocks before we
+	// wait on workers below.
+	if camp != nil {
+		_ = camp.Close()
+	}
 	// Close UDP first; this aborts the peerToTun worker. It is independent
 	// of utun and routes, so it's safe to do early.
 	if udp != nil {
@@ -265,6 +379,10 @@ func (e *Engine) Stop() error {
 	e.udp = nil
 	e.routes = nil
 	e.egr = nil
+	e.camp = nil
+	e.campReflex = ""
+	e.campPeerName = ""
+	e.peerPtr.Store(nil)
 	e.intercepts = map[string]*InterceptInfo{}
 	e.inboundAllow = map[string]*InterceptInfo{}
 	e.txBytes.Store(0)
@@ -305,6 +423,14 @@ func (e *Engine) Status() Status {
 			st.EgressIface = e.cfg.EgressIface
 			st.EgressAnchor = e.egr.Anchor()
 			st.EgressSubnet = e.cfg.EgressSubnet
+		}
+		if e.cfg.Camp != nil {
+			st.CampActive = e.camp != nil
+			st.CampURL = e.cfg.Camp.URL
+			st.CampName = e.cfg.Camp.Name
+			st.CampRoom = e.cfg.Camp.Room
+			st.CampReflex = e.campReflex
+			st.CampPeerName = e.campPeerName
 		}
 	}
 	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
@@ -600,8 +726,9 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		}
 		summary := packet.Summary(pkt)
 		action := "drop"
-		if hasPeer {
-			if n, werr := e.udp.WriteToUDP(pkt, e.peerPtr.Load()); werr != nil {
+		peerAddr := e.peerPtr.Load()
+		if hasPeer && peerAddr != nil {
+			if n, werr := e.udp.WriteToUDP(pkt, peerAddr); werr != nil {
 				if ctx.Err() == nil {
 					log.Printf("WARN: udp send: %v", werr)
 				}
@@ -611,6 +738,8 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 				e.txPackets.Add(1)
 				action = "→peer"
 			}
+		} else if hasPeer {
+			action = "drop-no-peer"
 		}
 		log.Printf("[%s] %s [%s]", e.tun.Name(), summary, action)
 	}
@@ -630,6 +759,12 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		if cur := e.peerPtr.Load(); !sameUDPAddr(cur, from) {
 			log.Printf("peer address updated: %s → %s", cur, from)
 			e.peerPtr.Store(from)
+		}
+		// Sub-IP packets are hole-punch / keepalive markers — anything
+		// smaller than a minimum IPv4 header (20 bytes) can't be tunnel
+		// data, so drop it before utun complains.
+		if n < 20 {
+			continue
 		}
 		pkt := buf[:n]
 		summary := packet.Summary(pkt)
@@ -707,6 +842,91 @@ func (e *Engine) rollbackPartial() {
 		_ = e.egr.Close()
 		e.egr = nil
 	}
+	if e.camp != nil {
+		_ = e.camp.Close()
+		e.camp = nil
+	}
+}
+
+// campLoop runs the WebSocket reader and dispatches peer events from the
+// rendezvous server. Cancelled via ctx; Run also returns when the socket
+// is closed by Stop.
+func (e *Engine) campLoop(ctx context.Context, c *rendezvous.Client) {
+	defer e.workers.Done()
+
+	// Run blocks until ctx is cancelled or the socket closes; surface
+	// non-cancellation errors but don't crash — Stop will tidy up.
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+
+	events := c.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-runErr:
+			if err != nil && !rendezvous.IsCancelled(err) {
+				log.Printf("camp: connection closed: %v", err)
+			}
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			e.handleCampEvent(ev)
+		}
+	}
+}
+
+func (e *Engine) handleCampEvent(ev rendezvous.Event) {
+	switch ev.Kind {
+	case rendezvous.EventJoined:
+		log.Printf("camp: peer %s joined (%s)", ev.Peer.Name, ev.Peer.UDPEndpoint)
+		if ev.Peer.UDPEndpoint != "" {
+			e.adoptCampPeer(ev.Peer)
+		}
+	case rendezvous.EventUpdated:
+		log.Printf("camp: peer %s updated (%s)", ev.Peer.Name, ev.Peer.UDPEndpoint)
+		if ev.Peer.UDPEndpoint != "" {
+			e.adoptCampPeer(ev.Peer)
+		}
+	case rendezvous.EventLeft:
+		log.Printf("camp: peer %s left", ev.Name)
+	case rendezvous.EventSignal:
+		log.Printf("camp: signal from %s (ignored)", ev.From)
+	}
+}
+
+// adoptCampPeer sets the engine's peer address from a camp announcement
+// and fires a short burst of single-byte hole-punching packets to open
+// the NAT mapping. Real tunnel traffic from utun is what keeps it open
+// after that.
+func (e *Engine) adoptCampPeer(p rendezvous.PeerInfo) {
+	addr, err := net.ResolveUDPAddr("udp", p.UDPEndpoint)
+	if err != nil {
+		log.Printf("WARN: camp peer %s has invalid endpoint %q: %v", p.Name, p.UDPEndpoint, err)
+		return
+	}
+	if cur := e.peerPtr.Load(); sameUDPAddr(cur, addr) {
+		return
+	}
+	e.peerPtr.Store(addr)
+	e.mu.Lock()
+	e.campPeerName = p.Name
+	e.mu.Unlock()
+	log.Printf("camp: adopted peer %s @ %s", p.Name, addr)
+
+	if e.udp == nil {
+		return
+	}
+	go func() {
+		for i := 0; i < 5; i++ {
+			if _, err := e.udp.WriteToUDP([]byte{0}, addr); err != nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {

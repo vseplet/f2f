@@ -59,7 +59,18 @@ Usage:
   sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
                    [--egress-iface en0 [--egress-subnet 10.99.0.0/24]]
+                   [--camp-url wss://… --name X --room Y]
   sudo f2f-mac ui  [--bind 127.0.0.1:8080]
+
+Rendezvous (Camp) mode:
+  Instead of supplying --peer, point at a camp server: each peer discovers
+  its external UDP endpoint via STUN, registers under (--name, --room),
+  and the engine adopts the other peer in the same room automatically.
+
+  # both sides:
+  sudo f2f-mac run --listen :9000 \
+                   --camp-url wss://f2f-camp.fly.dev/ws \
+                   --name vasya --room beer
 
   ui              Start the local web UI. Configure and operate the engine
                   from a browser. Same engine as 'run', just driven over HTTP.
@@ -99,6 +110,10 @@ func runCmd(args []string) error {
 	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001)")
 	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (enables egress mode)")
 	egressSubnet := fs.String("egress-subnet", "10.99.0.0/24", "subnet to NAT out of --egress-iface")
+	campURL := fs.String("camp-url", "wss://f2f-camp.fly.dev/ws", "rendezvous WebSocket URL; Camp mode activates when --name and --room are both set")
+	campStun := fs.String("camp-stun", "f2f-camp.fly.dev:3478", "STUN host:port for external endpoint discovery")
+	campName := fs.String("name", "", "our identity on the rendezvous server (enables Camp mode together with --room)")
+	campRoom := fs.String("room", "", "shared room name on the rendezvous server (enables Camp mode together with --name)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -116,6 +131,14 @@ func runCmd(args []string) error {
 		Intercepts:   splitCSV(*intercept),
 		EgressIface:  *egressIface,
 		EgressSubnet: *egressSubnet,
+	}
+	if *campName != "" && *campRoom != "" {
+		cfg.Camp = &engine.CampConfig{
+			URL:      *campURL,
+			Name:     *campName,
+			Room:     *campRoom,
+			StunAddr: *campStun,
+		}
 	}
 	if err := eng.Start(cfg); err != nil {
 		return err
