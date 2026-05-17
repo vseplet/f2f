@@ -17,23 +17,42 @@ function isValidProbe(x: unknown): x is ProbeMsg {
   return m.t === "probe" && typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64;
 }
 
+// On fly.io UDP packets only reach a Machine if you bind to the special
+// `fly-global-services` address — 0.0.0.0 silently drops them. Anywhere
+// else (local dev, plain Docker) we bind to 0.0.0.0. Auto-detect via
+// FLY_APP_NAME, with STUN_BIND escape hatch.
+function pickBindAddress(): string {
+  const explicit = Bun.env.STUN_BIND?.trim();
+  if (explicit) return explicit;
+  return Bun.env.FLY_APP_NAME ? "fly-global-services" : "0.0.0.0";
+}
+
 export async function startStun(port: number) {
+  const hostname = pickBindAddress();
   const socket = await Bun.udpSocket({
     port,
+    hostname,
     socket: {
       data(sock, buf, srcPort, srcAddr) {
         // Cap payload aggressively so reflection amplification can't
         // happen — the reply is ~80 bytes and we won't parse anything
         // larger than that anyway.
-        if (buf.length > 256) return;
+        if (buf.length > 256) {
+          console.log(`stun: drop oversize ${buf.length}B from ${srcAddr}:${srcPort}`);
+          return;
+        }
 
         let msg: unknown;
         try {
           msg = JSON.parse(buf.toString("utf8"));
         } catch {
-          return; // not our protocol — silently drop
+          console.log(`stun: drop non-json from ${srcAddr}:${srcPort}`);
+          return;
         }
-        if (!isValidProbe(msg)) return;
+        if (!isValidProbe(msg)) {
+          console.log(`stun: drop bad-probe from ${srcAddr}:${srcPort}`);
+          return;
+        }
 
         const reply: ReflexMsg = {
           t: "reflex",
@@ -42,10 +61,11 @@ export async function startStun(port: number) {
           port: srcPort,
         };
         sock.send(JSON.stringify(reply), srcPort, srcAddr);
+        console.log(`stun: ${srcAddr}:${srcPort} ← reflex`);
       },
     },
   });
 
-  console.log(`stun: udp ${socket.hostname}:${socket.port}`);
+  console.log(`stun: udp ${hostname}:${socket.port}`);
   return socket;
 }
