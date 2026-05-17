@@ -12,18 +12,21 @@
 
 (function () {
   function start() {
-    const $call = $('#audio-call-btn');
-    const $hangup = $('#audio-hangup-btn');
+    const $toggle = $('#audio-toggle-btn');
+    const $controls = $('#audio-controls');
+    const $micBtn = $('#audio-mic-btn');
+    const $volume = $('#audio-volume');
+    const $volumeLabel = $('#audio-volume-label');
     const $status = $('#audio-status');
     const $log = $('#audio-log');
     const $clearLog = $('#audio-clear-log');
-    const $local = $('#audio-local');
     const $remote = $('#audio-remote');
 
     let pc = null;
     let localStream = null;
     let signalES = null;
     let pendingRemoteCandidates = [];
+    let micEnabled = true;
 
     function setStatus(s) { $status.text(s); }
     function logLine(s) {
@@ -33,8 +36,26 @@
       $log[0].appendChild(div);
       $log[0].scrollTop = $log[0].scrollHeight;
     }
-    function showHangup() { $call.addClass('hidden'); $hangup.removeClass('hidden'); }
-    function showCall()   { $call.removeClass('hidden'); $hangup.addClass('hidden'); }
+
+    // UI state is implicit: pc !== null means "in a call". Render reflects
+    // it; each control sits idle until in-call.
+    function render(state) {
+      if (state === 'idle') {
+        $toggle
+          .removeClass('bg-rose-600 hover:bg-rose-700')
+          .addClass('bg-emerald-600 hover:bg-emerald-700')
+          .text('Call peer');
+        $controls.addClass('hidden');
+        micEnabled = true;
+        $micBtn.text('Mute mic').removeClass('bg-rose-200 hover:bg-rose-300').addClass('bg-gray-200 hover:bg-gray-300');
+      } else {
+        $toggle
+          .removeClass('bg-emerald-600 hover:bg-emerald-700')
+          .addClass('bg-rose-600 hover:bg-rose-700')
+          .text('Hang up');
+        $controls.removeClass('hidden');
+      }
+    }
 
     function startSignaling() {
       if (signalES) return;
@@ -48,7 +69,6 @@
         }
       };
       signalES.onerror = () => {
-        // EventSource auto-reconnects; just note it.
         logLine('signal stream error (auto-reconnect)');
       };
     }
@@ -73,6 +93,7 @@
       const conn = new RTCPeerConnection({ iceServers: [] });
       conn.ontrack = (e) => {
         $remote[0].srcObject = e.streams[0];
+        $remote[0].volume = parseInt($volume.val(), 10) / 100;
         $remote[0].play().catch(() => {});
         logLine('remote track attached');
       };
@@ -85,10 +106,10 @@
       };
       conn.oniceconnectionstatechange = () => {
         const st = conn.iceConnectionState;
-        setStatus('ICE: ' + st);
+        setStatus(st);
         logLine('ICE state: ' + st);
-        if (st === 'failed' || st === 'closed' || st === 'disconnected') {
-          if (st !== 'disconnected') teardown();
+        if (st === 'failed' || st === 'closed') {
+          teardown();
         }
       };
       conn.onconnectionstatechange = () => {
@@ -99,29 +120,33 @@
 
     async function ensureLocalStream() {
       if (localStream) return localStream;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          'Mic access requires a secure origin. You are on ' + location.origin +
+          '. Use http://localhost:' + (location.port || '80') + ' instead.',
+        );
+      }
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       });
-      $local[0].srcObject = localStream;
-      logLine('mic acquired (' + localStream.getAudioTracks().length + ' tracks)');
+      logLine('mic acquired');
       return localStream;
     }
 
     async function call() {
       try {
-        setStatus('preparing…');
+        setStatus('connecting');
+        render('in-call');
         await ensureLocalStream();
         pc = newPC();
         localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
         const offer = await pc.createOffer({ offerToReceiveAudio: true });
         await pc.setLocalDescription(offer);
         await sendSignal({ kind: 'offer', sdp: offer.sdp });
-        setStatus('offer sent, waiting for answer');
         logLine('sent offer');
-        showHangup();
       } catch (err) {
-        setStatus('error: ' + err.message);
+        setStatus('error');
         logLine('call error: ' + err.message);
         teardown();
       }
@@ -140,27 +165,24 @@
       if (localStream) {
         localStream.getTracks().forEach((t) => t.stop());
         localStream = null;
-        $local[0].srcObject = null;
       }
       $remote[0].srcObject = null;
       pendingRemoteCandidates = [];
       setStatus('idle');
-      showCall();
+      render('idle');
       logLine('teardown');
     }
 
     async function handleSignal(msg) {
       if (msg.kind === 'offer') {
         logLine('received offer');
-        if (pc) {
-          // Already in a call. Politely tear down and accept the new offer.
-          teardown();
-        }
+        if (pc) teardown();
+        setStatus('incoming');
+        render('in-call');
         await ensureLocalStream();
         pc = newPC();
         localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-        // Flush any candidates that arrived before the offer.
         for (const c of pendingRemoteCandidates) {
           try { await pc.addIceCandidate(c); } catch (_) {}
         }
@@ -168,9 +190,7 @@
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal({ kind: 'answer', sdp: answer.sdp });
-        setStatus('answered');
         logLine('sent answer');
-        showHangup();
       } else if (msg.kind === 'answer') {
         logLine('received answer');
         if (!pc) { logLine('answer with no PC; ignoring'); return; }
@@ -195,12 +215,38 @@
       }
     }
 
-    $call.on('click', call);
-    $hangup.on('click', hangup);
+    // Top button toggles between call and hangup based on current state.
+    $toggle.on('click', () => {
+      if (pc) hangup(); else call();
+    });
+
+    // Mic mute is just track.enabled — no renegotiation needed.
+    $micBtn.on('click', () => {
+      if (!localStream) return;
+      micEnabled = !micEnabled;
+      localStream.getAudioTracks().forEach((t) => { t.enabled = micEnabled; });
+      if (micEnabled) {
+        $micBtn.text('Mute mic')
+          .removeClass('bg-rose-200 hover:bg-rose-300')
+          .addClass('bg-gray-200 hover:bg-gray-300');
+      } else {
+        $micBtn.text('Unmute mic')
+          .removeClass('bg-gray-200 hover:bg-gray-300')
+          .addClass('bg-rose-200 hover:bg-rose-300');
+      }
+    });
+
+    // Volume slider drives the HTMLMediaElement.volume directly. Label
+    // mirrors the value for visibility.
+    $volume.on('input', () => {
+      const v = parseInt($volume.val(), 10);
+      $remote[0].volume = v / 100;
+      $volumeLabel.text(v);
+    });
+
     $clearLog.on('click', () => $log.empty());
 
-    // Subscribe to signals immediately on page load so an incoming call from
-    // the peer is detected even before the user clicks into the audio tab.
+    render('idle');
     startSignaling();
   }
 

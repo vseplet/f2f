@@ -98,12 +98,13 @@ type Engine struct {
 	routes  *route.Manager
 	egr     *egress.Egress
 	camp    *rendezvous.Client
-	// campReflex / campPeerName are display-only and updated from
-	// adoptCampPeer, which can run while Start already holds e.mu. Keep
-	// them lock-free via atomics so they can't deadlock.
-	campReflex   atomic.Pointer[string]
-	campPeerName atomic.Pointer[string]
-	peerPtr      atomic.Pointer[net.UDPAddr]
+	// campReflex / campPeerName / campPeerTunnelIP are display-only and
+	// updated from adoptCampPeer, which can run while Start already holds
+	// e.mu. Keep them lock-free via atomics so they can't deadlock.
+	campReflex       atomic.Pointer[string]
+	campPeerName     atomic.Pointer[string]
+	campPeerTunnelIP atomic.Pointer[string]
+	peerPtr          atomic.Pointer[net.UDPAddr]
 
 	intercepts   map[string]*InterceptInfo
 	inboundAllow map[string]*InterceptInfo
@@ -417,6 +418,7 @@ func (e *Engine) Stop() error {
 	e.camp = nil
 	e.campReflex.Store(nil)
 	e.campPeerName.Store(nil)
+	e.campPeerTunnelIP.Store(nil)
 	e.peerPtr.Store(nil)
 	e.intercepts = map[string]*InterceptInfo{}
 	e.inboundAllow = map[string]*InterceptInfo{}
@@ -450,6 +452,15 @@ func (e *Engine) Status() Status {
 	if e.running {
 		st.LocalIP = e.cfg.LocalIP
 		st.PeerIP = e.cfg.PeerIP
+		// In Camp mode the user-supplied PeerIP is meaningless — utun is a
+		// subnet, the peer's tunnel IP comes from camp on adoption.
+		if e.cfg.Camp != nil {
+			if p := e.campPeerTunnelIP.Load(); p != nil {
+				st.PeerIP = *p
+			} else {
+				st.PeerIP = "" // not adopted yet
+			}
+		}
 		st.ListenAddr = e.cfg.Listen
 		if p := e.peerPtr.Load(); p != nil {
 			st.PeerAddr = p.String()
@@ -960,7 +971,11 @@ func (e *Engine) adoptCampPeer(p rendezvous.PeerInfo) {
 	e.peerPtr.Store(addr)
 	name := p.Name
 	e.campPeerName.Store(&name)
-	log.Printf("camp: adopted peer %s @ %s", p.Name, addr)
+	if p.TunnelIP != "" {
+		tip := p.TunnelIP
+		e.campPeerTunnelIP.Store(&tip)
+	}
+	log.Printf("camp: adopted peer %s @ %s (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
 
 	if e.udp == nil {
 		return
