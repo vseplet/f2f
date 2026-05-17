@@ -263,31 +263,65 @@
     }
 
     // ---- media ----
+    // Returns the acquired MediaStream, or null when neither mic nor cam
+    // is available. Null is a valid call mode — the user becomes a
+    // receive-only peer (no local tracks, but they can still see/hear the
+    // remote and use chat via the data channel).
     async function ensureLocalStream() {
       if (localStream) return localStream;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error(
-          'getUserMedia needs a secure origin (current: ' + location.origin +
-          '). Use http://localhost:' + (location.port || '80') + '.',
-        );
+        logLine('event', 'no getUserMedia (insecure origin?) — receive-only');
+        return null;
       }
-      localStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: { width: { ideal: 640 }, height: { ideal: 480 } },
-      });
-      // Mic+cam start ON when the user dialed. Reflected by UI immediately.
-      micEnabled = true;
-      camEnabled = true;
+
+      const audioConstraint = {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      };
+      const videoConstraint = { width: { ideal: 640 }, height: { ideal: 480 } };
+
+      const tryGUM = async (c) => {
+        try { return await navigator.mediaDevices.getUserMedia(c); }
+        catch (err) {
+          logLine('event', 'getUserMedia(' + Object.keys(c).join('+') + ') failed: ' + err.name);
+          return null;
+        }
+      };
+
+      // Cascade through what the user actually has: mic+cam → mic → cam.
+      // Anything that succeeds is fine, even cam-only (you'll receive
+      // peer audio but not transmit your own). All-missing → receive-only.
+      localStream =
+        (await tryGUM({ audio: audioConstraint, video: videoConstraint })) ||
+        (await tryGUM({ audio: audioConstraint })) ||
+        (await tryGUM({ video: videoConstraint }));
+
+      if (!localStream) {
+        logLine('event', 'no mic or cam — call continues in receive-only mode');
+        micEnabled = false;
+        camEnabled = false;
+        $paneYou.classList.remove('has-video');
+        updateMicCamUI();
+        return null;
+      }
+
+      micEnabled = localStream.getAudioTracks().length > 0;
+      camEnabled = localStream.getVideoTracks().length > 0;
+
       $videoYou.srcObject = localStream;
-      $paneYou.classList.add('has-video');
-      const vt = localStream.getVideoTracks()[0];
-      if (vt) {
-        const s = vt.getSettings();
-        $resYou.textContent = (s.height || 480) + 'p · ' + (s.frameRate || 30) + 'fps';
+      if (camEnabled) {
+        $paneYou.classList.add('has-video');
+        const vt = localStream.getVideoTracks()[0];
+        if (vt) {
+          const s = vt.getSettings();
+          $resYou.textContent = (s.height || 480) + 'p · ' + (s.frameRate || 30) + 'fps';
+        }
+      } else {
+        $paneYou.classList.remove('has-video');
       }
-      setupDbMeter(localStream);
+      if (micEnabled) setupDbMeter(localStream);
       updateMicCamUI();
-      logLine('event', 'mic+cam acquired');
+      const parts = [micEnabled && 'mic', camEnabled && 'cam'].filter(Boolean).join('+');
+      logLine('event', parts + ' acquired');
       return localStream;
     }
 
@@ -384,12 +418,17 @@
     }
 
     function updateMicCamUI() {
+      const hasMic = !!localStream && localStream.getAudioTracks().length > 0;
+      const hasCam = !!localStream && localStream.getVideoTracks().length > 0;
       $micBtn.classList.toggle('active', micEnabled);
       $camBtn.classList.toggle('active', camEnabled);
       $micState.textContent = micEnabled ? '●' : '○';
       $camState.textContent = camEnabled ? '■' : '□';
-      // Update "you" pane camera-off visual to match track state.
-      $paneYou.classList.toggle('has-video', camEnabled && localStream != null);
+      // Buttons stay disabled when the underlying track doesn't exist at
+      // all (no device on this machine), regardless of call state.
+      $micBtn.disabled = !hasMic;
+      $camBtn.disabled = !hasCam;
+      $paneYou.classList.toggle('has-video', camEnabled && hasCam);
     }
 
     // ---- call lifecycle ----

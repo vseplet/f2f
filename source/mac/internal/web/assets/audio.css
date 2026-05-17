@@ -299,6 +299,33 @@ body:has(#tab-tunnel:not(.hidden)) .ax-tabbar {
   font-size: 12px;
   padding: 8px 12px;
 }
+
+/* When the call tab is active, expand the whole panel to the viewport
+   height and let the log/chat soak up everything that's left after the
+   fixed-size video, dB meter, controls, and footer rows. */
+body:has(#tab-audio:not(.hidden)) {
+  height: 100vh;
+  overflow: hidden;
+}
+body:has(#tab-audio:not(.hidden)) .max-w-5xl {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+body:has(#tab-audio:not(.hidden)) #tab-audio,
+body:has(#tab-audio:not(.hidden)) #tab-audio > .ax-frame,
+body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log-body {
+  flex: 1;
+  max-height: none;
+  min-height: 0;
+}
 .ax-frame .ax-log-event {
   display: grid;
   grid-template-columns: 90px 70px 1fr;

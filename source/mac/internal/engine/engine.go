@@ -852,12 +852,17 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 // whitelist. An empty whitelist means "no filter" — every packet is allowed.
 // Packets whose destination address we cannot parse are also allowed (we
 // don't want to silently break unknown-format traffic).
+//
+// Packets destined to OUR OWN tunnel IP terminate locally — they're not
+// "passing through" us into the wider internet, so the whitelist (which
+// is about restricting peer-to-internet egress) doesn't apply to them.
 func (e *Engine) inboundAllowed(pkt []byte) bool {
 	e.mu.Lock()
 	if len(e.inboundAllow) == 0 {
 		e.mu.Unlock()
 		return true
 	}
+	localIPStr := e.cfg.LocalIP
 	// Snapshot prefixes so we can drop the lock before the match loop.
 	prefixes := make([]netip.Prefix, 0, len(e.inboundAllow)*2)
 	for _, info := range e.inboundAllow {
@@ -871,6 +876,9 @@ func (e *Engine) inboundAllowed(pkt []byte) bool {
 
 	dst := packet.ExtractDst(pkt)
 	if !dst.IsValid() {
+		return true
+	}
+	if local, err := netip.ParseAddr(localIPStr); err == nil && dst == local {
 		return true
 	}
 	for _, p := range prefixes {
