@@ -93,13 +93,16 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun          *tunnel.Tunnel
-	udp          *net.UDPConn
-	routes       *route.Manager
-	egr          *egress.Egress
-	camp         *rendezvous.Client
-	campReflex   string // our own external endpoint per STUN (display only)
-	campPeerName string // adopted peer's name from camp
+	tun     *tunnel.Tunnel
+	udp     *net.UDPConn
+	routes  *route.Manager
+	egr     *egress.Egress
+	camp    *rendezvous.Client
+	// campReflex / campPeerName are display-only and updated from
+	// adoptCampPeer, which can run while Start already holds e.mu. Keep
+	// them lock-free via atomics so they can't deadlock.
+	campReflex   atomic.Pointer[string]
+	campPeerName atomic.Pointer[string]
 	peerPtr      atomic.Pointer[net.UDPAddr]
 
 	intercepts   map[string]*InterceptInfo
@@ -233,7 +236,8 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("camp welcome did not assign a tunnel_ip")
 		}
 		e.camp = client
-		e.campReflex = reflex.String()
+		rs := reflex.String()
+		e.campReflex.Store(&rs)
 		welcome = w
 		localIP = w.You.TunnelIP
 		// peerIP stays as the user-provided value; it's only used for
@@ -319,7 +323,38 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.campLoop(ctx, e.camp)
 	}
+	if e.udp != nil {
+		e.workers.Add(1)
+		go e.keepaliveLoop(ctx)
+	}
 	return nil
+}
+
+// keepaliveLoop fires a one-byte UDP packet at the current peer every
+// 25 seconds. Most consumer NATs drop idle UDP mappings after 30–120s;
+// the keepalive is what holds the hole open between bursts of real
+// tunnel traffic. The single byte is below our 20-byte IP minimum, so
+// the peer's peerToTunLoop drops it without touching utun.
+func (e *Engine) keepaliveLoop(ctx context.Context) {
+	defer e.workers.Done()
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			addr := e.peerPtr.Load()
+			if addr == nil {
+				continue
+			}
+			if _, err := e.udp.WriteToUDP([]byte{0}, addr); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("WARN: keepalive: %v", err)
+				}
+			}
+		}
+	}
 }
 
 // Stop tears everything down in reverse order. Idempotent.
@@ -380,8 +415,8 @@ func (e *Engine) Stop() error {
 	e.routes = nil
 	e.egr = nil
 	e.camp = nil
-	e.campReflex = ""
-	e.campPeerName = ""
+	e.campReflex.Store(nil)
+	e.campPeerName.Store(nil)
 	e.peerPtr.Store(nil)
 	e.intercepts = map[string]*InterceptInfo{}
 	e.inboundAllow = map[string]*InterceptInfo{}
@@ -429,8 +464,12 @@ func (e *Engine) Status() Status {
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
 			st.CampRoom = e.cfg.Camp.Room
-			st.CampReflex = e.campReflex
-			st.CampPeerName = e.campPeerName
+			if r := e.campReflex.Load(); r != nil {
+				st.CampReflex = *r
+			}
+			if n := e.campPeerName.Load(); n != nil {
+				st.CampPeerName = *n
+			}
 		}
 	}
 	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
@@ -756,17 +795,25 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			}
 			return
 		}
+		pkt := buf[:n]
+		// Anything not shaped like an IPv4/IPv6 packet — hole-punch
+		// markers, stale STUN reflexes that raced past Probe(), random
+		// scans — gets dropped here before it can pollute peer tracking
+		// or fail utun.Write. Only after we've decided this is a real
+		// tunnel packet do we let it update peerPtr (so peer-NAT rebinds
+		// can still be followed) and reach utun.
+		if n < 20 {
+			continue
+		}
+		version := pkt[0] >> 4
+		if version != 4 && version != 6 {
+			log.Printf("[udp %s] drop non-IP byte=0x%02x (%d bytes)", from, pkt[0], n)
+			continue
+		}
 		if cur := e.peerPtr.Load(); !sameUDPAddr(cur, from) {
 			log.Printf("peer address updated: %s → %s", cur, from)
 			e.peerPtr.Store(from)
 		}
-		// Sub-IP packets are hole-punch / keepalive markers — anything
-		// smaller than a minimum IPv4 header (20 bytes) can't be tunnel
-		// data, so drop it before utun complains.
-		if n < 20 {
-			continue
-		}
-		pkt := buf[:n]
 		summary := packet.Summary(pkt)
 
 		// Inbound whitelist: when non-empty, only packets whose destination
@@ -911,9 +958,8 @@ func (e *Engine) adoptCampPeer(p rendezvous.PeerInfo) {
 		return
 	}
 	e.peerPtr.Store(addr)
-	e.mu.Lock()
-	e.campPeerName = p.Name
-	e.mu.Unlock()
+	name := p.Name
+	e.campPeerName.Store(&name)
 	log.Printf("camp: adopted peer %s @ %s", p.Name, addr)
 
 	if e.udp == nil {
