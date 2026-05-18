@@ -61,17 +61,20 @@
           <span class="ax-meta" id="camp-id-meta"></span>
         </div>
         <div id="camp-peers-status" class="ax-section-status">loading…</div>
-        <table id="camp-peers-table" class="hidden" style="width:100%;border-collapse:collapse;margin-top:8px">
+        <table id="camp-peers-table" class="ax-peers hidden">
           <thead>
-            <tr style="color:#666;border-bottom:1px solid #2a2622">
-              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">name</th>
-              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">tunnel ip</th>
-              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">endpoint</th>
-              <th style="text-align:left;padding:4px 0 6px 0;font-weight:normal">joined</th>
+            <tr>
+              <th class="ax-peers-dot"></th>
+              <th>name</th>
+              <th>tunnel ip</th>
+              <th>endpoint</th>
+              <th>joined</th>
+              <th class="ax-peers-active">active</th>
             </tr>
           </thead>
           <tbody id="camp-peers-tbody"></tbody>
         </table>
+        <div class="ax-section-status muted" style="margin-top:8px">click row to select the active peer (tunnel + meet target)</div>
       </div>
     </div><!-- /#tab-camp -->
 
@@ -139,20 +142,6 @@
         </div>
       </div>
 
-      <!-- Inbound whitelist: collapsed by default, advanced -->
-      <div class="ax-frame ax-section">
-        <details class="ax-advanced">
-          <summary>inbound whitelist · <span id="allow-meta">0</span> entries (peer-egress filter)</summary>
-          <div class="ax-advanced-body">
-            <div id="allow-list" class="ax-list"></div>
-            <div class="ax-add-row">
-              <input id="allow-input" type="text" class="ax-input" placeholder="domain, ip, or cidr">
-              <button id="btn-add-allow" class="ax-btn ax-btn-primary">+ add</button>
-            </div>
-          </div>
-        </details>
-      </div>
-
       <!-- Counters + topology under one collapsed diagnostics -->
       <div class="ax-frame ax-section">
         <details class="ax-advanced">
@@ -163,7 +152,6 @@
               <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
               <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
               <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
-              <div class="ax-counter"><div class="ax-counter-label">drops (filter)</div><div class="ax-counter-value" id="dropped-inbound">0</div></div>
             </div>
             <svg id="topology" style="width:100%;height:300px;background:#15130f;border:1px solid #2a251c;border-radius:3px;margin-top:8px"></svg>
           </div>

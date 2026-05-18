@@ -51,7 +51,6 @@ $(function () {
     };
   }
   const intercepts = makeList('f2f:intercepts');
-  const allows = makeList('f2f:allow');
 
   // Back-compat wrappers (some existing code uses these names).
   const getStoredSpecs = () => intercepts.get();
@@ -59,7 +58,6 @@ $(function () {
   const removeStoredSpec = (s) => intercepts.remove(s);
 
   let liveIntercepts = []; // last seen from /api/status
-  let liveAllows = [];
 
   // Persist config form values across reloads. Each field has a localStorage
   // key; we restore on load and save on every change. Engine-driven updates
@@ -202,15 +200,12 @@ $(function () {
     $btnAdd.prop('disabled', false);
 
     liveIntercepts = s.intercepts || [];
-    liveAllows = s.inbound_allow || [];
     renderIntercepts();
-    renderAllows();
 
     $('#tx-packets').text(s.tx_packets || 0);
     $('#rx-packets').text(s.rx_packets || 0);
     $('#tx-bytes').text(fmtBytes(s.tx_bytes || 0));
     $('#rx-bytes').text(fmtBytes(s.rx_bytes || 0));
-    $('#dropped-inbound').text(s.dropped_inbound || 0);
   }
 
   function renderIntercepts() {
@@ -272,95 +267,6 @@ $(function () {
     }
   }
 
-  // -- Inbound whitelist (mirror of Intercepts) --
-  const $allowList = $('#allow-list');
-  const $allowInput = $('#allow-input');
-  const $btnAddAllow = $('#btn-add-allow');
-
-  function renderAllows() {
-    $allowList.empty();
-    const stored = allows.get();
-    const liveBySpec = {};
-    liveAllows.forEach((l) => { liveBySpec[l.spec] = l; });
-
-    const seen = new Set();
-    const items = stored.map((spec) => {
-      seen.add(spec);
-      return { spec, live: liveBySpec[spec] || null };
-    });
-    liveAllows.forEach((l) => {
-      if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
-    });
-
-    $('#allow-meta').text(items.length);
-
-    if (items.length === 0) {
-      $allowList.append('<div class="ax-list-empty">no filter — peer can reach any destination through us.</div>');
-      return;
-    }
-
-    items.forEach((it) => {
-      const $row = $('<div class="ax-list-item">');
-      $row.append('<span class="ax-list-icon">›</span>');
-      const $main = $('<div class="ax-list-main">');
-      const $spec = $('<div class="ax-list-spec">').text(it.spec);
-      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
-      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
-      $main.append($spec);
-      const prefixes = it.live ? (it.live.prefixes || []) : [];
-      if (prefixes.length) {
-        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
-      }
-      $row.append($main);
-      const $btn = $('<button class="ax-list-remove">remove</button>');
-      $btn.on('click', () => removeAllowSpec(it.spec, it.live));
-      $row.append($btn);
-      $allowList.append($row);
-    });
-  }
-
-  function removeAllowSpec(spec, live) {
-    allows.remove(spec);
-    const after = () => refreshStatus();
-    if (live && live.id) {
-      $.ajax({ url: '/api/inbound-allow/' + encodeURIComponent(live.id), method: 'DELETE' })
-        .done(after)
-        .fail((xhr) => { alert('Remove failed: ' + errorOf(xhr)); after(); });
-    } else {
-      renderAllows();
-    }
-  }
-
-  function addAllowOne(spec) {
-    return $.ajax({
-      url: '/api/inbound-allow',
-      method: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify({ spec: spec }),
-    });
-  }
-
-  $btnAddAllow.on('click', () => {
-    const raw = $allowInput.val();
-    const specs = raw.split(',').map((s) => s.trim()).filter(Boolean);
-    if (specs.length === 0) return;
-
-    specs.forEach((s) => allows.add(s));
-    $allowInput.val('');
-    renderAllows();
-
-    if (!engineRunning) return;
-    const errors = [];
-    const requests = specs.map((spec) =>
-      addAllowOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`)),
-    );
-    $.when(...requests).always(() => {
-      refreshStatus();
-      if (errors.length) alert('Some allow entries failed to apply live:\n' + errors.join('\n'));
-    });
-  });
-
-  $allowInput.on('keydown', (e) => { if (e.key === 'Enter') $btnAddAllow.click(); });
 
   function loadIfaces() {
     $.getJSON('/api/ifaces', (ifs) => {
@@ -399,9 +305,8 @@ $(function () {
       listen: $('#listen').val().trim(),
       peer: $('#peer-udp').val().trim(),
       // Seed the engine with whatever the user has saved locally — that
-      // way pending intercepts/allows become active immediately on Start.
+      // way pending intercepts become active immediately on Start.
       intercepts: getStoredSpecs(),
-      inbound_allow: allows.get(),
       egress_iface: $('#egress-iface').val(),
       egress_subnet: $('#egress-subnet').val().trim(),
       camp_url: $('#camp-url').val().trim(),
@@ -711,27 +616,49 @@ $(function () {
     }
     const peers = Array.isArray(data.peers) ? data.peers : [];
     $campIDMeta.text(data.camp_id || '');
-    if (peers.length === 0) {
-      $campStatus.text('no peers in this camp').show();
-      $campTable.addClass('hidden');
-      return;
+    const hasOthers = peers.some((p) => !p.self);
+    if (!hasOthers) {
+      $campStatus.text('waiting for someone to join').show();
+    } else {
+      $campStatus.hide();
     }
-    $campStatus.hide();
     $campBody.empty();
+    const active = data.active || '';
     for (const p of peers) {
       const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
-      const isYou = data.you && p.name === data.you;
-      const $row = $('<tr>').css('color', isYou ? '#86b86b' : '');
+      const dotClass = p.self ? 'self' : (p.reachable ? 'reachable' : 'unreachable');
+      const isActive = !p.self && active && p.tunnel_ip === active;
+      const $row = $('<tr>')
+        .addClass(p.self ? 'is-self' : '')
+        .addClass(isActive ? 'is-active' : '')
+        .attr('data-tunnel-ip', p.tunnel_ip || '');
       $row.append(
-        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.name + (isYou ? ' (you)' : '')),
-        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.tunnel_ip || '—'),
-        $('<td>').css({padding: '4px 16px 4px 0'}).text(endpoint),
-        $('<td>').css({padding: '4px 0', color: '#666'}).text(humanAgo(p.joined_at))
+        $('<td>').append($('<span>').addClass('ax-dot ' + dotClass)),
+        $('<td>').text(p.name + (p.self ? ' (you)' : '')),
+        $('<td>').text(p.tunnel_ip || '—'),
+        $('<td>').text(endpoint || '—'),
+        $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
+        $('<td>').addClass(isActive ? 'active-mark' : 'muted').text(isActive ? '✓' : ''),
       );
       $campBody.append($row);
     }
     $campTable.removeClass('hidden');
   }
+
+  // Click on a non-self row → make it active.
+  $campBody.on('click', 'tr', function () {
+    if ($(this).hasClass('is-self')) return;
+    const tip = $(this).attr('data-tunnel-ip');
+    if (!tip) return;
+    $.ajax({
+      url: '/api/peers/active',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ tunnel_ip: tip }),
+    })
+      .done(refreshCampPeers)
+      .fail((xhr) => alert('Set active failed: ' + errorOf(xhr)));
+  });
 
   function refreshCampPeers() {
     $.ajax({ url: '/api/camp/peers', dataType: 'json' })

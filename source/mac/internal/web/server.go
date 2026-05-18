@@ -9,13 +9,11 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -85,8 +83,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stop", s.handleStop)
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
-	mux.HandleFunc("POST /api/inbound-allow", s.handleAddInboundAllow)
-	mux.HandleFunc("DELETE /api/inbound-allow/{id}", s.handleRemoveInboundAllow)
+	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
@@ -318,77 +315,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.Status())
 }
 
-// handleCampPeers proxies the engine's current camp state from the
-// rendezvous server to the browser. Keeps camp URL server-side so the
-// page never needs to know it, and sidesteps CORS.
+// handleCampPeers serves the engine's view of the camp: peer list with
+// reachability flags and the active selection. Reads from local engine
+// state — no camp HTTP call here (the engine's poller refreshes the
+// cache every ~30s).
 func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
 	if !st.CampActive {
 		writeJSON(w, http.StatusOK, map[string]any{"running": false})
 		return
 	}
-	base, err := campHTTPBase(st.CampURL)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	target := base + "/api/id/" + url.PathEscape(st.CampID)
-	req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	resp, err := s.signalHTTP.Do(req)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("fetch camp: %w", err))
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("camp returned %s", resp.Status))
-		return
-	}
-	var body struct {
-		CampID string          `json:"camp_id"`
-		Peers  json.RawMessage `json:"peers"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("decode camp: %w", err))
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running": true,
 		"you":     st.CampName,
-		"camp_id": body.CampID,
-		"peers":   body.Peers,
+		"camp_id": st.CampID,
+		"active":  st.ActivePeerTunnelIP,
+		"peers":   st.Peers,
 	})
-}
-
-// campHTTPBase converts the camp WebSocket URL into the matching HTTP
-// origin. Strips the trailing "/ws" path so the result is a clean base
-// for /api/* calls.
-func campHTTPBase(wsURL string) (string, error) {
-	if wsURL == "" {
-		return "", errors.New("camp url not set")
-	}
-	u, err := url.Parse(wsURL)
-	if err != nil {
-		return "", fmt.Errorf("parse camp url %q: %w", wsURL, err)
-	}
-	switch u.Scheme {
-	case "ws":
-		u.Scheme = "http"
-	case "wss":
-		u.Scheme = "https"
-	case "http", "https":
-		// already fine
-	default:
-		return "", fmt.Errorf("unsupported camp url scheme %q", u.Scheme)
-	}
-	u.Path = strings.TrimSuffix(u.Path, "/ws")
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String(), nil
 }
 
 type startRequest struct {
@@ -397,7 +340,6 @@ type startRequest struct {
 	Listen       string   `json:"listen"`
 	Peer         string   `json:"peer"`
 	Intercepts   []string `json:"intercepts"`
-	InboundAllow []string `json:"inbound_allow"`
 	EgressIface  string   `json:"egress_iface"`
 	EgressSubnet string   `json:"egress_subnet"`
 	CampURL      string   `json:"camp_url"`
@@ -418,7 +360,6 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		Listen:       req.Listen,
 		Peer:         req.Peer,
 		Intercepts:   req.Intercepts,
-		InboundAllow: req.InboundAllow,
 		EgressIface:  req.EgressIface,
 		EgressSubnet: req.EgressSubnet,
 	}
@@ -480,24 +421,19 @@ func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleAddInboundAllow(w http.ResponseWriter, r *http.Request) {
-	var req addInterceptRequest
+// handleSetActivePeer sets the user-selected active peer (catch-all
+// tunnel destination and meet signalling target). Body: {tunnel_ip}.
+// Empty string clears.
+func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TunnelIP string `json:"tunnel_ip"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	info, err := s.engine.AddInboundAllow(req.Spec)
-	if err != nil {
+	if err := s.engine.SetActivePeer(req.TunnelIP); err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, info)
-}
-
-func (s *Server) handleRemoveInboundAllow(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := s.engine.RemoveInboundAllow(id); err != nil {
-		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
