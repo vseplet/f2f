@@ -35,18 +35,37 @@ export async function initDB(): Promise<boolean> {
     console.log("db: TURSO_URL not set — bindings will not persist");
     return false;
   }
+  if (!authToken) {
+    console.log("db: TURSO_AUTH_TOKEN not set — bindings will not persist");
+    return false;
+  }
+  console.log(`db: connecting to ${urlScheme(url)} host=${urlHost(url)} tokenLen=${authToken.length}`);
   try {
     client = createClient({ url, authToken });
     for (const sql of SCHEMA) {
       await client.execute(sql);
     }
-    console.log(`db: connected to ${redactURL(url)}`);
+    console.log(`db: connected`);
     return true;
   } catch (err) {
-    console.error(`db: init failed: ${(err as Error).message}`);
+    const e = err as Error & { code?: string; cause?: unknown };
+    console.error(`db: init failed: ${e.message}${e.code ? ` (code=${e.code})` : ""}`);
+    if (e.cause) console.error(`db: cause: ${String(e.cause)}`);
     client = null;
     return false;
   }
+}
+
+function urlScheme(u: string): string {
+  const i = u.indexOf("://");
+  return i < 0 ? "?" : u.slice(0, i);
+}
+function urlHost(u: string): string {
+  const i = u.indexOf("://");
+  if (i < 0) return "?";
+  const rest = u.slice(i + 3);
+  const slash = rest.indexOf("/");
+  return slash < 0 ? rest : rest.slice(0, slash);
 }
 
 // loadBindings returns the full (name → octet) map for a camp. Used by
@@ -121,6 +140,3 @@ export async function cleanupStale(cutoffMs: number): Promise<number> {
   }
 }
 
-function redactURL(u: string): string {
-  return u.replace(/(authToken=)[^&]+/, "$1***");
-}
