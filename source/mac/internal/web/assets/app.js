@@ -68,10 +68,19 @@ $(function () {
   const FIELDS = [
     '#local-ip', '#peer-ip', '#listen', '#peer-udp',
     '#egress-iface', '#egress-subnet',
-    '#camp-url', '#camp-stun', '#camp-name', '#camp-room',
+    '#camp-url', '#camp-stun', '#camp-name', '#camp-id',
   ];
   const storageKey = (sel) => 'f2f:' + sel.slice(1);
   function restoreForm() {
+    // One-shot migration: the old key was f2f:camp-room before the
+    // rename. If the user has a value there and nothing yet under the
+    // new key, carry it over once. Safe to leave indefinitely.
+    const legacyRoom = localStorage.getItem('f2f:camp-room');
+    if (legacyRoom && !localStorage.getItem('f2f:camp-id')) {
+      localStorage.setItem('f2f:camp-id', legacyRoom);
+    }
+    if (legacyRoom !== null) localStorage.removeItem('f2f:camp-room');
+
     FIELDS.forEach((sel) => {
       const v = localStorage.getItem(storageKey(sel));
       if (v !== null && v !== '') $(sel).val(v);
@@ -118,12 +127,22 @@ $(function () {
   // Auto-start fires once after the first /api/status response that says
   // the engine is stopped *and* we have a camp identity stored. After
   // that, the user is in control via the Start/Stop buttons.
+  //
+  // We also flip `autoStarted` on the first time we *see* the engine
+  // running (e.g. it was already up before the page loaded). Otherwise
+  // the user's first manual Stop would be immediately followed by an
+  // auto-Start, which races with camp's session cleanup and fails with
+  // "name_taken".
   let autoStarted = false;
   function maybeAutoStart(s) {
-    if (autoStarted || s.running) return;
+    if (autoStarted) return;
+    if (s.running) {
+      autoStarted = true;
+      return;
+    }
     const name = $('#camp-name').val().trim();
-    const room = $('#camp-room').val().trim();
-    if (!name || !room) return;
+    const id = $('#camp-id').val().trim();
+    if (!name || !id) return;
     autoStarted = true;
     triggerStart();
   }
@@ -132,7 +151,7 @@ $(function () {
     maybeAutoStart(s);
     if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', true);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
         '#local-ip': s.local_ip,
@@ -150,13 +169,13 @@ $(function () {
       });
     } else {
       setEngineState('stopped', 'start', '');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', false);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', false);
     }
     // Camp status row — shown only when camp is actually active.
     const $campStatus = $('#camp-status');
     if (s.camp_active) {
       const lines = [
-        `connected as ${s.camp_name}@${s.camp_room}`,
+        `connected as ${s.camp_name}@${s.camp_id}`,
         s.camp_reflex ? `reflex ${s.camp_reflex}` : '',
         s.camp_peer_name ? `peer ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
       ].filter(Boolean);
@@ -376,7 +395,7 @@ $(function () {
       camp_url: $('#camp-url').val().trim(),
       camp_stun: $('#camp-stun').val().trim(),
       camp_name: $('#camp-name').val().trim(),
-      camp_room: $('#camp-room').val().trim(),
+      camp_id: $('#camp-id').val().trim(),
     };
     setEngineState('loading', 'starting…', '');
     $.ajax({
@@ -645,15 +664,15 @@ $(function () {
     });
   }
 
-  // Camp tab — list of peers in our current room. Polls our local proxy
-  // (/api/camp/peers), which in turn fetches /api/rooms/<room> from the
+  // Camp tab — list of peers in our current camp. Polls our local proxy
+  // (/api/camp/peers), which in turn fetches /api/id/<camp_id> from the
   // configured camp server. Off-state ("engine not running") is the only
-  // non-happy branch; once we're in a room there's always at least one
+  // non-happy branch; once we're in a camp there's always at least one
   // peer (us).
   const $campStatus = $('#camp-peers-status');
   const $campTable = $('#camp-peers-table');
   const $campBody = $('#camp-peers-tbody');
-  const $campRoomMeta = $('#camp-room-meta');
+  const $campIDMeta = $('#camp-id-meta');
 
   function humanAgo(ts) {
     const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -669,13 +688,13 @@ $(function () {
     if (!data || data.running === false) {
       $campStatus.text('engine not running').show();
       $campTable.addClass('hidden');
-      $campRoomMeta.text('');
+      $campIDMeta.text('');
       return;
     }
     const peers = Array.isArray(data.peers) ? data.peers : [];
-    $campRoomMeta.text(data.room || '');
+    $campIDMeta.text(data.camp_id || '');
     if (peers.length === 0) {
-      $campStatus.text('no peers in this room').show();
+      $campStatus.text('no peers in this camp').show();
       $campTable.addClass('hidden');
       return;
     }
@@ -700,7 +719,7 @@ $(function () {
     $.ajax({ url: '/api/camp/peers', dataType: 'json' })
       .done(renderCampPeers)
       .fail(() => {
-        $campStatus.text('failed to fetch room state').show();
+        $campStatus.text('failed to fetch camp state').show();
         $campTable.addClass('hidden');
       });
   }

@@ -1,12 +1,13 @@
 // f2f-camp — rendezvous server for f2f peers.
 //
 // Each peer opens one WebSocket to /ws, sends a "hello" with their name +
-// room + (optionally) UDP port, and then receives the current peer list
-// plus push notifications when peers join / leave / update. Signal messages
-// are forwarded peer-to-peer through the server for hole-punching setup.
+// camp_id + (optionally) UDP port, and then receives the current peer
+// list plus push notifications when peers join / leave / update. Signal
+// messages are forwarded peer-to-peer through the server for
+// hole-punching setup.
 //
 // State is in-memory and per-process — fly.io single-instance is fine for
-// MVP. Two instances would require pinning peers in the same room to the
+// MVP. Two instances would require pinning peers in the same camp to the
 // same node (sticky sessions) or moving to a shared store.
 
 import type { ServerWebSocket } from "bun";
@@ -17,7 +18,7 @@ import type { ClientMsg, PeerInfo, ServerMsg } from "./types";
 const PORT = Number(Bun.env.PORT ?? 8080);
 const STUN_PORT = Number(Bun.env.STUN_PORT ?? 3478);
 const MAX_NAME_LEN = 64;
-const MAX_ROOM_LEN = 128;
+const MAX_CAMP_ID_LEN = 128;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
 const hub = new Hub();
@@ -66,19 +67,19 @@ const server = Bun.serve<SocketData>({
     if (url.pathname === "/api/stats") {
       return Response.json(hub.stats());
     }
-    if (url.pathname.startsWith("/api/rooms/")) {
-      const name = decodeURIComponent(url.pathname.slice("/api/rooms/".length));
-      if (!isValidRoomName(name)) {
-        return Response.json({ error: "invalid room name" }, { status: 400 });
+    if (url.pathname.startsWith("/api/id/")) {
+      const id = decodeURIComponent(url.pathname.slice("/api/id/".length));
+      if (!isValidCampID(id)) {
+        return Response.json({ error: "invalid camp id" }, { status: 400 });
       }
-      return Response.json({ room: name, peers: hub.list(name) });
+      return Response.json({ camp_id: id, peers: hub.list(id), now: Date.now() });
     }
-    if (url.pathname.startsWith("/room/")) {
-      const name = decodeURIComponent(url.pathname.slice("/room/".length));
-      if (!isValidRoomName(name)) {
-        return new Response("invalid room name", { status: 400 });
+    if (url.pathname.startsWith("/id/")) {
+      const id = decodeURIComponent(url.pathname.slice("/id/".length));
+      if (!isValidCampID(id)) {
+        return new Response("invalid camp id", { status: 400 });
       }
-      return renderRoomPage(name, hub.list(name));
+      return renderCampPage(id, hub.list(id));
     }
     if (url.pathname === "/healthz") {
       return new Response("ok");
@@ -88,7 +89,7 @@ const server = Bun.serve<SocketData>({
         `f2f-camp — rendezvous for f2f peers\n` +
           `WebSocket:  ${url.origin.replace(/^http/, "ws")}/ws\n` +
           `Stats:      ${url.origin}/api/stats\n` +
-          `Room view:  ${url.origin}/room/<name>\n`,
+          `Camp view:  ${url.origin}/id/<camp-id>\n`,
         { headers: { "content-type": "text/plain" } },
       );
     }
@@ -148,9 +149,9 @@ const server = Bun.serve<SocketData>({
     close(ws) {
       const peer = ws.data.peer;
       if (!peer) return;
-      hub.leave(peer.room, peer.info.name);
-      hub.broadcast(peer.room, { type: "peer-left", name: peer.info.name });
-      console.log(`leave: ${peer.info.name}@${peer.room}`);
+      hub.leave(peer.campID, peer.info.name);
+      hub.broadcast(peer.campID, { type: "peer-left", name: peer.info.name });
+      console.log(`leave: ${peer.info.name}@${peer.campID}`);
     },
     drain(_ws) {
       // Backpressure relief; nothing to do here, we don't queue large
@@ -180,17 +181,17 @@ function handleHello(
   msg: Extract<ClientMsg, { type: "hello" }>,
 ) {
   const name = String(msg.name ?? "");
-  const room = String(msg.room ?? "");
+  const campID = String(msg.camp_id ?? "");
   if (!name || name.length > MAX_NAME_LEN || !NAME_RE.test(name)) {
     fail(ws, "bad_name", "name must match [A-Za-z0-9_.-]+ and be ≤64 chars");
     return;
   }
-  if (!room || room.length > MAX_ROOM_LEN || !NAME_RE.test(room)) {
-    fail(ws, "bad_room", "room must match [A-Za-z0-9_.-]+ and be ≤128 chars");
+  if (!isValidCampID(campID)) {
+    fail(ws, "bad_camp_id", "camp_id must match [A-Za-z0-9_.-]+ and be ≤128 chars");
     return;
   }
-  if (hub.has(room, name)) {
-    fail(ws, "name_taken", `peer "${name}" already in room "${room}"`);
+  if (hub.has(campID, name)) {
+    fail(ws, "name_taken", `peer "${name}" already in camp "${campID}"`);
     return;
   }
 
@@ -202,20 +203,20 @@ function handleHello(
     tunnel_ip: "", // filled by hub.join
     joined_at: Date.now(),
   });
-  const peer: Peer = { ws, room, info };
+  const peer: Peer = { ws, campID, info };
   let joined;
   try {
-    joined = hub.join(room, peer);
+    joined = hub.join(campID, peer);
   } catch (err) {
-    fail(ws, "room_full", (err as Error).message);
+    fail(ws, "camp_full", (err as Error).message);
     return;
   }
   ws.data.peer = peer;
 
-  send(ws, { type: "welcome", you: info, room, peers: joined.existing });
-  hub.broadcast(room, { type: "peer-joined", peer: info }, name);
+  send(ws, { type: "welcome", you: info, camp_id: campID, peers: joined.existing });
+  hub.broadcast(campID, { type: "peer-joined", peer: info }, name);
   console.log(
-    `join: ${name}@${room} ${joined.tunnelIP} from ${publicIP}${info.udp_port ? `:${info.udp_port}` : ""}`,
+    `join: ${name}@${campID} ${joined.tunnelIP} from ${publicIP}${info.udp_port ? `:${info.udp_port}` : ""}`,
   );
 }
 
@@ -230,7 +231,7 @@ function handleAnnounce(
     return;
   }
   peer.info = makeEndpoint({ ...peer.info, udp_port: port });
-  hub.broadcast(peer.room, { type: "peer-updated", peer: peer.info });
+  hub.broadcast(peer.campID, { type: "peer-updated", peer: peer.info });
 }
 
 function handleSignal(
@@ -238,10 +239,9 @@ function handleSignal(
   msg: Extract<ClientMsg, { type: "signal" }>,
 ) {
   const peer = ws.data.peer!;
-  const room = (peer as Peer & { room: string }).room;
-  const target = hub.get(room, String(msg.to));
+  const target = hub.get(peer.campID, String(msg.to));
   if (!target) {
-    fail(ws, "no_peer", `no peer "${msg.to}" in room`);
+    fail(ws, "no_peer", `no peer "${msg.to}" in camp`);
     return;
   }
   send(target.ws, { type: "signal", from: peer.info.name, payload: msg.payload });
@@ -249,13 +249,12 @@ function handleSignal(
 
 function handleList(ws: ServerWebSocket<SocketData>) {
   const peer = ws.data.peer!;
-  const room = (peer as Peer & { room: string }).room;
-  const peers = hub.list(room).filter((p) => p.name !== peer.info.name);
-  send(ws, { type: "welcome", you: peer.info, room, peers });
+  const peers = hub.list(peer.campID).filter((p) => p.name !== peer.info.name);
+  send(ws, { type: "welcome", you: peer.info, camp_id: peer.campID, peers });
 }
 
-function isValidRoomName(name: string): boolean {
-  return name.length > 0 && name.length <= MAX_ROOM_LEN && NAME_RE.test(name);
+function isValidCampID(id: string): boolean {
+  return id.length > 0 && id.length <= MAX_CAMP_ID_LEN && NAME_RE.test(id);
 }
 
 function escapeHTML(s: string): string {
@@ -279,7 +278,7 @@ function ago(ts: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
-function renderRoomPage(roomName: string, peers: PeerInfo[]): Response {
+function renderCampPage(campID: string, peers: PeerInfo[]): Response {
   const rows = peers
     .map((p) => {
       const endpoint = p.udp_endpoint ?? `${p.public_ip}${p.udp_port ? ":" + p.udp_port : ""}`;
@@ -293,19 +292,20 @@ function renderRoomPage(roomName: string, peers: PeerInfo[]): Response {
     .join("\n");
   const body =
     peers.length === 0
-      ? `<p class="muted">no peers in this room</p>`
+      ? `<p class="muted">no peers in this camp</p>`
       : `<table>
       <thead><tr><th>name</th><th>tunnel ip</th><th>udp endpoint</th><th>joined</th></tr></thead>
       <tbody>
 ${rows}
       </tbody>
     </table>`;
+  const renderedAt = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
   const html = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="5">
-  <title>f2f-camp · ${escapeHTML(roomName)}</title>
+  <title>f2f-camp · ${escapeHTML(campID)}</title>
   <style>
     body { background: #111; color: #ddd; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 24px; margin: 0; }
     h1 { font-size: 14px; color: #888; font-weight: normal; margin: 0 0 16px; }
@@ -314,11 +314,13 @@ ${rows}
     th, td { padding: 4px 24px 4px 0; text-align: left; vertical-align: top; }
     th { color: #666; font-weight: normal; border-bottom: 1px solid #333; padding-bottom: 6px; }
     .muted { color: #666; }
+    footer { color: #555; font-size: 12px; margin-top: 24px; }
   </style>
 </head>
 <body>
-  <h1>room <strong>${escapeHTML(roomName)}</strong> · ${peers.length} peer${peers.length === 1 ? "" : "s"}</h1>
+  <h1>camp <strong>${escapeHTML(campID)}</strong> · ${peers.length} peer${peers.length === 1 ? "" : "s"}</h1>
   ${body}
+  <footer>data as of ${renderedAt} · refreshes every 5s</footer>
 </body>
 </html>
 `;

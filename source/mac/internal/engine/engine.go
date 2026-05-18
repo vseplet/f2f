@@ -28,12 +28,12 @@ import (
 
 // CampConfig points the engine at a rendezvous (camp) server: instead of
 // the user supplying the peer's UDP endpoint via --peer, we discover our
-// own external endpoint via STUN, register with camp under (Name, Room),
-// and adopt the other peer in the same room when it announces an endpoint.
+// own external endpoint via STUN, register with camp under (Name, ID),
+// and adopt the other peer in the same camp when it announces an endpoint.
 type CampConfig struct {
 	URL      string // wss://f2f-camp.fly.dev/ws
-	Name     string // our identity within Room
-	Room     string // shared room name
+	Name     string // our identity within the camp
+	ID       string // shared camp id (was previously called "room")
 	StunAddr string // host:port for the UDP STUN probe (e.g. f2f-camp.fly.dev:3478)
 }
 
@@ -66,8 +66,8 @@ type Status struct {
 	CampActive     bool            `json:"camp_active"`
 	CampURL        string          `json:"camp_url,omitempty"`
 	CampName       string          `json:"camp_name,omitempty"`
-	CampRoom       string          `json:"camp_room,omitempty"`
-	CampPeerName   string          `json:"camp_peer_name,omitempty"`     // adopted peer's name in the room
+	CampID         string          `json:"camp_id,omitempty"`
+	CampPeerName   string          `json:"camp_peer_name,omitempty"`     // adopted peer's name in the camp
 	CampReflex     string          `json:"camp_reflex,omitempty"`        // our own external endpoint per STUN
 	Intercepts     []InterceptInfo `json:"intercepts"`
 	InboundAllow   []InterceptInfo `json:"inbound_allow"`
@@ -156,8 +156,8 @@ func (e *Engine) Start(cfg Config) error {
 		if cfg.Listen == "" {
 			return errors.New("Camp mode requires Listen")
 		}
-		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.Room == "" || cfg.Camp.StunAddr == "" {
-			return errors.New("Camp.{URL,Name,Room,StunAddr} all required")
+		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.ID == "" || cfg.Camp.StunAddr == "" {
+			return errors.New("Camp.{URL,Name,ID,StunAddr} all required")
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
@@ -225,7 +225,7 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("camp: STUN reflex %s (advertised port %d)", reflex, reflex.Port)
 
 		dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		client, w, err := rendezvous.Dial(dialCtx, cfg.Camp.URL, cfg.Camp.Name, cfg.Camp.Room, reflex.Port)
+		client, w, err := rendezvous.Dial(dialCtx, cfg.Camp.URL, cfg.Camp.Name, cfg.Camp.ID, reflex.Port)
 		dialCancel()
 		if err != nil {
 			e.rollbackPartial()
@@ -244,7 +244,7 @@ func (e *Engine) Start(cfg Config) error {
 		// peerIP stays as the user-provided value; it's only used for
 		// utun's point-to-point pair in static mode. In Camp mode utun
 		// is opened as a subnet so peerIP doesn't matter.
-		log.Printf("camp: registered as %s in room %s, tunnel_ip=%s", cfg.Camp.Name, cfg.Camp.Room, localIP)
+		log.Printf("camp: registered as %s in camp %s, tunnel_ip=%s", cfg.Camp.Name, cfg.Camp.ID, localIP)
 	}
 
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
@@ -293,10 +293,10 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
-	// If camp's welcome told us about peers already in the room, adopt
+	// If camp's welcome told us about peers already in the camp, adopt
 	// the first one with a known UDP endpoint — two-party tunnel for now.
 	if welcome != nil {
-		log.Printf("camp: %d existing peer(s) in room", len(welcome.Peers))
+		log.Printf("camp: %d existing peer(s) in camp", len(welcome.Peers))
 		for _, p := range welcome.Peers {
 			if p.UDPEndpoint != "" {
 				e.adoptCampPeer(p)
@@ -474,7 +474,7 @@ func (e *Engine) Status() Status {
 			st.CampActive = e.camp != nil
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
-			st.CampRoom = e.cfg.Camp.Room
+			st.CampID = e.cfg.Camp.ID
 			if r := e.campReflex.Load(); r != nil {
 				st.CampReflex = *r
 			}

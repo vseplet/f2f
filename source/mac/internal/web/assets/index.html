@@ -33,10 +33,30 @@
     </div>
 
     <div id="tab-camp" class="tab-panel">
+      <!-- Identity: who we are in the camp. Editing these is the main
+           thing the user does on the camp tab; engine reads them on
+           start. -->
       <div class="ax-frame ax-section">
         <div class="ax-section-title">
-          <span>— room</span>
-          <span class="ax-meta" id="camp-room-meta"></span>
+          <span>— identity</span>
+        </div>
+        <div class="ax-grid-2">
+          <div class="ax-field">
+            <label>name</label>
+            <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+          </div>
+          <div class="ax-field">
+            <label>camp id</label>
+            <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+          </div>
+        </div>
+        <div id="camp-status" class="ax-section-status"></div>
+      </div>
+
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— peers</span>
+          <span class="ax-meta" id="camp-id-meta"></span>
         </div>
         <div id="camp-peers-status" class="ax-section-status">loading…</div>
         <table id="camp-peers-table" class="hidden" style="width:100%;border-collapse:collapse;margin-top:8px">
@@ -54,24 +74,13 @@
     </div><!-- /#tab-camp -->
 
     <div id="tab-tunnel" class="tab-panel hidden">
-      <!-- Identity: the only two things you usually touch -->
+      <!-- Engine config — everything that isn't identity. Camp name/id
+           live on the camp tab now. -->
       <div class="ax-frame ax-section">
         <div class="ax-section-title">
-          <span>— identity</span>
+          <span>— config</span>
           <span class="ax-meta" id="identity-meta"></span>
         </div>
-        <div class="ax-grid-2">
-          <div class="ax-field">
-            <label>name</label>
-            <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
-          </div>
-          <div class="ax-field">
-            <label>room</label>
-            <input id="camp-room" type="text" class="ax-input" placeholder="room name">
-          </div>
-        </div>
-        <div id="camp-status" class="ax-section-status"></div>
-
         <details class="ax-advanced">
           <summary>advanced</summary>
           <div class="ax-advanced-body">

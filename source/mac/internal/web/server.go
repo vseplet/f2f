@@ -318,7 +318,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.Status())
 }
 
-// handleCampPeers proxies the engine's current camp room state from the
+// handleCampPeers proxies the engine's current camp state from the
 // rendezvous server to the browser. Keeps camp URL server-side so the
 // page never needs to know it, and sidesteps CORS.
 func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +332,7 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	target := base + "/api/rooms/" + url.PathEscape(st.CampRoom)
+	target := base + "/api/id/" + url.PathEscape(st.CampID)
 	req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -349,8 +349,8 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Room  string          `json:"room"`
-		Peers json.RawMessage `json:"peers"`
+		CampID string          `json:"camp_id"`
+		Peers  json.RawMessage `json:"peers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("decode camp: %w", err))
@@ -359,7 +359,7 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running": true,
 		"you":     st.CampName,
-		"room":    body.Room,
+		"camp_id": body.CampID,
 		"peers":   body.Peers,
 	})
 }
@@ -403,7 +403,7 @@ type startRequest struct {
 	CampURL      string   `json:"camp_url"`
 	CampStun     string   `json:"camp_stun"`
 	CampName     string   `json:"camp_name"`
-	CampRoom     string   `json:"camp_room"`
+	CampID       string   `json:"camp_id"`
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +422,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		EgressIface:  req.EgressIface,
 		EgressSubnet: req.EgressSubnet,
 	}
-	if req.CampName != "" && req.CampRoom != "" {
+	if req.CampName != "" && req.CampID != "" {
 		url := req.CampURL
 		if url == "" {
 			url = "wss://f2f-camp.fly.dev/ws"
@@ -435,7 +435,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			URL:      url,
 			StunAddr: stun,
 			Name:     req.CampName,
-			Room:     req.CampRoom,
+			ID:       req.CampID,
 		}
 	}
 	if err := s.engine.Start(cfg); err != nil {

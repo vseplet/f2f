@@ -36,9 +36,9 @@ type Event struct {
 
 // Client is a long-lived connection to a camp server.
 type Client struct {
-	url  string
-	name string
-	room string
+	url    string
+	name   string
+	campID string
 
 	conn   *websocket.Conn
 	events chan Event
@@ -51,7 +51,7 @@ type Client struct {
 
 // Welcome is the result of a successful handshake with the camp server.
 // You is *our* PeerInfo (including the camp-assigned TunnelIP);
-// Peers lists every other peer already in the room.
+// Peers lists every other peer already in the camp.
 type Welcome struct {
 	You   PeerInfo
 	Peers []PeerInfo
@@ -65,7 +65,7 @@ type Welcome struct {
 // udpPort is what we advertise to the other peer; pass the *external*
 // port (from a prior STUN probe) when behind NAT, or just the local port
 // in trivial setups.
-func Dial(ctx context.Context, url, name, room string, udpPort int) (*Client, *Welcome, error) {
+func Dial(ctx context.Context, url, name, campID string, udpPort int) (*Client, *Welcome, error) {
 	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("ws dial %q: %w", url, err)
@@ -76,13 +76,13 @@ func Dial(ctx context.Context, url, name, room string, udpPort int) (*Client, *W
 	c := &Client{
 		url:       url,
 		name:      name,
-		room:      room,
+		campID:    campID,
 		conn:      conn,
 		events:    make(chan Event, 32),
 		pingEvery: 30 * time.Second,
 	}
 
-	hello, err := json.Marshal(helloMsg{Type: "hello", Name: name, Room: room, UDPPort: udpPort})
+	hello, err := json.Marshal(helloMsg{Type: "hello", Name: name, CampID: campID, UDPPort: udpPort})
 	if err != nil {
 		_ = conn.CloseNow()
 		return nil, nil, err
@@ -202,7 +202,7 @@ func (c *Client) Announce(ctx context.Context, udpPort int) error {
 	return c.send(ctx, announceMsg{Type: "announce", UDPPort: udpPort})
 }
 
-// Signal sends an arbitrary payload to a specific peer in the room.
+// Signal sends an arbitrary payload to a specific peer in the camp.
 func (c *Client) Signal(ctx context.Context, to string, payload any) error {
 	return c.send(ctx, signalMsg{Type: "signal", To: to, Payload: payload})
 }

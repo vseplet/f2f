@@ -2,7 +2,7 @@
 
 // Package rendezvous talks to the f2f-camp server: discovers our external
 // UDP endpoint via the STUN-like probe, and uses a WebSocket to register
-// our identity and learn about the other peer in our room.
+// our identity and learn about the other peer in our camp.
 //
 // All JSON wire types here mirror those in source/camp/src/types.ts —
 // keep them in sync.
@@ -14,7 +14,7 @@ type PeerInfo struct {
 	PublicIP    string `json:"public_ip"`
 	UDPPort     int    `json:"udp_port,omitempty"`
 	UDPEndpoint string `json:"udp_endpoint,omitempty"`
-	TunnelIP    string `json:"tunnel_ip"` // camp-assigned IP inside the room's /24 overlay
+	TunnelIP    string `json:"tunnel_ip"` // camp-assigned IP inside the camp's /24 overlay
 	JoinedAt    int64  `json:"joined_at"`
 }
 
@@ -23,7 +23,7 @@ type PeerInfo struct {
 type helloMsg struct {
 	Type    string `json:"type"` // "hello"
 	Name    string `json:"name"`
-	Room    string `json:"room"`
+	CampID  string `json:"camp_id"`
 	UDPPort int    `json:"udp_port,omitempty"`
 }
 
@@ -45,10 +45,10 @@ type pingMsg struct {
 // --- server → client ---
 
 type welcomeMsg struct {
-	Type  string     `json:"type"` // "welcome"
-	You   PeerInfo   `json:"you"`
-	Room  string     `json:"room"`
-	Peers []PeerInfo `json:"peers"`
+	Type   string     `json:"type"` // "welcome"
+	You    PeerInfo   `json:"you"`
+	CampID string     `json:"camp_id"`
+	Peers  []PeerInfo `json:"peers"`
 }
 
 type errorMsg struct {

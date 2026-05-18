@@ -11,7 +11,7 @@ export type PeerInfo = {
   // open and the peer's first `announce`.
   udp_port?: number;
   udp_endpoint?: string;
-  // Camp-assigned IP inside the room's virtual subnet (e.g. 10.99.0.3).
+  // Camp-assigned IP inside the camp's virtual subnet (e.g. 10.99.0.3).
   // The peer puts this on its local utun; other peers' tunnel_ip values
   // are how it reaches them through the overlay.
   tunnel_ip: string;
@@ -22,8 +22,8 @@ export type PeerInfo = {
 
 export type Hello = {
   type: "hello";
-  name: string; // unique within the room
-  room: string;
+  name: string; // unique within the camp
+  camp_id: string;
   udp_port?: number; // optional; can also be sent later via announce
 };
 
@@ -34,7 +34,7 @@ export type Announce = {
 
 export type Signal = {
   type: "signal";
-  to: string; // peer name within the same room
+  to: string; // peer name within the same camp
   payload: unknown;
 };
 
@@ -48,7 +48,7 @@ export type ClientMsg = Hello | Announce | Signal | List | Ping;
 export type Welcome = {
   type: "welcome";
   you: PeerInfo;
-  room: string;
+  camp_id: string;
   peers: PeerInfo[];
 };
 
