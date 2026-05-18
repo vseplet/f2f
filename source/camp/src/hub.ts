@@ -1,83 +1,128 @@
-import type { ServerWebSocket } from "bun";
-import type { PeerInfo, ServerMsg } from "./types";
+import type { PeerInfo } from "./types";
 
-// Peer is the live state for a connected WebSocket. The PeerInfo we expose
-// to other peers is derived from this; room is kept here (not in PeerInfo)
-// because it's a server-side membership thing, not part of the peer's
-// public identity.
+// Peer is the live state for a registered peer. We key by camp_id+name
+// in the parent Hub; the campID field here is mainly for outbound
+// PeerInfo construction (we never publish it, but the Hub keeps a
+// reverse map for eviction).
 export type Peer = {
-  ws: ServerWebSocket<SocketData>;
-  room: string;
+  campID: string;
   info: PeerInfo;
+  lastSeen: number; // epoch ms
 };
 
-// SocketData is attached to each WebSocket so we know which peer owns it
-// without an extra lookup map. It's only populated after the hello handshake.
-export type SocketData = {
-  peer: Peer | null;
+// Each camp is its own /24 overlay (10.99.0.0/24): peers reserve a
+// 10.99.0.X within the camp when they join, and release it when they
+// leave. The 0th address is reserved as the subnet's network address;
+// .255 is reserved as broadcast. Two camps can both use .1, .2 — they
+// never share a subnet between them at the wire level.
+const SUBNET_PREFIX = "10.99.0";
+const FIRST_HOST = 1;
+const LAST_HOST = 254;
+
+type Camp = {
+  peers: Map<string, Peer>;
+  allocated: Set<number>; // last octet of in-use IPs
 };
 
 export class Hub {
-  // room name → peer name → peer
-  private rooms = new Map<string, Map<string, Peer>>();
+  private camps = new Map<string, Camp>();
 
-  // Add peer to its room. Returns the snapshot of peers already present
-  // (excluding the new one) so the caller can build the Welcome message
-  // before broadcasting peer-joined.
-  join(room: string, peer: Peer): { existing: PeerInfo[] } {
-    let r = this.rooms.get(room);
-    if (!r) {
-      r = new Map();
-      this.rooms.set(room, r);
+  // Upsert is the announce-driven path: either refresh an existing
+  // peer's endpoint+lastSeen, or join a brand-new one. Returns the
+  // PeerInfo to send back in the announce reply. Throws if the camp is
+  // full when joining for the first time.
+  upsert(campID: string, name: string, publicIP: string, udpPort: number): PeerInfo {
+    let c = this.camps.get(campID);
+    if (!c) {
+      c = { peers: new Map(), allocated: new Set() };
+      this.camps.set(campID, c);
     }
-    const existing = Array.from(r.values()).map((p) => p.info);
-    r.set(peer.info.name, peer);
-    return { existing };
+    const now = Date.now();
+    const existing = c.peers.get(name);
+    if (existing) {
+      existing.info.public_ip = publicIP;
+      existing.info.udp_port = udpPort;
+      existing.info.udp_endpoint = `${publicIP}:${udpPort}`;
+      existing.lastSeen = now;
+      return existing.info;
+    }
+    const octet = this.nextOctet(c);
+    if (octet < 0) throw new Error(`camp ${campID} is full`);
+    c.allocated.add(octet);
+    const info: PeerInfo = {
+      name,
+      public_ip: publicIP,
+      udp_port: udpPort,
+      udp_endpoint: `${publicIP}:${udpPort}`,
+      tunnel_ip: `${SUBNET_PREFIX}.${octet}`,
+      joined_at: now,
+    };
+    c.peers.set(name, { campID, info, lastSeen: now });
+    return info;
   }
 
-  // Remove peer from its room. Returns true if anything was removed.
-  // Empty rooms are dropped from the map so memory doesn't leak on
-  // long-lived servers.
-  leave(room: string, name: string): boolean {
-    const r = this.rooms.get(room);
-    if (!r) return false;
-    const ok = r.delete(name);
-    if (r.size === 0) this.rooms.delete(room);
-    return ok;
+  private nextOctet(c: Camp): number {
+    for (let i = FIRST_HOST; i <= LAST_HOST; i++) {
+      if (!c.allocated.has(i)) return i;
+    }
+    return -1;
   }
 
-  // Find a specific peer in a room (for direct signal forwarding).
-  get(room: string, name: string): Peer | undefined {
-    return this.rooms.get(room)?.get(name);
+  // Find a specific peer in a camp. Currently unused but cheap to keep
+  // around for future signal forwarding etc.
+  get(campID: string, name: string): Peer | undefined {
+    return this.camps.get(campID)?.peers.get(name);
   }
 
-  // True if a peer with this name already lives in the room.
-  has(room: string, name: string): boolean {
-    return this.rooms.get(room)?.has(name) ?? false;
+  // True if a peer with this name already lives in the camp. Used to
+  // distinguish first-time joins from refreshes when validating.
+  has(campID: string, name: string): boolean {
+    return this.camps.get(campID)?.peers.has(name) ?? false;
   }
 
-  // Send a message to every peer in the room *except* the excluded one.
-  broadcast(room: string, msg: ServerMsg, excludeName?: string): void {
-    const r = this.rooms.get(room);
-    if (!r) return;
-    const data = JSON.stringify(msg);
-    for (const p of r.values()) {
-      if (p.info.name === excludeName) continue;
-      try {
-        p.ws.send(data);
-      } catch {
-        // Dead socket. We'll find out via close handler; no need to act
-        // here.
+  // Snapshot of every peer's PeerInfo in a camp. Empty array if the
+  // camp doesn't exist (which is indistinguishable from "0 peers" in
+  // this model).
+  list(campID: string): PeerInfo[] {
+    const c = this.camps.get(campID);
+    if (!c) return [];
+    return Array.from(c.peers.values()).map((p) => p.info);
+  }
+
+  // Evict peers whose lastSeen is older than threshold. Called on a
+  // timer so stale entries don't keep tunnel_ips reserved or pollute
+  // the per-camp HTTP view.
+  evictStale(threshold: number): number {
+    let removed = 0;
+    for (const [campID, c] of this.camps) {
+      for (const [name, p] of c.peers) {
+        if (p.lastSeen < threshold) {
+          c.peers.delete(name);
+          const octet = parseOctet(p.info.tunnel_ip);
+          if (octet >= 0) c.allocated.delete(octet);
+          removed++;
+          console.log(`evict: ${name}@${campID} (idle)`);
+        }
       }
+      if (c.peers.size === 0) this.camps.delete(campID);
     }
+    return removed;
   }
 
   // Snapshot of the whole hub — used by /api/stats for ops visibility.
   stats() {
-    const rooms: Array<{ name: string; peers: string[] }> = [];
-    for (const [name, members] of this.rooms.entries()) {
-      rooms.push({ name, peers: Array.from(members.keys()) });
+    const camps: Array<{ id: string; peers: string[] }> = [];
+    for (const [id, camp] of this.camps.entries()) {
+      camps.push({ id, peers: Array.from(camp.peers.keys()) });
     }
-    return { rooms, total_peers: rooms.reduce((s, r) => s + r.peers.length, 0) };
+    return { camps, total_peers: camps.reduce((s, c) => s + c.peers.length, 0) };
   }
+}
+
+function parseOctet(ip: string | undefined): number {
+  if (!ip) return -1;
+  const parts = ip.split(".");
+  if (parts.length !== 4) return -1;
+  const n = Number(parts[3]);
+  return Number.isInteger(n) && n >= 0 && n <= 255 ? n : -1;
 }

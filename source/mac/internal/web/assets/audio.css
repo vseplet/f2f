@@ -1,0 +1,581 @@
+/* Audio tab — terminal aesthetic. Self-contained: scoped under .ax-frame
+   so it doesn't bleed into the tunnel tab's tailwind layout. */
+
+.ax-frame {
+  background: #181614;
+  color: #d4c8a6;
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 18px 20px;
+  border: 1px dotted #3a3024;
+  border-radius: 6px;
+}
+
+/* Top-level tabbar: by default sits flush with whatever frame is below
+   it (audio panel), sharing a single dotted border. When the tunnel tab
+   is active the tabbar becomes a self-contained rounded box again
+   because there's no terminal-style frame below it. */
+.ax-tabbar {
+  padding: 14px 20px;
+  margin-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  border-bottom: 1px solid #221d16;
+}
+.ax-tabbar .ax-header { margin-bottom: 0; }
+
+#tab-audio > .ax-frame {
+  border-top-style: none;
+  border-radius: 0 0 6px 6px;
+  margin-top: 0;
+}
+
+body:has(#tab-tunnel:not(.hidden)) .ax-tabbar {
+  border-radius: 6px;
+  border-bottom-style: dotted;
+  margin-bottom: 24px;
+}
+
+/* Header row (used inside .ax-tabbar — no bottom margin since the
+   tabbar's solid 1px divider already separates it from content below). */
+.ax-frame .ax-header {
+  display: flex;
+  justify-content: space-between;
+}
+.ax-frame .ax-tabs { display: flex; align-items: center; gap: 6px; }
+.ax-frame .ax-tab {
+  display: inline-block;
+  padding: 4px 12px;
+  color: #7a6e5a;
+  border-radius: 3px;
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.ax-frame .ax-tab:hover { color: #d4c8a6; }
+.ax-frame .ax-tab-active {
+  color: #d4c8a6;
+  background: #2a251c;
+}
+.ax-frame .ax-tab-active:hover { color: #d4c8a6; }
+
+/* Engine toggle in the tabbar (right side): one button that both shows
+ * the current state ("running · utun7" / "stopped") and starts/stops
+ * the engine on click. Replaces the old status pill + start/stop button
+ * pair in the tunnel section. */
+.ax-frame .ax-engine-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  border-radius: 3px;
+  border: 1px solid #3a3024;
+  background: transparent;
+  color: #7a6e5a;
+  cursor: pointer;
+}
+.ax-frame .ax-engine-btn:hover { background: #1c1915; }
+.ax-frame .ax-engine-btn .ax-engine-state { font-size: 11px; }
+.ax-frame .ax-engine-btn .ax-engine-meta:empty { display: none; }
+.ax-frame .ax-engine-btn .ax-engine-meta { color: inherit; opacity: 0.75; }
+
+.ax-frame .ax-engine-btn.state-running {
+  color: #86b86b;
+  border-color: #3a5a30;
+  background: rgba(134, 184, 107, 0.06);
+}
+.ax-frame .ax-engine-btn.state-running:hover { background: rgba(134, 184, 107, 0.14); }
+
+.ax-frame .ax-engine-btn.state-loading {
+  font-style: italic;
+  cursor: wait;
+}
+
+.ax-frame .ax-engine-btn.state-error {
+  color: #c25656;
+  border-color: #6a3030;
+  background: rgba(194, 86, 86, 0.10);
+}
+.ax-frame .ax-engine-btn.state-error:hover { background: rgba(194, 86, 86, 0.18); }
+.ax-frame .ax-sep { color: #4a4030; }
+.ax-frame .ax-hint { color: #7a6e5a; }
+.ax-frame .ax-hint .ax-kbd { margin-left: 4px; }
+
+/* Two video panes */
+.ax-frame .ax-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.ax-frame .ax-pane {
+  background: #1c1915;
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0, transparent 8px,
+    rgba(255,255,255,0.02) 8px, rgba(255,255,255,0.02) 9px);
+  border-radius: 4px;
+  aspect-ratio: 4/3;
+  position: relative;
+  overflow: hidden;
+}
+.ax-frame .ax-pane[data-pane="peer"] { background-color: #151a1d; }
+
+.ax-frame .ax-pane-header {
+  position: absolute;
+  inset: 8px 12px auto 12px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #7a6e5a;
+  z-index: 2;
+  pointer-events: none;
+}
+.ax-frame .ax-pane-label .ax-corner { color: #4a4030; margin-right: 6px; }
+.ax-frame .ax-pane-host { color: #d4c8a6; }
+@keyframes ax-rec-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.ax-frame .ax-pane video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+.ax-frame .ax-pane.has-video video { display: block; }
+/* Mirror local preview (selfie style); peer feed stays as captured. */
+.ax-frame .ax-pane[data-pane="you"] video { transform: scaleX(-1); }
+
+.ax-frame .ax-cam-off {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #6a5e4a;
+}
+.ax-frame .ax-pane.has-video .ax-cam-off { display: none; }
+.ax-frame .ax-cam-off svg { width: 36px; height: 28px; opacity: 0.8; }
+
+.ax-frame .ax-pane-footer {
+  position: absolute;
+  inset: auto 10px 6px 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  color: #7a6e5a;
+  font-size: 11px;
+  z-index: 2;
+  pointer-events: none;
+}
+.ax-frame .ax-res { display: none; }
+.ax-frame .ax-pane.has-video .ax-res { display: inline; }
+
+/* dB meter */
+.ax-frame .ax-db {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  color: #7a6e5a;
+  font-size: 11px;
+}
+.ax-frame .ax-db-min { white-space: nowrap; }
+.ax-frame .ax-db-max { white-space: nowrap; }
+.ax-frame .ax-db-bars {
+  flex: 1;
+  height: 18px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+.ax-frame .ax-db-bar {
+  flex: 1;
+  background: #2a251c;
+  border-radius: 1px;
+  min-height: 2px;
+  height: 2px;
+  transition: height 60ms linear;
+}
+.ax-frame .ax-db-bar.live   { background: #86b86b; }
+.ax-frame .ax-db-bar.warm   { background: #c4a554; }
+.ax-frame .ax-db-bar.hot    { background: #c25656; }
+
+/* Controls row */
+.ax-frame .ax-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) auto auto minmax(180px, 1.6fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ax-frame .ax-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: #1c1915;
+  border: 1px solid #3a3024;
+  border-radius: 4px;
+  color: #d4c8a6;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.ax-frame .ax-btn:hover { background: #221d16; }
+.ax-frame .ax-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ax-frame .ax-btn.hidden { display: none; }
+.ax-frame .ax-btn .ax-btn-state { color: #6a5e4a; }
+.ax-frame .ax-btn .ax-btn-kbd { margin-left: auto; }
+
+.ax-frame .ax-btn.active .ax-btn-state { color: #86b86b; }
+
+/* Big call/hangup button */
+.ax-frame .ax-btn-call {
+  font-size: 14px;
+  font-weight: 500;
+}
+.ax-frame .ax-btn-call .ax-btn-state { color: #86b86b; }
+.ax-frame .ax-btn-call.state-connecting {
+  background: rgba(194, 86, 86, 0.12);
+  border-color: #6a3030;
+  color: #d8a8a8;
+}
+.ax-frame .ax-btn-call.state-connecting .ax-btn-state { color: #c25656; animation: ax-rec-blink 1.4s infinite; }
+.ax-frame .ax-btn-call.state-connected {
+  background: rgba(194, 86, 86, 0.18);
+  border-color: #8a3030;
+  color: #e8b8b8;
+}
+.ax-frame .ax-btn-call.state-connected .ax-btn-state { color: #c25656; }
+.ax-frame .ax-btn-call .ax-btn-meta {
+  margin-left: 4px;
+  color: #a07474;
+  font-size: 12px;
+}
+
+/* Volume control */
+.ax-frame .ax-vol {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #1c1915;
+  border: 1px solid #3a3024;
+  border-radius: 4px;
+}
+.ax-frame .ax-vol-label { color: #7a6e5a; font-size: 12px; }
+.ax-frame .ax-vol-track {
+  flex: 1;
+  height: 12px;
+  background: #2a251c;
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+.ax-frame .ax-vol-fill {
+  height: 100%;
+  background-image:
+    radial-gradient(circle at center, rgba(196,165,84,0.85) 1px, transparent 1.2px),
+    linear-gradient(90deg, rgba(196,165,84,0.10), rgba(196,165,84,0.10));
+  background-size: 4px 4px, 100% 100%;
+  width: 82%;
+  pointer-events: none;
+}
+.ax-frame .ax-vol-value { color: #d4c8a6; font-size: 12px; min-width: 24px; text-align: right; }
+
+/* Debug log */
+.ax-frame .ax-log {
+  background: #15130f;
+  border: 1px solid #2a251c;
+  border-radius: 4px;
+  margin-bottom: 14px;
+}
+.ax-frame .ax-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #7a6e5a;
+  border-bottom: 1px solid #2a251c;
+}
+.ax-frame .ax-log-clear {
+  background: transparent;
+  border: none;
+  color: #7a6e5a;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ax-frame .ax-log-clear:hover { color: #d4c8a6; }
+
+.ax-frame .ax-log-body {
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  padding: 8px 12px;
+}
+
+/* When the call tab is active, expand the whole panel to the viewport
+   height and let the log/chat soak up everything that's left after the
+   fixed-size video, dB meter, controls, and footer rows. */
+body:has(#tab-audio:not(.hidden)) {
+  height: 100vh;
+  overflow: hidden;
+}
+body:has(#tab-audio:not(.hidden)) .max-w-5xl {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+body:has(#tab-audio:not(.hidden)) #tab-audio,
+body:has(#tab-audio:not(.hidden)) #tab-audio > .ax-frame,
+body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log-body {
+  flex: 1;
+  max-height: none;
+  min-height: 0;
+}
+
+/* ---- Tunnel tab: terminal-styled sections ---- */
+.ax-section { padding: 16px 20px; }
+.ax-section + .ax-section { margin-top: 12px; }
+
+.ax-section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: #7a6e5a;
+  margin-bottom: 12px;
+}
+.ax-section-title .ax-meta { color: #9a8e7a; font-size: 12px; }
+
+.ax-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.ax-field { display: flex; flex-direction: column; gap: 4px; }
+.ax-field > label {
+  font-size: 11px;
+  color: #7a6e5a;
+  letter-spacing: 0.3px;
+}
+.ax-input, .ax-select {
+  background: #15130f;
+  border: 1px solid #2a251c;
+  color: #d4c8a6;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 3px;
+  outline: none;
+}
+.ax-input:focus, .ax-select:focus { border-color: #4a4030; background: #1a1814; }
+.ax-input:disabled, .ax-select:disabled { color: #7a6e5a; }
+.ax-input::placeholder { color: #4a4030; opacity: 1; }
+.ax-input:focus::placeholder { color: #5a4e3a; }
+
+details.ax-advanced { margin-top: 12px; }
+details.ax-advanced > summary {
+  cursor: pointer;
+  color: #7a6e5a;
+  font-size: 12px;
+  list-style: none;
+  padding: 4px 0;
+  user-select: none;
+}
+details.ax-advanced > summary::before { content: '▸ '; }
+details.ax-advanced[open] > summary::before { content: '▾ '; }
+details.ax-advanced > summary:hover { color: #d4c8a6; }
+details.ax-advanced > .ax-advanced-body {
+  padding: 10px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ax-section-status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #9a8e7a;
+  padding: 8px 10px;
+  background: rgba(196, 165, 84, 0.05);
+  border-left: 2px solid #c4a554;
+  border-radius: 2px;
+  display: none;
+}
+.ax-section-status.live { display: block; }
+
+.ax-section-actions { margin-top: 14px; display: flex; gap: 8px; }
+.ax-btn-primary {
+  background: rgba(134, 184, 107, 0.08);
+  border-color: #3a5a30;
+  color: #86b86b;
+}
+.ax-btn-primary:hover { background: rgba(134, 184, 107, 0.15); }
+.ax-btn-danger {
+  background: rgba(194, 86, 86, 0.10);
+  border-color: #6a3030;
+  color: #d8a8a8;
+}
+.ax-btn-danger:hover { background: rgba(194, 86, 86, 0.18); }
+
+/* List of intercepts / inbound-allow */
+.ax-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.ax-list-empty { color: #6a5e4a; font-size: 12px; padding: 6px 4px; }
+.ax-list-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #15130f;
+  border: 1px solid #2a251c;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.ax-list-item .ax-list-icon { color: #4a4030; padding-top: 1px; }
+.ax-list-item .ax-list-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ax-list-item .ax-list-spec { color: #d4c8a6; font-weight: 500; }
+.ax-list-item .ax-list-meta {
+  color: #7a6e5a;
+  font-size: 11px;
+  word-break: break-all;
+}
+.ax-list-item .ax-pill {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  margin-left: 6px;
+  border: 1px solid;
+}
+.ax-pill-active { color: #86b86b; border-color: #3a5a30; background: rgba(134, 184, 107, 0.06); }
+.ax-pill-pending { color: #c4a554; border-color: #6a5030; background: rgba(196, 165, 84, 0.06); }
+.ax-list-remove {
+  background: transparent;
+  border: none;
+  color: #7a6e5a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 4px;
+}
+.ax-list-remove:hover { color: #c25656; }
+
+.ax-add-row {
+  display: flex;
+  gap: 8px;
+}
+.ax-add-row .ax-input { flex: 1; }
+
+/* Counters */
+.ax-counters {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+.ax-counter {
+  background: #15130f;
+  border: 1px solid #2a251c;
+  border-radius: 3px;
+  padding: 8px 10px;
+}
+.ax-counter-label { color: #7a6e5a; font-size: 11px; }
+.ax-counter-value { color: #d4c8a6; font-size: 14px; margin-top: 2px; }
+
+/* Tunnel log (existing #log) */
+#log {
+  background: #15130f !important;
+  border: 1px solid #2a251c !important;
+  color: #86b86b !important;
+  border-radius: 3px !important;
+  font-size: 11px !important;
+  padding: 10px !important;
+  margin: 0;
+}
+.ax-frame .ax-log-event {
+  display: grid;
+  grid-template-columns: 90px 70px 1fr;
+  gap: 8px;
+  padding: 1px 0;
+}
+.ax-frame .ax-log-time { color: #6a5e4a; }
+.ax-frame .ax-log-icon { color: #4a4030; text-align: right; padding-right: 6px; }
+.ax-frame .ax-log-icon.event { color: #7a6e5a; }
+.ax-frame .ax-log-msg { color: #d4c8a6; word-break: break-word; }
+.ax-frame .ax-log-event.is-chat .ax-log-icon { text-align: right; color: #c4a554; }
+.ax-frame .ax-log-event.is-chat.from-you .ax-log-icon { color: #86b86b; }
+
+/* Chat input row */
+.ax-frame .ax-chat-input {
+  border-top: 1px solid #2a251c;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ax-frame .ax-chat-prompt { color: #7a6e5a; }
+.ax-frame .ax-chat-input input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #d4c8a6;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 2px 0;
+}
+.ax-frame .ax-chat-input input::placeholder { color: #6a5e4a; }
+.ax-frame .ax-chat-input input:disabled { cursor: not-allowed; }
+
+/* Footer */
+.ax-frame .ax-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px dotted #2a251c;
+  font-size: 11px;
+  color: #7a6e5a;
+}
+.ax-frame .ax-shortcut { margin-left: 12px; }
+.ax-frame .ax-shortcut:first-child { margin-left: 0; }
+
+/* Keyboard hint pill */
+.ax-frame .ax-kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid #3a3024;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #9a8e7a;
+  background: #1c1915;
+  line-height: 1.4;
+  margin-right: 4px;
+  vertical-align: 1px;
+}

@@ -7,6 +7,7 @@ package tunnel
 
 import (
 	"fmt"
+	"net/netip"
 	"os/exec"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
@@ -43,19 +44,62 @@ type Tunnel struct {
 // peerIP is mostly cosmetic at this stage — nothing on the far end exists yet —
 // but a point-to-point address is the conventional way to bring utun up on macOS.
 func Open(localIP, peerIP string) (*Tunnel, error) {
-	dev, err := wgtun.CreateTUN("utun", MTU)
+	dev, name, err := createUtun()
 	if err != nil {
-		return nil, fmt.Errorf("create utun: %w", err)
-	}
-	name, err := dev.Name()
-	if err != nil {
-		_ = dev.Close()
-		return nil, fmt.Errorf("get utun name: %w", err)
+		return nil, err
 	}
 	if err := ifconfigUp(name, localIP, peerIP); err != nil {
 		_ = dev.Close()
 		return nil, err
 	}
+	return newTunnel(dev, name), nil
+}
+
+// OpenSubnet brings a utun up that owns an entire IPv4 subnet:
+// `ifconfig <name> inet <localIP> <localIP> up` (self-loop point-to-point
+// because macOS utun requires a P2P pair) plus a `route add -net <subnet>
+// -interface <name>` so every address in the subnet routes through us.
+// Used in Camp mode where peer tunnel IPs are assigned from a pool and
+// not all of them are known at startup.
+func OpenSubnet(localIP string, prefixLen int) (*Tunnel, error) {
+	a, err := netip.ParseAddr(localIP)
+	if err != nil {
+		return nil, fmt.Errorf("parse local %q: %w", localIP, err)
+	}
+	if !a.Is4() {
+		return nil, fmt.Errorf("only IPv4 supported, got %q", localIP)
+	}
+	subnet := netip.PrefixFrom(a, prefixLen).Masked().String()
+
+	dev, name, err := createUtun()
+	if err != nil {
+		return nil, err
+	}
+	if err := ifconfigUp(name, localIP, localIP); err != nil {
+		_ = dev.Close()
+		return nil, err
+	}
+	if err := routeAddSubnet(subnet, name); err != nil {
+		_ = dev.Close()
+		return nil, err
+	}
+	return newTunnel(dev, name), nil
+}
+
+func createUtun() (wgtun.Device, string, error) {
+	dev, err := wgtun.CreateTUN("utun", MTU)
+	if err != nil {
+		return nil, "", fmt.Errorf("create utun: %w", err)
+	}
+	name, err := dev.Name()
+	if err != nil {
+		_ = dev.Close()
+		return nil, "", fmt.Errorf("get utun name: %w", err)
+	}
+	return dev, name, nil
+}
+
+func newTunnel(dev wgtun.Device, name string) *Tunnel {
 	return &Tunnel{
 		dev:       dev,
 		name:      name,
@@ -64,7 +108,7 @@ func Open(localIP, peerIP string) (*Tunnel, error) {
 		readSizes: make([]int, 1),
 		writeBuf:  make([]byte, MTU+afPrefixLen),
 		writeBufs: make([][]byte, 1),
-	}, nil
+	}
 }
 
 // Name returns the assigned interface name, e.g. "utun5".
@@ -111,6 +155,14 @@ func ifconfigUp(ifname, localIP, peerIP string) error {
 	cmd := exec.Command("/sbin/ifconfig", ifname, "inet", localIP, peerIP, "up")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("ifconfig %s: %w: %s", ifname, err, out)
+	}
+	return nil
+}
+
+func routeAddSubnet(subnet, ifname string) error {
+	cmd := exec.Command("/sbin/route", "-n", "add", "-inet", "-net", subnet, "-interface", ifname)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("route add %s -interface %s: %w: %s", subnet, ifname, err, out)
 	}
 	return nil
 }

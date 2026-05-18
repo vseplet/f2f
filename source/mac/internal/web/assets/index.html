@@ -7,140 +7,299 @@
   <script src="/vendor/tailwind.min.js"></script>
   <script src="/vendor/jquery.min.js"></script>
   <script src="/vendor/d3.min.js"></script>
+  <link rel="stylesheet" href="/audio.css">
 </head>
-<body class="bg-gray-100 min-h-screen">
+<body class="min-h-screen" style="background:#0c0a08;background-image:radial-gradient(circle,#1a1816 1px,transparent 1px);background-size:24px 24px">
   <div class="max-w-5xl mx-auto p-6">
-    <header class="mb-6 flex items-center justify-between">
-      <h1 class="text-2xl font-bold tracking-tight">f2f-mac</h1>
-      <div id="status-indicator" class="px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700">loading…</div>
-    </header>
-
-    <nav class="bg-white rounded-lg shadow mb-6 flex overflow-hidden">
-      <button data-tab="tunnel" class="tab-btn flex-1 px-6 py-3 font-medium text-sm border-b-2 border-blue-500 text-blue-600 bg-blue-50">Tunnel</button>
-      <button data-tab="audio" class="tab-btn flex-1 px-6 py-3 font-medium text-sm border-b-2 border-transparent text-gray-600 hover:text-gray-800 hover:bg-gray-50">Audio</button>
-    </nav>
-
-    <div id="tab-tunnel" class="tab-panel">
-    <section class="bg-white rounded-lg shadow p-6 mb-6">
-      <h2 class="text-lg font-semibold mb-4">Configuration</h2>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Local tunnel IP</label>
-          <input id="local-ip" type="text" value="10.99.0.1" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
+    <div class="ax-frame ax-tabbar">
+      <div class="ax-header">
+        <div class="ax-tabs">
+          <button type="button" data-tab="camp" class="ax-tab ax-tab-active">camp</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="tunnel" class="ax-tab">tunnel</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="dns" class="ax-tab">dns</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="ssh" class="ax-tab">ssh</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="audio" class="ax-tab">meet</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="drop" class="ax-tab">drop</button>
         </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Peer tunnel IP</label>
-          <input id="peer-ip" type="text" value="10.99.0.2" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Listen UDP</label>
-          <input id="listen" type="text" value=":9000" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder=":9000">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Peer UDP</label>
-          <input id="peer-udp" type="text" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm" placeholder="host:9000">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Egress interface (NAT to internet)</label>
-          <select id="egress-iface" class="w-full border border-gray-300 rounded px-3 py-2 text-sm bg-white">
-            <option value="">— disabled —</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Egress subnet</label>
-          <input id="egress-subnet" type="text" value="10.99.0.0/24" class="w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm">
-        </div>
+        <button id="btn-engine" type="button" class="ax-engine-btn state-loading" title="loading…">
+          <span class="ax-engine-state">⋯</span>
+          <span class="ax-engine-label">loading…</span>
+          <span class="ax-engine-meta" id="ax-engine-meta"></span>
+        </button>
       </div>
-      <div class="mt-6 flex gap-3">
-        <button id="btn-start" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Start</button>
-        <button id="btn-stop" class="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded font-medium hidden">Stop</button>
-      </div>
-    </section>
+    </div>
 
-    <section class="bg-white rounded-lg shadow p-6 mb-6">
-      <h2 class="text-lg font-semibold mb-4">Intercepts</h2>
-      <div id="intercept-list" class="space-y-2 mb-4"></div>
-      <div class="flex gap-2">
-        <input id="intercept-input" type="text" placeholder="ya.ru, 1.1.1.1, 10.0.0.0/24" class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm">
-        <button id="btn-add-intercept" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>
+    <div id="tab-camp" class="tab-panel">
+      <!-- Identity: who we are in the camp. Editing these is the main
+           thing the user does on the camp tab; engine reads them on
+           start. -->
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— identity</span>
+        </div>
+        <div class="ax-grid-2">
+          <div class="ax-field">
+            <label>name</label>
+            <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+          </div>
+          <div class="ax-field">
+            <label>camp id</label>
+            <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+          </div>
+        </div>
+        <div id="camp-status" class="ax-section-status"></div>
       </div>
-      <p class="text-xs text-gray-500 mt-2">Saved across sessions in your browser. Entries marked <span class="font-mono">pending</span> get applied automatically on Start.</p>
-    </section>
 
-    <section class="bg-white rounded-lg shadow p-6 mb-6">
-      <h2 class="text-lg font-semibold mb-1">Inbound whitelist</h2>
-      <p class="text-xs text-gray-500 mb-4">Destinations the <strong>peer</strong> is allowed to reach through this node. Empty list = allow everything (current behavior).</p>
-      <div id="allow-list" class="space-y-2 mb-4"></div>
-      <div class="flex gap-2">
-        <input id="allow-input" type="text" placeholder="ya.ru, 1.1.1.1, 142.250.0.0/16" class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm">
-        <button id="btn-add-allow" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded text-sm">Add</button>
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— peers</span>
+          <span class="ax-meta" id="camp-id-meta"></span>
+        </div>
+        <div id="camp-peers-status" class="ax-section-status">loading…</div>
+        <table id="camp-peers-table" class="hidden" style="width:100%;border-collapse:collapse;margin-top:8px">
+          <thead>
+            <tr style="color:#666;border-bottom:1px solid #2a2622">
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">name</th>
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">tunnel ip</th>
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">endpoint</th>
+              <th style="text-align:left;padding:4px 0 6px 0;font-weight:normal">joined</th>
+            </tr>
+          </thead>
+          <tbody id="camp-peers-tbody"></tbody>
+        </table>
       </div>
-      <p class="text-xs text-gray-500 mt-2">Stored in your browser. Applied automatically on Start.</p>
-    </section>
+    </div><!-- /#tab-camp -->
 
-    <section class="bg-white rounded-lg shadow p-6 mb-6">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-lg font-semibold">Topology</h2>
-        <span class="text-xs text-gray-500">drag bubbles · scroll to zoom</span>
+    <div id="tab-tunnel" class="tab-panel hidden">
+      <!-- Engine config — everything that isn't identity. Camp name/id
+           live on the camp tab now. -->
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— config</span>
+          <span class="ax-meta" id="identity-meta"></span>
+        </div>
+        <details class="ax-advanced">
+          <summary>advanced</summary>
+          <div class="ax-advanced-body">
+            <div class="ax-grid-2">
+              <div class="ax-field">
+                <label>camp url</label>
+                <input id="camp-url" type="text" class="ax-input" value="wss://f2f-camp.fly.dev/ws">
+              </div>
+              <div class="ax-field">
+                <label>camp stun</label>
+                <input id="camp-stun" type="text" class="ax-input" value="f2f-camp.fly.dev:3478">
+              </div>
+              <div class="ax-field">
+                <label>local tunnel ip</label>
+                <input id="local-ip" type="text" class="ax-input" value="10.99.0.1">
+              </div>
+              <div class="ax-field">
+                <label>peer tunnel ip</label>
+                <input id="peer-ip" type="text" class="ax-input" value="10.99.0.2">
+              </div>
+              <div class="ax-field">
+                <label>listen udp</label>
+                <input id="listen" type="text" class="ax-input" value=":9000">
+              </div>
+              <div class="ax-field">
+                <label>peer udp (static mode)</label>
+                <input id="peer-udp" type="text" class="ax-input" placeholder="host:9000">
+              </div>
+              <div class="ax-field">
+                <label>egress interface (NAT to internet)</label>
+                <select id="egress-iface" class="ax-select">
+                  <option value="">— disabled —</option>
+                </select>
+              </div>
+              <div class="ax-field">
+                <label>egress subnet</label>
+                <input id="egress-subnet" type="text" class="ax-input" value="10.99.0.0/24">
+              </div>
+            </div>
+          </div>
+        </details>
       </div>
-      <svg id="topology" class="w-full bg-gray-50 rounded" style="height: 360px;"></svg>
-    </section>
 
-    <section class="bg-white rounded-lg shadow p-6 mb-6">
-      <h2 class="text-lg font-semibold mb-4">Counters</h2>
-      <div id="counters" class="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx packets</div><div class="font-mono text-base" id="tx-packets">0</div></div>
-        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">tx bytes</div><div class="font-mono text-base" id="tx-bytes">0</div></div>
-        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx packets</div><div class="font-mono text-base" id="rx-packets">0</div></div>
-        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">rx bytes</div><div class="font-mono text-base" id="rx-bytes">0</div></div>
-        <div class="bg-gray-50 rounded p-3"><div class="text-gray-500">dropped by filter</div><div class="font-mono text-base" id="dropped-inbound">0</div></div>
+      <!-- Intercepts: the active list -->
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— intercepts</span>
+          <span class="ax-meta" id="intercept-meta">0</span>
+        </div>
+        <div id="intercept-list" class="ax-list"></div>
+        <div class="ax-add-row">
+          <input id="intercept-input" type="text" class="ax-input" placeholder="domain, ip, or cidr — comma separated">
+          <button id="btn-add-intercept" class="ax-btn ax-btn-primary">+ add</button>
+        </div>
       </div>
-    </section>
 
-    <section class="bg-white rounded-lg shadow p-6">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-lg font-semibold">Log</h2>
-        <button id="btn-clear-log" class="text-xs text-gray-500 hover:text-gray-800">clear</button>
+      <!-- Inbound whitelist: collapsed by default, advanced -->
+      <div class="ax-frame ax-section">
+        <details class="ax-advanced">
+          <summary>inbound whitelist · <span id="allow-meta">0</span> entries (peer-egress filter)</summary>
+          <div class="ax-advanced-body">
+            <div id="allow-list" class="ax-list"></div>
+            <div class="ax-add-row">
+              <input id="allow-input" type="text" class="ax-input" placeholder="domain, ip, or cidr">
+              <button id="btn-add-allow" class="ax-btn ax-btn-primary">+ add</button>
+            </div>
+          </div>
+        </details>
       </div>
-      <pre id="log" class="bg-gray-900 text-green-300 font-mono text-xs p-3 rounded h-96 overflow-y-auto whitespace-pre-wrap"></pre>
-    </section>
+
+      <!-- Counters + topology under one collapsed diagnostics -->
+      <div class="ax-frame ax-section">
+        <details class="ax-advanced">
+          <summary>diagnostics · counters &amp; topology</summary>
+          <div class="ax-advanced-body">
+            <div class="ax-counters">
+              <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
+              <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
+              <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
+              <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
+              <div class="ax-counter"><div class="ax-counter-label">drops (filter)</div><div class="ax-counter-value" id="dropped-inbound">0</div></div>
+            </div>
+            <svg id="topology" style="width:100%;height:300px;background:#15130f;border:1px solid #2a251c;border-radius:3px;margin-top:8px"></svg>
+          </div>
+        </details>
+      </div>
+
+      <!-- Log -->
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— log</span>
+          <button id="btn-clear-log" class="ax-list-remove" style="margin:0">clear</button>
+        </div>
+        <pre id="log" style="height:280px;overflow-y:auto;white-space:pre-wrap;margin:0"></pre>
+      </div>
     </div><!-- /#tab-tunnel -->
 
+    <div id="tab-dns" class="tab-panel hidden">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— dns</span>
+        </div>
+        <div class="ax-section-status">empty</div>
+      </div>
+    </div><!-- /#tab-dns -->
+
+    <div id="tab-ssh" class="tab-panel hidden">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— ssh</span>
+        </div>
+        <div class="ax-section-status">empty</div>
+      </div>
+    </div><!-- /#tab-ssh -->
+
     <div id="tab-audio" class="tab-panel hidden">
-      <section class="bg-white rounded-lg shadow p-6 mb-6">
-        <h2 class="text-lg font-semibold mb-4">Audio call</h2>
-        <p class="text-sm text-gray-600 mb-4">
-          Direct WebRTC audio over the f2f tunnel — no STUN/TURN. The server rewrites browser
-          mDNS-masked candidates to the actual tunnel IP, so it works in stock Chrome/Firefox
-          without flag tweaks. Engine must be running on both sides.
-        </p>
-
-        <div class="flex items-center gap-3 mb-4">
-          <button id="audio-call-btn" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Call peer</button>
-          <button id="audio-hangup-btn" class="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded font-medium hidden">Hang up</button>
-          <span id="audio-status" class="text-sm text-gray-600">idle</span>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="bg-gray-50 rounded p-3">
-            <div class="text-xs text-gray-500 mb-2">Local mic (muted self-monitor)</div>
-            <audio id="audio-local" controls muted class="w-full"></audio>
+      <div class="ax-frame">
+        <div class="ax-panes">
+          <div class="ax-pane" id="ax-pane-you" data-pane="you">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-you-host">you @ localhost</span></span>
+            </div>
+            <video id="ax-video-you" autoplay muted playsinline></video>
+            <div class="ax-cam-off">
+              <svg viewBox="0 0 40 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="26" height="20" rx="2" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M28 11L38 6v18l-10-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              </svg>
+              <span>camera off</span>
+            </div>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-you">—</span>
+            </div>
           </div>
-          <div class="bg-gray-50 rounded p-3">
-            <div class="text-xs text-gray-500 mb-2">Peer audio</div>
-            <audio id="audio-remote" controls autoplay class="w-full"></audio>
+
+          <div class="ax-pane" id="ax-pane-peer" data-pane="peer">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-peer-host">peer @ —</span></span>
+            </div>
+            <video id="ax-video-peer" autoplay playsinline></video>
+            <div class="ax-cam-off">
+              <svg viewBox="0 0 40 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="26" height="20" rx="2" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M28 11L38 6v18l-10-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              </svg>
+              <span>camera off</span>
+            </div>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-peer">—</span>
+            </div>
           </div>
         </div>
-      </section>
 
-      <section class="bg-white rounded-lg shadow p-6">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-semibold">Signalling log</h2>
-          <button id="audio-clear-log" class="text-xs text-gray-500 hover:text-gray-800">clear</button>
+        <div class="ax-db">
+          <span class="ax-db-min">—12 dB</span>
+          <div class="ax-db-bars" id="ax-db-bars"></div>
+          <span class="ax-db-max">+6</span>
         </div>
-        <pre id="audio-log" class="bg-gray-900 text-amber-200 font-mono text-xs p-3 rounded h-64 overflow-y-auto whitespace-pre-wrap"></pre>
-      </section>
+
+        <div class="ax-controls">
+          <button id="ax-call-btn" class="ax-btn ax-btn-call">
+            <span class="ax-btn-state">▶</span>
+            <span class="ax-btn-label">call peer</span>
+            <span class="ax-btn-meta" id="ax-call-meta"></span>
+            <span class="ax-btn-kbd ax-kbd">↵</span>
+          </button>
+          <button id="ax-mic-btn" class="ax-btn ax-btn-mic" disabled>
+            <span class="ax-btn-state">●</span>
+            <span>mic</span>
+            <span class="ax-btn-kbd ax-kbd">m</span>
+          </button>
+          <button id="ax-cam-btn" class="ax-btn ax-btn-cam" disabled>
+            <span class="ax-btn-state">□</span>
+            <span>cam</span>
+            <span class="ax-btn-kbd ax-kbd">v</span>
+          </button>
+          <div class="ax-vol">
+            <span class="ax-vol-label">vol</span>
+            <div class="ax-vol-track" id="ax-vol-track">
+              <div class="ax-vol-fill" id="ax-vol-fill"></div>
+            </div>
+            <span class="ax-vol-value" id="ax-vol-value">80</span>
+          </div>
+        </div>
+
+        <div class="ax-log">
+          <div class="ax-log-header">
+            <span>— stream · <span id="ax-log-count">0</span> lines</span>
+            <button id="ax-log-clear" class="ax-log-clear">clear <span class="ax-kbd">c</span></button>
+          </div>
+          <div class="ax-log-body" id="ax-log-body"></div>
+          <div class="ax-chat-input">
+            <span class="ax-chat-prompt">›</span>
+            <input id="ax-chat-input" type="text" autocomplete="off" placeholder="connect to chat" disabled />
+            <span class="ax-kbd">↵</span>
+          </div>
+        </div>
+
+        <div class="ax-footer">
+          <div class="ax-shortcuts">
+            <span class="ax-shortcut"><span class="ax-kbd">↵</span>call</span>
+            <span class="ax-shortcut"><span class="ax-kbd">m</span>mute</span>
+            <span class="ax-shortcut"><span class="ax-kbd">v</span>cam</span>
+            <span class="ax-shortcut"><span class="ax-kbd">⌘.</span>hang</span>
+          </div>
+        </div>
+      </div>
     </div><!-- /#tab-audio -->
+
+    <div id="tab-drop" class="tab-panel hidden">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— drop</span>
+        </div>
+        <div class="ax-section-status">empty</div>
+      </div>
+    </div><!-- /#tab-drop -->
   </div>
 
   <script src="/app.js"></script>

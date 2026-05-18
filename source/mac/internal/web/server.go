@@ -9,11 +9,13 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -88,6 +90,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
 	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
@@ -315,15 +318,92 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.Status())
 }
 
+// handleCampPeers proxies the engine's current camp state from the
+// rendezvous server to the browser. Keeps camp URL server-side so the
+// page never needs to know it, and sidesteps CORS.
+func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	if !st.CampActive {
+		writeJSON(w, http.StatusOK, map[string]any{"running": false})
+		return
+	}
+	base, err := campHTTPBase(st.CampURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	target := base + "/api/id/" + url.PathEscape(st.CampID)
+	req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp, err := s.signalHTTP.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("fetch camp: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("camp returned %s", resp.Status))
+		return
+	}
+	var body struct {
+		CampID string          `json:"camp_id"`
+		Peers  json.RawMessage `json:"peers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("decode camp: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": true,
+		"you":     st.CampName,
+		"camp_id": body.CampID,
+		"peers":   body.Peers,
+	})
+}
+
+// campHTTPBase converts the camp WebSocket URL into the matching HTTP
+// origin. Strips the trailing "/ws" path so the result is a clean base
+// for /api/* calls.
+func campHTTPBase(wsURL string) (string, error) {
+	if wsURL == "" {
+		return "", errors.New("camp url not set")
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse camp url %q: %w", wsURL, err)
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	case "http", "https":
+		// already fine
+	default:
+		return "", fmt.Errorf("unsupported camp url scheme %q", u.Scheme)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/ws")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
 type startRequest struct {
-	LocalIP       string   `json:"local_ip"`
-	PeerIP        string   `json:"peer_ip"`
-	Listen        string   `json:"listen"`
-	Peer          string   `json:"peer"`
-	Intercepts    []string `json:"intercepts"`
-	InboundAllow  []string `json:"inbound_allow"`
-	EgressIface   string   `json:"egress_iface"`
-	EgressSubnet  string   `json:"egress_subnet"`
+	LocalIP      string   `json:"local_ip"`
+	PeerIP       string   `json:"peer_ip"`
+	Listen       string   `json:"listen"`
+	Peer         string   `json:"peer"`
+	Intercepts   []string `json:"intercepts"`
+	InboundAllow []string `json:"inbound_allow"`
+	EgressIface  string   `json:"egress_iface"`
+	EgressSubnet string   `json:"egress_subnet"`
+	CampURL      string   `json:"camp_url"`
+	CampStun     string   `json:"camp_stun"`
+	CampName     string   `json:"camp_name"`
+	CampID       string   `json:"camp_id"`
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -333,14 +413,30 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:       req.LocalIP,
-		PeerIP:        req.PeerIP,
-		Listen:        req.Listen,
-		Peer:          req.Peer,
-		Intercepts:    req.Intercepts,
-		InboundAllow:  req.InboundAllow,
-		EgressIface:   req.EgressIface,
-		EgressSubnet:  req.EgressSubnet,
+		LocalIP:      req.LocalIP,
+		PeerIP:       req.PeerIP,
+		Listen:       req.Listen,
+		Peer:         req.Peer,
+		Intercepts:   req.Intercepts,
+		InboundAllow: req.InboundAllow,
+		EgressIface:  req.EgressIface,
+		EgressSubnet: req.EgressSubnet,
+	}
+	if req.CampName != "" && req.CampID != "" {
+		url := req.CampURL
+		if url == "" {
+			url = "wss://f2f-camp.fly.dev/ws"
+		}
+		stun := req.CampStun
+		if stun == "" {
+			stun = "f2f-camp.fly.dev:3478"
+		}
+		cfg.Camp = &engine.CampConfig{
+			URL:      url,
+			StunAddr: stun,
+			Name:     req.CampName,
+			ID:       req.CampID,
+		}
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)

@@ -1,22 +1,21 @@
 $(function () {
-  // Tab switching. Kept dead-simple so it can't possibly break the tunnel
-  // tab's existing wiring — we only toggle visibility classes.
-  $('.tab-btn').on('click', function () {
+  // Tab switching. The terminal-styled tabbar at the top is the only UI:
+  // we toggle .ax-tab-active on the clicked button and swap visible panels.
+  $('.ax-tab').on('click', function () {
     const tab = $(this).data('tab');
-    $('.tab-btn')
-      .removeClass('border-blue-500 text-blue-600 bg-blue-50')
-      .addClass('border-transparent text-gray-600');
-    $(this)
-      .removeClass('border-transparent text-gray-600')
-      .addClass('border-blue-500 text-blue-600 bg-blue-50');
+    if (!tab) return;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $(this).addClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-' + tab).removeClass('hidden');
     $(document).trigger('f2f:tab-changed', [tab]);
   });
 
-  const $status = $('#status-indicator');
-  const $btnStart = $('#btn-start');
-  const $btnStop = $('#btn-stop');
+  const $btnEngine = $('#btn-engine');
+  const $engineState = $btnEngine.find('.ax-engine-state');
+  const $engineLabel = $btnEngine.find('.ax-engine-label');
+  const $engineMeta = $btnEngine.find('.ax-engine-meta');
+  let engineRunning = false;
   const $btnAdd = $('#btn-add-intercept');
   const $btnClearLog = $('#btn-clear-log');
   const $list = $('#intercept-list');
@@ -69,9 +68,19 @@ $(function () {
   const FIELDS = [
     '#local-ip', '#peer-ip', '#listen', '#peer-udp',
     '#egress-iface', '#egress-subnet',
+    '#camp-url', '#camp-stun', '#camp-name', '#camp-id',
   ];
   const storageKey = (sel) => 'f2f:' + sel.slice(1);
   function restoreForm() {
+    // One-shot migration: the old key was f2f:camp-room before the
+    // rename. If the user has a value there and nothing yet under the
+    // new key, carry it over once. Safe to leave indefinitely.
+    const legacyRoom = localStorage.getItem('f2f:camp-room');
+    if (legacyRoom && !localStorage.getItem('f2f:camp-id')) {
+      localStorage.setItem('f2f:camp-id', legacyRoom);
+    }
+    if (legacyRoom !== null) localStorage.removeItem('f2f:camp-room');
+
     FIELDS.forEach((sel) => {
       const v = localStorage.getItem(storageKey(sel));
       if (v !== null && v !== '') $(sel).val(v);
@@ -91,18 +100,70 @@ $(function () {
 
   const errorOf = (xhr) => (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || 'unknown error';
 
+  // setEngineState updates the combined status/toggle button in the
+  // tabbar. `state` ∈ {running, stopped, loading, error}; `label` is the
+  // primary text; `meta` is the small extra ("· utun7", "API error").
+  function setEngineState(state, label, meta) {
+    const icons = { running: '■', stopped: '▶', loading: '⋯', error: '!' };
+    const titles = {
+      running: 'click to stop',
+      stopped: 'click to start',
+      loading: 'loading…',
+      error: 'click to start',
+    };
+    $btnEngine
+      .removeClass('state-running state-stopped state-loading state-error')
+      .addClass('state-' + state)
+      .attr('title', titles[state] || '');
+    $engineState.text(icons[state] || '?');
+    $engineLabel.text(label);
+    $engineMeta.text(meta || '');
+    engineRunning = state === 'running';
+  }
   function refreshStatus() {
-    $.getJSON('/api/status', applyStatus).fail(() => {
-      $status.text('API error').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-rose-200 text-rose-800');
-    });
+    $.getJSON('/api/status', applyStatus).fail(() => setEngineState('error', 'API error', ''));
+  }
+
+  // Auto-start fires once after the first /api/status response that says
+  // the engine is stopped *and* we have a camp identity stored. After
+  // that, the user is in control via the Start/Stop buttons.
+  //
+  // We also flip `autoStarted` on the first time we *see* the engine
+  // running (e.g. it was already up before the page loaded). Otherwise
+  // the user's first manual Stop would be immediately followed by an
+  // auto-Start, which races with camp's session cleanup and fails with
+  // "name_taken".
+  // `pendingOp` guards the engine button against periodic /api/status
+  // races while a Start/Stop is in flight. Both Start and Stop on the
+  // server take a few seconds (utun, routes, STUN, WS close+wait); during
+  // that window the 3s refresh would see the stale running flag and
+  // overwrite our "starting…/stopping…" loading state, then the user's
+  // next click triggers a second operation that races the first and gets
+  // "already running" / a name_taken.
+  let pendingOp = null; // 'starting' | 'stopping' | null
+  let autoStarted = false;
+  function maybeAutoStart(s) {
+    if (autoStarted) return;
+    if (s.running) {
+      autoStarted = true;
+      return;
+    }
+    const name = $('#camp-name').val().trim();
+    const id = $('#camp-id').val().trim();
+    if (!name || !id) return;
+    autoStarted = true;
+    triggerStart();
   }
 
   function applyStatus(s) {
-    if (s.running) {
-      $status.text('Running · ' + (s.utun_name || '?')).removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-emerald-200 text-emerald-800');
-      $btnStart.addClass('hidden');
-      $btnStop.removeClass('hidden');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', true);
+    maybeAutoStart(s);
+    if (pendingOp) {
+      // Hold the loading state while an op is in flight; inputs stay
+      // locked too so the user doesn't edit them mid-transition.
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
+    } else if (s.running) {
+      setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
         '#local-ip': s.local_ip,
@@ -119,11 +180,23 @@ $(function () {
         }
       });
     } else {
-      $status.text('Stopped').removeClass().addClass('px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700');
-      $btnStart.removeClass('hidden');
-      $btnStop.addClass('hidden');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet').prop('disabled', false);
+      setEngineState('stopped', 'start', '');
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', false);
     }
+    // Camp status row — shown only when camp is actually active.
+    const $campStatus = $('#camp-status');
+    if (s.camp_active) {
+      const lines = [
+        `connected as ${s.camp_name}@${s.camp_id}`,
+        s.camp_reflex ? `reflex ${s.camp_reflex}` : '',
+        s.camp_peer_name ? `peer ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
+      ].filter(Boolean);
+      $campStatus.text(lines.join(' · ')).addClass('live');
+    } else {
+      $campStatus.text('').removeClass('live');
+    }
+    // Identity meta in section title shows compact running indicator.
+    $('#identity-meta').text(s.running ? (s.utun_name || '') : '');
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
     $btnAdd.prop('disabled', false);
@@ -152,41 +225,34 @@ $(function () {
       const live = liveBySpec[spec];
       return { spec, live: live || null };
     });
-    // Engine-side intercepts that aren't tracked locally (rare — e.g.,
-    // started from CLI with --intercept). Show them too so they're visible.
     liveIntercepts.forEach((l) => {
       if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
     });
 
+    $('#intercept-meta').text(items.length);
+
     if (items.length === 0) {
-      $list.append('<div class="text-sm text-gray-500">No intercepts yet. Add one below.</div>');
+      $list.append('<div class="ax-list-empty">no intercepts. add one below.</div>');
       return;
     }
 
     items.forEach((it) => {
-      const $row = $('<div class="flex items-center justify-between bg-gray-50 rounded p-3">');
-      const $info = $('<div>');
-      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
-      $title.append($('<span>').text(it.spec));
-      if (it.live) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
-      } else {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
-      }
-      if (it.orphan) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
-      }
-      $info.append($title);
+      const $row = $('<div class="ax-list-item">');
+      $row.append('<span class="ax-list-icon">›</span>');
+      const $main = $('<div class="ax-list-main">');
+      const $spec = $('<div class="ax-list-spec">').text(it.spec);
+      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
+      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
+      if (it.orphan) $spec.append('<span class="ax-pill ax-pill-pending">unsaved</span>');
+      $main.append($spec);
       const prefixes = it.live ? (it.live.prefixes || []) : [];
       if (prefixes.length) {
-        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
       }
-      $row.append($info);
-
-      const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
+      $row.append($main);
+      const $btn = $('<button class="ax-list-remove">remove</button>');
       $btn.on('click', () => removeSpec(it.spec, it.live));
       $row.append($btn);
-
       $list.append($row);
     });
   }
@@ -226,35 +292,29 @@ $(function () {
       if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
     });
 
+    $('#allow-meta').text(items.length);
+
     if (items.length === 0) {
-      $allowList.append('<div class="text-sm text-gray-500">No filter — peer can reach any destination. Add an entry to switch to whitelist mode.</div>');
+      $allowList.append('<div class="ax-list-empty">no filter — peer can reach any destination through us.</div>');
       return;
     }
 
     items.forEach((it) => {
-      const $row = $('<div class="flex items-center justify-between bg-purple-50 rounded p-3">');
-      const $info = $('<div>');
-      const $title = $('<div class="font-medium text-sm flex items-center gap-2">');
-      $title.append($('<span>').text(it.spec));
-      if (it.live) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">active</span>');
-      } else {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">pending</span>');
-      }
-      if (it.orphan) {
-        $title.append('<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">not saved</span>');
-      }
-      $info.append($title);
+      const $row = $('<div class="ax-list-item">');
+      $row.append('<span class="ax-list-icon">›</span>');
+      const $main = $('<div class="ax-list-main">');
+      const $spec = $('<div class="ax-list-spec">').text(it.spec);
+      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
+      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
+      $main.append($spec);
       const prefixes = it.live ? (it.live.prefixes || []) : [];
       if (prefixes.length) {
-        $info.append($('<div class="text-xs text-gray-500 font-mono mt-1">').text(prefixes.join(', ')));
+        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
       }
-      $row.append($info);
-
-      const $btn = $('<button class="text-rose-600 hover:text-rose-800 text-sm font-medium">Remove</button>');
+      $row.append($main);
+      const $btn = $('<button class="ax-list-remove">remove</button>');
       $btn.on('click', () => removeAllowSpec(it.spec, it.live));
       $row.append($btn);
-
       $allowList.append($row);
     });
   }
@@ -289,7 +349,7 @@ $(function () {
     $allowInput.val('');
     renderAllows();
 
-    if ($btnStart.is(':visible')) return; // engine stopped
+    if (!engineRunning) return;
     const errors = [];
     const requests = specs.map((spec) =>
       addAllowOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`)),
@@ -332,7 +392,7 @@ $(function () {
     });
   }
 
-  $btnStart.on('click', () => {
+  function triggerStart() {
     const cfg = {
       local_ip: $('#local-ip').val().trim(),
       peer_ip: $('#peer-ip').val().trim(),
@@ -343,20 +403,44 @@ $(function () {
       intercepts: getStoredSpecs(),
       inbound_allow: allows.get(),
       egress_iface: $('#egress-iface').val(),
-      egress_subnet: $('#egress-subnet').val().trim()
+      egress_subnet: $('#egress-subnet').val().trim(),
+      camp_url: $('#camp-url').val().trim(),
+      camp_stun: $('#camp-stun').val().trim(),
+      camp_name: $('#camp-name').val().trim(),
+      camp_id: $('#camp-id').val().trim(),
     };
+    pendingOp = 'starting';
+    setEngineState('loading', 'starting…', '');
     $.ajax({
       url: '/api/start',
       method: 'POST',
       contentType: 'application/json',
       data: JSON.stringify(cfg)
-    }).done(refreshStatus).fail((xhr) => alert('Start failed: ' + errorOf(xhr)));
-  });
-
-  $btnStop.on('click', () => {
-    $.ajax({ url: '/api/stop', method: 'POST' })
+    })
+      .always(() => { pendingOp = null; })
       .done(refreshStatus)
-      .fail((xhr) => alert('Stop failed: ' + errorOf(xhr)));
+      .fail((xhr) => {
+        refreshStatus();
+        alert('Start failed: ' + errorOf(xhr));
+      });
+  }
+
+  function triggerStop() {
+    pendingOp = 'stopping';
+    setEngineState('loading', 'stopping…', '');
+    $.ajax({ url: '/api/stop', method: 'POST' })
+      .always(() => { pendingOp = null; })
+      .done(refreshStatus)
+      .fail((xhr) => {
+        refreshStatus();
+        alert('Stop failed: ' + errorOf(xhr));
+      });
+  }
+
+  $btnEngine.on('click', () => {
+    if ($btnEngine.hasClass('state-loading')) return;
+    if (engineRunning) triggerStop();
+    else triggerStart();
   });
 
   function addOne(spec) {
@@ -381,8 +465,7 @@ $(function () {
 
     // If the engine is currently running, apply the new entries live so
     // the user doesn't have to Stop/Start.
-    const stoppedNow = $btnStart.is(':visible');
-    if (stoppedNow) return;
+    if (!engineRunning) return;
 
     const errors = [];
     const requests = specs.map((spec) =>
@@ -566,7 +649,7 @@ $(function () {
       nodeEnter.append('text')
         .attr('text-anchor', 'middle')
         .attr('font-size', '12px')
-        .attr('fill', '#0f172a')
+        .attr('fill', '#9a8e7a')
         .attr('font-weight', '500')
         .style('pointer-events', 'none');
       nodeEnter.append('title');
@@ -599,11 +682,73 @@ $(function () {
     });
   }
 
+  // Camp tab — list of peers in our current camp. Polls our local proxy
+  // (/api/camp/peers), which in turn fetches /api/id/<camp_id> from the
+  // configured camp server. Off-state ("engine not running") is the only
+  // non-happy branch; once we're in a camp there's always at least one
+  // peer (us).
+  const $campStatus = $('#camp-peers-status');
+  const $campTable = $('#camp-peers-table');
+  const $campBody = $('#camp-peers-tbody');
+  const $campIDMeta = $('#camp-id-meta');
+
+  function humanAgo(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h';
+    return Math.floor(h / 24) + 'd';
+  }
+
+  function renderCampPeers(data) {
+    if (!data || data.running === false) {
+      $campStatus.text('engine not running').show();
+      $campTable.addClass('hidden');
+      $campIDMeta.text('');
+      return;
+    }
+    const peers = Array.isArray(data.peers) ? data.peers : [];
+    $campIDMeta.text(data.camp_id || '');
+    if (peers.length === 0) {
+      $campStatus.text('no peers in this camp').show();
+      $campTable.addClass('hidden');
+      return;
+    }
+    $campStatus.hide();
+    $campBody.empty();
+    for (const p of peers) {
+      const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
+      const isYou = data.you && p.name === data.you;
+      const $row = $('<tr>').css('color', isYou ? '#86b86b' : '');
+      $row.append(
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.name + (isYou ? ' (you)' : '')),
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.tunnel_ip || '—'),
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(endpoint),
+        $('<td>').css({padding: '4px 0', color: '#666'}).text(humanAgo(p.joined_at))
+      );
+      $campBody.append($row);
+    }
+    $campTable.removeClass('hidden');
+  }
+
+  function refreshCampPeers() {
+    $.ajax({ url: '/api/camp/peers', dataType: 'json' })
+      .done(renderCampPeers)
+      .fail(() => {
+        $campStatus.text('failed to fetch camp state').show();
+        $campTable.addClass('hidden');
+      });
+  }
+
   restoreForm();
   loadIfaces();
   refreshStatus();
   refreshTopology();
+  refreshCampPeers();
   setInterval(refreshStatus, 3000);
   setInterval(refreshTopology, 2000);
+  setInterval(refreshCampPeers, 3000);
   startLogStream();
 });

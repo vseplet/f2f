@@ -1,20 +1,33 @@
-// Minimal STUN-like UDP probe responder. A peer sends a small JSON probe
-// to our UDP port; we reply with what we see as its source IP and port.
-// This is what lets peers behind symmetric NAT learn their *actual*
-// external UDP endpoint — which often differs from the local socket
-// port — and report it back via WebSocket for rendezvous.
+// UDP announce listener — replaces the old STUN-only probe responder.
+// A peer sends `{t:"announce", name, camp_id}` on this socket; we read
+// the source address off the packet itself (no need for a separate STUN
+// step), upsert the peer into the hub, and reply with `{t:"announced",
+// you:PeerInfo}` so the client learns its tunnel_ip and reflex.
 //
-// Why not real STUN (RFC 5389)? It's overkill: we only need the
-// "mapped-address" attribute, and a custom JSON ping is easier to
-// debug, requires no codec, and stays inside our own tooling.
+// One UDP packet does three jobs at once:
+//   1. registers / refreshes the peer entry (driven by the periodic
+//      cadence on the client side);
+//   2. lets us observe the public endpoint via srcAddr / srcPort,
+//      replacing a dedicated STUN exchange;
+//   3. keeps the camp-facing NAT mapping alive on the client's tunnel
+//      port — relevant under endpoint-dependent NATs where the
+//      peer-facing mapping doesn't help us.
 
-type ProbeMsg = { t: "probe"; id: string };
-type ReflexMsg = { t: "reflex"; id: string; ip: string; port: number };
+import type { Hub } from "./hub";
+import type { AnnouncedResp, AnnounceErr, AnnounceReq } from "./types";
 
-function isValidProbe(x: unknown): x is ProbeMsg {
+const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const MAX_NAME_LEN = 64;
+const MAX_CAMP_ID_LEN = 128;
+
+function isValidAnnounce(x: unknown): x is AnnounceReq {
   if (typeof x !== "object" || x === null) return false;
   const m = x as Record<string, unknown>;
-  return m.t === "probe" && typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64;
+  return (
+    m.t === "announce" &&
+    typeof m.name === "string" &&
+    typeof m.camp_id === "string"
+  );
 }
 
 // On fly.io UDP packets only reach a Machine if you bind to the special
@@ -27,18 +40,17 @@ function pickBindAddress(): string {
   return Bun.env.FLY_APP_NAME ? "fly-global-services" : "0.0.0.0";
 }
 
-export async function startStun(port: number) {
+export async function startUDP(port: number, hub: Hub) {
   const hostname = pickBindAddress();
   const socket = await Bun.udpSocket({
     port,
     hostname,
     socket: {
       data(sock, buf, srcPort, srcAddr) {
-        // Cap payload aggressively so reflection amplification can't
-        // happen — the reply is ~80 bytes and we won't parse anything
-        // larger than that anyway.
-        if (buf.length > 256) {
-          console.log(`stun: drop oversize ${buf.length}B from ${srcAddr}:${srcPort}`);
+        // Hard cap on payload size — both as a sanity check and to keep
+        // reflection amplification cheap.
+        if (buf.length > 1024) {
+          console.log(`udp: drop oversize ${buf.length}B from ${srcAddr}:${srcPort}`);
           return;
         }
 
@@ -46,26 +58,59 @@ export async function startStun(port: number) {
         try {
           msg = JSON.parse(buf.toString("utf8"));
         } catch {
-          console.log(`stun: drop non-json from ${srcAddr}:${srcPort}`);
-          return;
+          return; // silent — random scanners send junk
         }
-        if (!isValidProbe(msg)) {
-          console.log(`stun: drop bad-probe from ${srcAddr}:${srcPort}`);
+        if (!isValidAnnounce(msg)) {
           return;
         }
 
-        const reply: ReflexMsg = {
-          t: "reflex",
-          id: msg.id,
-          ip: srcAddr,
-          port: srcPort,
-        };
+        const name = msg.name;
+        const campID = msg.camp_id;
+        if (!name || name.length > MAX_NAME_LEN || !NAME_RE.test(name)) {
+          sendErr(sock, srcAddr, srcPort, "bad_name", `invalid name`);
+          return;
+        }
+        if (!campID || campID.length > MAX_CAMP_ID_LEN || !NAME_RE.test(campID)) {
+          sendErr(sock, srcAddr, srcPort, "bad_camp_id", `invalid camp_id`);
+          return;
+        }
+
+        const wasNew = !hub.has(campID, name);
+        let info;
+        try {
+          info = hub.upsert(campID, name, srcAddr, srcPort);
+        } catch (err) {
+          sendErr(sock, srcAddr, srcPort, "camp_full", (err as Error).message);
+          return;
+        }
+        if (wasNew) {
+          console.log(
+            `join: ${name}@${campID} ${info.tunnel_ip} from ${srcAddr}:${srcPort}`,
+          );
+        }
+
+        const reply: AnnouncedResp = { t: "announced", you: info };
         sock.send(JSON.stringify(reply), srcPort, srcAddr);
-        console.log(`stun: ${srcAddr}:${srcPort} ← reflex`);
       },
     },
   });
 
-  console.log(`stun: udp ${hostname}:${socket.port}`);
+  console.log(`udp: ${hostname}:${socket.port} (announce)`);
   return socket;
+}
+
+function sendErr(
+  sock: { send: (data: string, port: number, addr: string) => void },
+  addr: string,
+  port: number,
+  code: string,
+  message: string,
+) {
+  const reply: AnnounceErr = { t: "error", code, message };
+  try {
+    sock.send(JSON.stringify(reply), port, addr);
+  } catch {
+    /* socket closed; nothing to do */
+  }
+  console.log(`udp: ${addr}:${port} ← err ${code}`);
 }

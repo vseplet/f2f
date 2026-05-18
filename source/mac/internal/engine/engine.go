@@ -21,20 +21,33 @@ import (
 
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
+	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
 )
+
+// CampConfig points the engine at a rendezvous (camp) server: instead of
+// the user supplying the peer's UDP endpoint via --peer, we discover our
+// own external endpoint via STUN, register with camp under (Name, ID),
+// and adopt the other peer in the same camp when it announces an endpoint.
+type CampConfig struct {
+	URL      string // wss://f2f-camp.fly.dev/ws
+	Name     string // our identity within the camp
+	ID       string // shared camp id (was previously called "room")
+	StunAddr string // host:port for the UDP STUN probe (e.g. f2f-camp.fly.dev:3478)
+}
 
 // Config is the input to Start.
 type Config struct {
 	LocalIP       string   // utun local point-to-point address
 	PeerIP        string   // utun remote point-to-point address
 	Listen        string   // UDP listen address (":9000"), empty = no peer mode
-	Peer          string   // UDP peer address ("host:9000"), empty = no peer mode
+	Peer          string   // UDP peer address ("host:9000"); ignored when Camp is set
 	Intercepts    []string // user-provided IPs/CIDRs/domains, resolved at Start
 	InboundAllow  []string // whitelist of destinations the peer is allowed to reach via us
 	EgressIface   string   // physical interface for NAT (empty = no egress)
 	EgressSubnet  string   // CIDR to NAT (default "10.99.0.0/24")
+	Camp          *CampConfig // optional: use a rendezvous server instead of static Peer
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
@@ -50,6 +63,12 @@ type Status struct {
 	EgressIface    string          `json:"egress_iface,omitempty"`
 	EgressAnchor   string          `json:"egress_anchor,omitempty"`
 	EgressSubnet   string          `json:"egress_subnet,omitempty"`
+	CampActive     bool            `json:"camp_active"`
+	CampURL        string          `json:"camp_url,omitempty"`
+	CampName       string          `json:"camp_name,omitempty"`
+	CampID         string          `json:"camp_id,omitempty"`
+	CampPeerName   string          `json:"camp_peer_name,omitempty"`     // adopted peer's name in the camp
+	CampReflex     string          `json:"camp_reflex,omitempty"`        // our own external endpoint per STUN
 	Intercepts     []InterceptInfo `json:"intercepts"`
 	InboundAllow   []InterceptInfo `json:"inbound_allow"`
 	StartedAt      time.Time       `json:"started_at,omitempty"`
@@ -74,11 +93,22 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun     *tunnel.Tunnel
-	udp     *net.UDPConn
-	routes  *route.Manager
-	egr     *egress.Egress
-	peerPtr atomic.Pointer[net.UDPAddr]
+	tun      *tunnel.Tunnel
+	udp      *net.UDPConn
+	routes   *route.Manager
+	egr      *egress.Egress
+	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
+	// campAddr is the resolved UDP endpoint of the camp server. The main
+	// read loop checks each incoming packet's source against this so we
+	// can dispatch announce replies before they hit IP-version parsing.
+	campAddr atomic.Pointer[net.UDPAddr]
+	// campReflex / campPeerName / campPeerTunnelIP are display-only and
+	// updated from adoptCampPeer, which can run while Start already holds
+	// e.mu. Keep them lock-free via atomics so they can't deadlock.
+	campReflex       atomic.Pointer[string]
+	campPeerName     atomic.Pointer[string]
+	campPeerTunnelIP atomic.Pointer[string]
+	peerPtr          atomic.Pointer[net.UDPAddr]
 
 	intercepts   map[string]*InterceptInfo
 	inboundAllow map[string]*InterceptInfo
@@ -124,7 +154,16 @@ func (e *Engine) Start(cfg Config) error {
 	if e.running {
 		return errors.New("engine already running")
 	}
-	if (cfg.Listen == "") != (cfg.Peer == "") {
+	if cfg.Camp != nil {
+		// With Camp, peer is auto-discovered; we still need a UDP socket
+		// to receive on.
+		if cfg.Listen == "" {
+			return errors.New("Camp mode requires Listen")
+		}
+		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.ID == "" || cfg.Camp.StunAddr == "" {
+			return errors.New("Camp.{URL,Name,ID,StunAddr} all required")
+		}
+	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
 	}
 
@@ -155,28 +194,86 @@ func (e *Engine) Start(cfg Config) error {
 			e.rollbackPartial()
 			return fmt.Errorf("resolve listen: %w", err)
 		}
-		initialPeer, err := net.ResolveUDPAddr("udp", cfg.Peer)
-		if err != nil {
-			e.rollbackPartial()
-			return fmt.Errorf("resolve peer: %w", err)
-		}
-		e.peerPtr.Store(initialPeer)
 		udp, err := net.ListenUDP("udp", laddr)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("listen udp: %w", err)
 		}
 		e.udp = udp
+		// In Camp mode, peerPtr starts nil — campLoop adopts the peer
+		// when it announces an endpoint. In static mode, resolve now.
+		if cfg.Camp == nil && cfg.Peer != "" {
+			initialPeer, err := net.ResolveUDPAddr("udp", cfg.Peer)
+			if err != nil {
+				e.rollbackPartial()
+				return fmt.Errorf("resolve peer: %w", err)
+			}
+			e.peerPtr.Store(initialPeer)
+		}
 	}
 
-	// utun.
-	tun, err := tunnel.Open(cfg.LocalIP, cfg.PeerIP)
-	if err != nil {
-		e.rollbackPartial()
-		return fmt.Errorf("open tunnel: %w", err)
+	// Camp: announce ourselves over UDP on the same socket the tunnel
+	// uses. The reply carries our camp-assigned tunnel IP (which utun
+	// will be opened with below) and our public endpoint as observed
+	// by camp — that doubles as STUN. The peer list comes from the
+	// periodic HTTP poller started further down.
+	var (
+		localIP = cfg.LocalIP
+		peerIP  = cfg.PeerIP
+	)
+	if cfg.Camp != nil {
+		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("camp announce client: %w", err)
+		}
+		self, err := ac.AnnounceOnce(5 * time.Second)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("camp announce: %w", err)
+		}
+		if self.TunnelIP == "" {
+			e.rollbackPartial()
+			return fmt.Errorf("camp announce reply did not include tunnel_ip")
+		}
+		e.announce = ac
+		e.campAddr.Store(ac.CampAddr())
+		reflex := self.UDPEndpoint
+		if reflex == "" {
+			reflex = self.PublicIP
+		}
+		e.campReflex.Store(&reflex)
+		localIP = self.TunnelIP
+		log.Printf("camp: registered as %s in camp %s, tunnel_ip=%s reflex=%s", cfg.Camp.Name, cfg.Camp.ID, localIP, reflex)
+	}
+
+	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
+	// overlay; static mode keeps the legacy point-to-point form.
+	var tun *tunnel.Tunnel
+	if cfg.Camp != nil {
+		t, err := tunnel.OpenSubnet(localIP, 24)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("open tunnel: %w", err)
+		}
+		tun = t
+		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, tunnel.MTU)
+	} else {
+		t, err := tunnel.Open(localIP, peerIP)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("open tunnel: %w", err)
+		}
+		tun = t
+		log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, tunnel.MTU)
 	}
 	e.tun = tun
-	log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), cfg.LocalIP, cfg.PeerIP, tunnel.MTU)
+	// Reflect the actual addresses we ended up using back into the
+	// stored config so Status() shows ground truth, not user intent.
+	cfg.LocalIP = localIP
+	if cfg.Camp == nil {
+		cfg.PeerIP = peerIP
+	}
 	if e.udp != nil {
 		log.Printf("UDP listening on %s, forwarding to peer %s", e.udp.LocalAddr(), e.peerPtr.Load())
 	}
@@ -211,7 +308,80 @@ func (e *Engine) Start(cfg Config) error {
 	}
 	e.workers.Add(1)
 	go e.domainRefreshLoop(ctx)
+	if e.announce != nil {
+		// Periodic announce keeps both camp's last_seen fresh and the
+		// camp-facing NAT mapping alive (matters under symmetric NAT).
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			e.announce.Run(ctx, 20*time.Second)
+		}()
+		// Peer list poller. onUpdate runs in the poller goroutine.
+		base, err := rendezvous.CampHTTPBase(cfg.Camp.URL)
+		if err != nil {
+			log.Printf("camp: %v (peer list disabled)", err)
+		} else {
+			poller := rendezvous.NewPeerListPoller(base, cfg.Camp.ID, e.applyPeerList)
+			e.workers.Add(1)
+			go func() {
+				defer e.workers.Done()
+				poller.Run(ctx, 3*time.Second)
+			}()
+		}
+	}
+	if e.udp != nil {
+		e.workers.Add(1)
+		go e.keepaliveLoop(ctx)
+	}
 	return nil
+}
+
+// applyPeerList reconciles our adopted peer with the camp's current
+// view. For now we operate in two-party mode: pick the first OTHER
+// peer with a known UDP endpoint and adopt it; do nothing if our peer
+// is still present in the list. Multi-peer mesh would replace this.
+func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
+	var ourName string
+	if cfg := e.cfg.Camp; cfg != nil {
+		ourName = cfg.Name
+	}
+	for _, p := range peers {
+		if p.Name == ourName {
+			continue
+		}
+		if p.UDPEndpoint == "" {
+			continue
+		}
+		e.adoptCampPeer(p)
+		return
+	}
+}
+
+// keepaliveLoop fires a one-byte UDP packet at the current peer every
+// 25 seconds. Most consumer NATs drop idle UDP mappings after 30–120s;
+// the keepalive is what holds the hole open between bursts of real
+// tunnel traffic. The single byte is below our 20-byte IP minimum, so
+// the peer's peerToTunLoop drops it without touching utun.
+func (e *Engine) keepaliveLoop(ctx context.Context) {
+	defer e.workers.Done()
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			addr := e.peerPtr.Load()
+			if addr == nil {
+				continue
+			}
+			if _, err := e.udp.WriteToUDP([]byte{0}, addr); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("WARN: keepalive: %v", err)
+				}
+			}
+		}
+	}
 }
 
 // Stop tears everything down in reverse order. Idempotent.
@@ -230,7 +400,8 @@ func (e *Engine) Stop() error {
 
 	cancel()
 	// Close UDP first; this aborts the peerToTun worker. It is independent
-	// of utun and routes, so it's safe to do early.
+	// of utun and routes, so it's safe to do early. The announce loop and
+	// peer-list poller respond to ctx cancellation above.
 	if udp != nil {
 		_ = udp.Close()
 	}
@@ -265,6 +436,12 @@ func (e *Engine) Stop() error {
 	e.udp = nil
 	e.routes = nil
 	e.egr = nil
+	e.announce = nil
+	e.campAddr.Store(nil)
+	e.campReflex.Store(nil)
+	e.campPeerName.Store(nil)
+	e.campPeerTunnelIP.Store(nil)
+	e.peerPtr.Store(nil)
 	e.intercepts = map[string]*InterceptInfo{}
 	e.inboundAllow = map[string]*InterceptInfo{}
 	e.txBytes.Store(0)
@@ -297,6 +474,15 @@ func (e *Engine) Status() Status {
 	if e.running {
 		st.LocalIP = e.cfg.LocalIP
 		st.PeerIP = e.cfg.PeerIP
+		// In Camp mode the user-supplied PeerIP is meaningless — utun is a
+		// subnet, the peer's tunnel IP comes from camp on adoption.
+		if e.cfg.Camp != nil {
+			if p := e.campPeerTunnelIP.Load(); p != nil {
+				st.PeerIP = *p
+			} else {
+				st.PeerIP = "" // not adopted yet
+			}
+		}
 		st.ListenAddr = e.cfg.Listen
 		if p := e.peerPtr.Load(); p != nil {
 			st.PeerAddr = p.String()
@@ -305,6 +491,18 @@ func (e *Engine) Status() Status {
 			st.EgressIface = e.cfg.EgressIface
 			st.EgressAnchor = e.egr.Anchor()
 			st.EgressSubnet = e.cfg.EgressSubnet
+		}
+		if e.cfg.Camp != nil {
+			st.CampActive = e.announce != nil
+			st.CampURL = e.cfg.Camp.URL
+			st.CampName = e.cfg.Camp.Name
+			st.CampID = e.cfg.Camp.ID
+			if r := e.campReflex.Load(); r != nil {
+				st.CampReflex = *r
+			}
+			if n := e.campPeerName.Load(); n != nil {
+				st.CampPeerName = *n
+			}
 		}
 	}
 	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
@@ -600,8 +798,9 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		}
 		summary := packet.Summary(pkt)
 		action := "drop"
-		if hasPeer {
-			if n, werr := e.udp.WriteToUDP(pkt, e.peerPtr.Load()); werr != nil {
+		peerAddr := e.peerPtr.Load()
+		if hasPeer && peerAddr != nil {
+			if n, werr := e.udp.WriteToUDP(pkt, peerAddr); werr != nil {
 				if ctx.Err() == nil {
 					log.Printf("WARN: udp send: %v", werr)
 				}
@@ -611,6 +810,8 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 				e.txPackets.Add(1)
 				action = "→peer"
 			}
+		} else if hasPeer {
+			action = "drop-no-peer"
 		}
 		log.Printf("[%s] %s [%s]", e.tun.Name(), summary, action)
 	}
@@ -627,11 +828,33 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			}
 			return
 		}
+		pkt := buf[:n]
+		// Camp announce replies arrive on this same socket. Dispatch
+		// them to the AnnounceClient before any IP-shape checks so they
+		// don't get logged as drops.
+		if ca := e.campAddr.Load(); ca != nil && sameUDPAddr(ca, from) {
+			if e.announce != nil && e.announce.HandlePacket(pkt) {
+				continue
+			}
+		}
+		// Anything not shaped like an IPv4/IPv6 packet — hole-punch
+		// markers, random scans — gets dropped here before it can
+		// pollute peer tracking or fail utun.Write. Only after we've
+		// decided this is a real tunnel packet do we let it update
+		// peerPtr (so peer-NAT rebinds can still be followed) and reach
+		// utun.
+		if n < 20 {
+			continue
+		}
+		version := pkt[0] >> 4
+		if version != 4 && version != 6 {
+			log.Printf("[udp %s] drop non-IP byte=0x%02x (%d bytes)", from, pkt[0], n)
+			continue
+		}
 		if cur := e.peerPtr.Load(); !sameUDPAddr(cur, from) {
 			log.Printf("peer address updated: %s → %s", cur, from)
 			e.peerPtr.Store(from)
 		}
-		pkt := buf[:n]
 		summary := packet.Summary(pkt)
 
 		// Inbound whitelist: when non-empty, only packets whose destination
@@ -659,12 +882,17 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 // whitelist. An empty whitelist means "no filter" — every packet is allowed.
 // Packets whose destination address we cannot parse are also allowed (we
 // don't want to silently break unknown-format traffic).
+//
+// Packets destined to OUR OWN tunnel IP terminate locally — they're not
+// "passing through" us into the wider internet, so the whitelist (which
+// is about restricting peer-to-internet egress) doesn't apply to them.
 func (e *Engine) inboundAllowed(pkt []byte) bool {
 	e.mu.Lock()
 	if len(e.inboundAllow) == 0 {
 		e.mu.Unlock()
 		return true
 	}
+	localIPStr := e.cfg.LocalIP
 	// Snapshot prefixes so we can drop the lock before the match loop.
 	prefixes := make([]netip.Prefix, 0, len(e.inboundAllow)*2)
 	for _, info := range e.inboundAllow {
@@ -678,6 +906,9 @@ func (e *Engine) inboundAllowed(pkt []byte) bool {
 
 	dst := packet.ExtractDst(pkt)
 	if !dst.IsValid() {
+		return true
+	}
+	if local, err := netip.ParseAddr(localIPStr); err == nil && dst == local {
 		return true
 	}
 	for _, p := range prefixes {
@@ -707,6 +938,42 @@ func (e *Engine) rollbackPartial() {
 		_ = e.egr.Close()
 		e.egr = nil
 	}
+	e.announce = nil
+}
+
+// adoptCampPeer sets the engine's peer address from a camp announcement
+// and fires a short burst of single-byte hole-punching packets to open
+// the NAT mapping. Real tunnel traffic from utun is what keeps it open
+// after that.
+func (e *Engine) adoptCampPeer(p rendezvous.PeerInfo) {
+	addr, err := net.ResolveUDPAddr("udp", p.UDPEndpoint)
+	if err != nil {
+		log.Printf("WARN: camp peer %s has invalid endpoint %q: %v", p.Name, p.UDPEndpoint, err)
+		return
+	}
+	if cur := e.peerPtr.Load(); sameUDPAddr(cur, addr) {
+		return
+	}
+	e.peerPtr.Store(addr)
+	name := p.Name
+	e.campPeerName.Store(&name)
+	if p.TunnelIP != "" {
+		tip := p.TunnelIP
+		e.campPeerTunnelIP.Store(&tip)
+	}
+	log.Printf("camp: adopted peer %s @ %s (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
+
+	if e.udp == nil {
+		return
+	}
+	go func() {
+		for i := 0; i < 5; i++ {
+			if _, err := e.udp.WriteToUDP([]byte{0}, addr); err != nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {
