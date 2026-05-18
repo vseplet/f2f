@@ -11,9 +11,11 @@ $(function () {
     $(document).trigger('f2f:tab-changed', [tab]);
   });
 
-  const $status = $('#status-indicator');
-  const $btnStart = $('#btn-start');
-  const $btnStop = $('#btn-stop');
+  const $btnEngine = $('#btn-engine');
+  const $engineState = $btnEngine.find('.ax-engine-state');
+  const $engineLabel = $btnEngine.find('.ax-engine-label');
+  const $engineMeta = $btnEngine.find('.ax-engine-meta');
+  let engineRunning = false;
   const $btnAdd = $('#btn-add-intercept');
   const $btnClearLog = $('#btn-clear-log');
   const $list = $('#intercept-list');
@@ -89,11 +91,28 @@ $(function () {
 
   const errorOf = (xhr) => (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || 'unknown error';
 
-  function setStatusPill(text, cls) {
-    $status.text(text).removeClass('ax-status-running ax-status-stopped ax-status-error').addClass(cls);
+  // setEngineState updates the combined status/toggle button in the
+  // tabbar. `state` ∈ {running, stopped, loading, error}; `label` is the
+  // primary text; `meta` is the small extra ("· utun7", "API error").
+  function setEngineState(state, label, meta) {
+    const icons = { running: '■', stopped: '▶', loading: '⋯', error: '!' };
+    const titles = {
+      running: 'click to stop',
+      stopped: 'click to start',
+      loading: 'loading…',
+      error: 'click to start',
+    };
+    $btnEngine
+      .removeClass('state-running state-stopped state-loading state-error')
+      .addClass('state-' + state)
+      .attr('title', titles[state] || '');
+    $engineState.text(icons[state] || '?');
+    $engineLabel.text(label);
+    $engineMeta.text(meta || '');
+    engineRunning = state === 'running';
   }
   function refreshStatus() {
-    $.getJSON('/api/status', applyStatus).fail(() => setStatusPill('API error', 'ax-status-error'));
+    $.getJSON('/api/status', applyStatus).fail(() => setEngineState('error', 'API error', ''));
   }
 
   // Auto-start fires once after the first /api/status response that says
@@ -106,15 +125,13 @@ $(function () {
     const room = $('#camp-room').val().trim();
     if (!name || !room) return;
     autoStarted = true;
-    $btnStart.click();
+    triggerStart();
   }
 
   function applyStatus(s) {
     maybeAutoStart(s);
     if (s.running) {
-      setStatusPill('running · ' + (s.utun_name || '?'), 'ax-status-running');
-      $btnStart.addClass('hidden');
-      $btnStop.removeClass('hidden');
+      setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
@@ -132,9 +149,7 @@ $(function () {
         }
       });
     } else {
-      setStatusPill('stopped', 'ax-status-stopped');
-      $btnStart.removeClass('hidden');
-      $btnStop.addClass('hidden');
+      setEngineState('stopped', 'start', '');
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-room').prop('disabled', false);
     }
     // Camp status row — shown only when camp is actually active.
@@ -303,7 +318,7 @@ $(function () {
     $allowInput.val('');
     renderAllows();
 
-    if ($btnStart.is(':visible')) return; // engine stopped
+    if (!engineRunning) return;
     const errors = [];
     const requests = specs.map((spec) =>
       addAllowOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`)),
@@ -346,7 +361,7 @@ $(function () {
     });
   }
 
-  $btnStart.on('click', () => {
+  function triggerStart() {
     const cfg = {
       local_ip: $('#local-ip').val().trim(),
       peer_ip: $('#peer-ip').val().trim(),
@@ -363,18 +378,32 @@ $(function () {
       camp_name: $('#camp-name').val().trim(),
       camp_room: $('#camp-room').val().trim(),
     };
+    setEngineState('loading', 'starting…', '');
     $.ajax({
       url: '/api/start',
       method: 'POST',
       contentType: 'application/json',
       data: JSON.stringify(cfg)
-    }).done(refreshStatus).fail((xhr) => alert('Start failed: ' + errorOf(xhr)));
-  });
+    }).done(refreshStatus).fail((xhr) => {
+      refreshStatus();
+      alert('Start failed: ' + errorOf(xhr));
+    });
+  }
 
-  $btnStop.on('click', () => {
+  function triggerStop() {
+    setEngineState('loading', 'stopping…', '');
     $.ajax({ url: '/api/stop', method: 'POST' })
       .done(refreshStatus)
-      .fail((xhr) => alert('Stop failed: ' + errorOf(xhr)));
+      .fail((xhr) => {
+        refreshStatus();
+        alert('Stop failed: ' + errorOf(xhr));
+      });
+  }
+
+  $btnEngine.on('click', () => {
+    if ($btnEngine.hasClass('state-loading')) return;
+    if (engineRunning) triggerStop();
+    else triggerStart();
   });
 
   function addOne(spec) {
@@ -399,8 +428,7 @@ $(function () {
 
     // If the engine is currently running, apply the new entries live so
     // the user doesn't have to Stop/Start.
-    const stoppedNow = $btnStart.is(':visible');
-    if (stoppedNow) return;
+    if (!engineRunning) return;
 
     const errors = [];
     const requests = specs.map((spec) =>

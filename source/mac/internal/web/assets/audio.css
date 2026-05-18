@@ -62,18 +62,47 @@ body:has(#tab-tunnel:not(.hidden)) .ax-tabbar {
 }
 .ax-frame .ax-tab-active:hover { color: #d4c8a6; }
 
-/* Status pill in the tabbar (right side) */
-.ax-frame .ax-status {
-  font-size: 12px;
+/* Engine toggle in the tabbar (right side): one button that both shows
+ * the current state ("running · utun7" / "stopped") and starts/stops
+ * the engine on click. Replaces the old status pill + start/stop button
+ * pair in the tunnel section. */
+.ax-frame .ax-engine-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 3px 10px;
-  border-radius: 3px;
-  border: 1px solid;
+  font: inherit;
+  font-size: 12px;
   letter-spacing: 0.5px;
+  border-radius: 3px;
+  border: 1px solid #3a3024;
+  background: transparent;
+  color: #7a6e5a;
+  cursor: pointer;
 }
-.ax-frame .ax-status-running { color: #86b86b; border-color: #3a5a30; background: rgba(134, 184, 107, 0.06); }
-.ax-frame .ax-status-stopped { color: #7a6e5a; border-color: #3a3024; background: transparent; }
-.ax-frame .ax-status-error   { color: #c25656; border-color: #6a3030; background: rgba(194, 86, 86, 0.10); }
-.ax-frame .ax-star { color: #c4a554; margin-left: 2px; }
+.ax-frame .ax-engine-btn:hover { background: #1c1915; }
+.ax-frame .ax-engine-btn .ax-engine-state { font-size: 11px; }
+.ax-frame .ax-engine-btn .ax-engine-meta:empty { display: none; }
+.ax-frame .ax-engine-btn .ax-engine-meta { color: inherit; opacity: 0.75; }
+
+.ax-frame .ax-engine-btn.state-running {
+  color: #86b86b;
+  border-color: #3a5a30;
+  background: rgba(134, 184, 107, 0.06);
+}
+.ax-frame .ax-engine-btn.state-running:hover { background: rgba(134, 184, 107, 0.14); }
+
+.ax-frame .ax-engine-btn.state-loading {
+  font-style: italic;
+  cursor: wait;
+}
+
+.ax-frame .ax-engine-btn.state-error {
+  color: #c25656;
+  border-color: #6a3030;
+  background: rgba(194, 86, 86, 0.10);
+}
+.ax-frame .ax-engine-btn.state-error:hover { background: rgba(194, 86, 86, 0.18); }
 .ax-frame .ax-sep { color: #4a4030; }
 .ax-frame .ax-hint { color: #7a6e5a; }
 .ax-frame .ax-hint .ax-kbd { margin-left: 4px; }

@@ -20,11 +20,15 @@
           <span class="ax-sep">·</span>
           <button type="button" data-tab="dns" class="ax-tab">dns</button>
           <span class="ax-sep">·</span>
-          <button type="button" data-tab="audio" class="ax-tab">meet<span class="ax-star" id="ax-star"> *</span></button>
+          <button type="button" data-tab="audio" class="ax-tab">meet</button>
           <span class="ax-sep">·</span>
           <button type="button" data-tab="drop" class="ax-tab">drop</button>
         </div>
-        <div id="status-indicator" class="ax-status ax-status-stopped">loading…</div>
+        <button id="btn-engine" type="button" class="ax-engine-btn state-loading" title="loading…">
+          <span class="ax-engine-state">⋯</span>
+          <span class="ax-engine-label">loading…</span>
+          <span class="ax-engine-meta" id="ax-engine-meta"></span>
+        </button>
       </div>
     </div>
 
@@ -67,10 +71,6 @@
           </div>
         </div>
         <div id="camp-status" class="ax-section-status"></div>
-        <div class="ax-section-actions">
-          <button id="btn-start" class="ax-btn ax-btn-primary">▶ start</button>
-          <button id="btn-stop" class="ax-btn ax-btn-danger hidden">■ stop</button>
-        </div>
 
         <details class="ax-advanced">
           <summary>advanced</summary>
