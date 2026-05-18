@@ -66,6 +66,20 @@ const server = Bun.serve<SocketData>({
     if (url.pathname === "/api/stats") {
       return Response.json(hub.stats());
     }
+    if (url.pathname.startsWith("/api/rooms/")) {
+      const name = decodeURIComponent(url.pathname.slice("/api/rooms/".length));
+      if (!isValidRoomName(name)) {
+        return Response.json({ error: "invalid room name" }, { status: 400 });
+      }
+      return Response.json({ room: name, peers: hub.list(name) });
+    }
+    if (url.pathname.startsWith("/room/")) {
+      const name = decodeURIComponent(url.pathname.slice("/room/".length));
+      if (!isValidRoomName(name)) {
+        return new Response("invalid room name", { status: 400 });
+      }
+      return renderRoomPage(name, hub.list(name));
+    }
     if (url.pathname === "/healthz") {
       return new Response("ok");
     }
@@ -73,7 +87,8 @@ const server = Bun.serve<SocketData>({
       return new Response(
         `f2f-camp — rendezvous for f2f peers\n` +
           `WebSocket:  ${url.origin.replace(/^http/, "ws")}/ws\n` +
-          `Stats:      ${url.origin}/api/stats\n`,
+          `Stats:      ${url.origin}/api/stats\n` +
+          `Room view:  ${url.origin}/room/<name>\n`,
         { headers: { "content-type": "text/plain" } },
       );
     }
@@ -235,13 +250,81 @@ function handleSignal(
 function handleList(ws: ServerWebSocket<SocketData>) {
   const peer = ws.data.peer!;
   const room = (peer as Peer & { room: string }).room;
-  const everyone = hub.stats().rooms.find((r) => r.name === room)?.peers ?? [];
-  const peers: PeerInfo[] = [];
-  for (const n of everyone) {
-    const p = hub.get(room, n);
-    if (p) peers.push(p.info);
-  }
-  send(ws, { type: "welcome", you: peer.info, room, peers: peers.filter((p) => p.name !== peer.info.name) });
+  const peers = hub.list(room).filter((p) => p.name !== peer.info.name);
+  send(ws, { type: "welcome", you: peer.info, room, peers });
+}
+
+function isValidRoomName(name: string): boolean {
+  return name.length > 0 && name.length <= MAX_ROOM_LEN && NAME_RE.test(name);
+}
+
+function escapeHTML(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]!);
+}
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+function ago(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+function renderRoomPage(roomName: string, peers: PeerInfo[]): Response {
+  const rows = peers
+    .map((p) => {
+      const endpoint = p.udp_endpoint ?? `${p.public_ip}${p.udp_port ? ":" + p.udp_port : ""}`;
+      return `      <tr>
+        <td>${escapeHTML(p.name)}</td>
+        <td>${escapeHTML(p.tunnel_ip || "—")}</td>
+        <td>${escapeHTML(endpoint)}</td>
+        <td class="muted">${ago(p.joined_at)}</td>
+      </tr>`;
+    })
+    .join("\n");
+  const body =
+    peers.length === 0
+      ? `<p class="muted">no peers in this room</p>`
+      : `<table>
+      <thead><tr><th>name</th><th>tunnel ip</th><th>udp endpoint</th><th>joined</th></tr></thead>
+      <tbody>
+${rows}
+      </tbody>
+    </table>`;
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="5">
+  <title>f2f-camp · ${escapeHTML(roomName)}</title>
+  <style>
+    body { background: #111; color: #ddd; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 24px; margin: 0; }
+    h1 { font-size: 14px; color: #888; font-weight: normal; margin: 0 0 16px; }
+    h1 strong { color: #ddd; font-weight: normal; }
+    table { border-collapse: collapse; }
+    th, td { padding: 4px 24px 4px 0; text-align: left; vertical-align: top; }
+    th { color: #666; font-weight: normal; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>room <strong>${escapeHTML(roomName)}</strong> · ${peers.length} peer${peers.length === 1 ? "" : "s"}</h1>
+  ${body}
+</body>
+</html>
+`;
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
 }
 
 // Graceful shutdown so fly.io rolling deploys don't leave dangling clients.

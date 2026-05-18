@@ -80,6 +80,14 @@ export class Hub {
     return this.rooms.get(roomName)?.peers.get(name);
   }
 
+  // Snapshot of every peer's PeerInfo in a room. Empty array if the room
+  // doesn't exist (which is indistinguishable from "0 peers" in this model).
+  list(roomName: string): PeerInfo[] {
+    const r = this.rooms.get(roomName);
+    if (!r) return [];
+    return Array.from(r.peers.values()).map((p) => p.info);
+  }
+
   // True if a peer with this name already lives in the room.
   has(roomName: string, name: string): boolean {
     return this.rooms.get(roomName)?.peers.has(name) ?? false;

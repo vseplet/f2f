@@ -9,11 +9,13 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -88,6 +90,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
 	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
@@ -313,6 +316,79 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.Status())
+}
+
+// handleCampPeers proxies the engine's current camp room state from the
+// rendezvous server to the browser. Keeps camp URL server-side so the
+// page never needs to know it, and sidesteps CORS.
+func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	if !st.CampActive {
+		writeJSON(w, http.StatusOK, map[string]any{"running": false})
+		return
+	}
+	base, err := campHTTPBase(st.CampURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	target := base + "/api/rooms/" + url.PathEscape(st.CampRoom)
+	req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp, err := s.signalHTTP.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("fetch camp: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("camp returned %s", resp.Status))
+		return
+	}
+	var body struct {
+		Room  string          `json:"room"`
+		Peers json.RawMessage `json:"peers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("decode camp: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": true,
+		"you":     st.CampName,
+		"room":    body.Room,
+		"peers":   body.Peers,
+	})
+}
+
+// campHTTPBase converts the camp WebSocket URL into the matching HTTP
+// origin. Strips the trailing "/ws" path so the result is a clean base
+// for /api/* calls.
+func campHTTPBase(wsURL string) (string, error) {
+	if wsURL == "" {
+		return "", errors.New("camp url not set")
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse camp url %q: %w", wsURL, err)
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	case "http", "https":
+		// already fine
+	default:
+		return "", fmt.Errorf("unsupported camp url scheme %q", u.Scheme)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/ws")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 type startRequest struct {

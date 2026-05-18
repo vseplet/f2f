@@ -617,11 +617,73 @@ $(function () {
     });
   }
 
+  // Camp tab — list of peers in our current room. Polls our local proxy
+  // (/api/camp/peers), which in turn fetches /api/rooms/<room> from the
+  // configured camp server. Off-state ("engine not running") is the only
+  // non-happy branch; once we're in a room there's always at least one
+  // peer (us).
+  const $campStatus = $('#camp-peers-status');
+  const $campTable = $('#camp-peers-table');
+  const $campBody = $('#camp-peers-tbody');
+  const $campRoomMeta = $('#camp-room-meta');
+
+  function humanAgo(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h';
+    return Math.floor(h / 24) + 'd';
+  }
+
+  function renderCampPeers(data) {
+    if (!data || data.running === false) {
+      $campStatus.text('engine not running').show();
+      $campTable.addClass('hidden');
+      $campRoomMeta.text('');
+      return;
+    }
+    const peers = Array.isArray(data.peers) ? data.peers : [];
+    $campRoomMeta.text(data.room || '');
+    if (peers.length === 0) {
+      $campStatus.text('no peers in this room').show();
+      $campTable.addClass('hidden');
+      return;
+    }
+    $campStatus.hide();
+    $campBody.empty();
+    for (const p of peers) {
+      const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
+      const isYou = data.you && p.name === data.you;
+      const $row = $('<tr>').css('color', isYou ? '#86b86b' : '');
+      $row.append(
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.name + (isYou ? ' (you)' : '')),
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(p.tunnel_ip || '—'),
+        $('<td>').css({padding: '4px 16px 4px 0'}).text(endpoint),
+        $('<td>').css({padding: '4px 0', color: '#666'}).text(humanAgo(p.joined_at))
+      );
+      $campBody.append($row);
+    }
+    $campTable.removeClass('hidden');
+  }
+
+  function refreshCampPeers() {
+    $.ajax({ url: '/api/camp/peers', dataType: 'json' })
+      .done(renderCampPeers)
+      .fail(() => {
+        $campStatus.text('failed to fetch room state').show();
+        $campTable.addClass('hidden');
+      });
+  }
+
   restoreForm();
   loadIfaces();
   refreshStatus();
   refreshTopology();
+  refreshCampPeers();
   setInterval(refreshStatus, 3000);
   setInterval(refreshTopology, 2000);
+  setInterval(refreshCampPeers, 3000);
   startLogStream();
 });

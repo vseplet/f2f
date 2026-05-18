@@ -14,15 +14,42 @@
     <div class="ax-frame ax-tabbar">
       <div class="ax-header">
         <div class="ax-tabs">
-          <button type="button" data-tab="tunnel" class="ax-tab ax-tab-active">tunnel</button>
+          <button type="button" data-tab="camp" class="ax-tab ax-tab-active">camp</button>
           <span class="ax-sep">·</span>
-          <button type="button" data-tab="audio" class="ax-tab">call<span class="ax-star" id="ax-star"> *</span></button>
+          <button type="button" data-tab="tunnel" class="ax-tab">tunnel</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="dns" class="ax-tab">dns</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="audio" class="ax-tab">meet<span class="ax-star" id="ax-star"> *</span></button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="drop" class="ax-tab">drop</button>
         </div>
         <div id="status-indicator" class="ax-status ax-status-stopped">loading…</div>
       </div>
     </div>
 
-    <div id="tab-tunnel" class="tab-panel">
+    <div id="tab-camp" class="tab-panel">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— room</span>
+          <span class="ax-meta" id="camp-room-meta"></span>
+        </div>
+        <div id="camp-peers-status" class="ax-section-status">loading…</div>
+        <table id="camp-peers-table" class="hidden" style="width:100%;border-collapse:collapse;margin-top:8px">
+          <thead>
+            <tr style="color:#666;border-bottom:1px solid #2a2622">
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">name</th>
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">tunnel ip</th>
+              <th style="text-align:left;padding:4px 16px 6px 0;font-weight:normal">endpoint</th>
+              <th style="text-align:left;padding:4px 0 6px 0;font-weight:normal">joined</th>
+            </tr>
+          </thead>
+          <tbody id="camp-peers-tbody"></tbody>
+        </table>
+      </div>
+    </div><!-- /#tab-camp -->
+
+    <div id="tab-tunnel" class="tab-panel hidden">
       <!-- Identity: the only two things you usually touch -->
       <div class="ax-frame ax-section">
         <div class="ax-section-title">
@@ -142,6 +169,15 @@
       </div>
     </div><!-- /#tab-tunnel -->
 
+    <div id="tab-dns" class="tab-panel hidden">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— dns</span>
+        </div>
+        <div class="ax-section-status">empty</div>
+      </div>
+    </div><!-- /#tab-dns -->
+
     <div id="tab-audio" class="tab-panel hidden">
       <div class="ax-frame">
         <div class="ax-panes">
@@ -235,6 +271,15 @@
         </div>
       </div>
     </div><!-- /#tab-audio -->
+
+    <div id="tab-drop" class="tab-panel hidden">
+      <div class="ax-frame ax-section">
+        <div class="ax-section-title">
+          <span>— drop</span>
+        </div>
+        <div class="ax-section-status">empty</div>
+      </div>
+    </div><!-- /#tab-drop -->
   </div>
 
   <script src="/app.js"></script>
