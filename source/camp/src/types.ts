@@ -1,14 +1,14 @@
-// Wire protocol. All messages are JSON strings over a single WebSocket
-// connection per peer. Server enforces "one hello first; everything else
-// only after we know who you are".
+// Wire protocol. There is no WebSocket — everything is either UDP
+// (announce protocol on the STUN port) or plain HTTP (`/api/id/:id`).
+// Keep this in sync with source/mac/internal/rendezvous.
 
 export type PeerInfo = {
   name: string;
   public_ip: string;
-  // Advertised UDP port the peer listens on. Combined with public_ip this
+  // Advertised UDP port the peer is reachable on, derived from the
+  // source address of its announce packet. Combined with public_ip this
   // forms an `udp_endpoint` that the *other* peer can target for hole
-  // punching. May be missing during the brief window between WebSocket
-  // open and the peer's first `announce`.
+  // punching.
   udp_port?: number;
   udp_endpoint?: string;
   // Camp-assigned IP inside the camp's virtual subnet (e.g. 10.99.0.3).
@@ -18,74 +18,26 @@ export type PeerInfo = {
   joined_at: number;
 };
 
-// ---- client → server ----
+// --- UDP wire types ---
 
-export type Hello = {
-  type: "hello";
-  name: string; // unique within the camp
+// Announce: client → server, on the STUN UDP port. Server observes the
+// public endpoint via the packet's source address — no need to put it
+// in the body.
+export type AnnounceReq = {
+  t: "announce";
+  name: string;
   camp_id: string;
-  udp_port?: number; // optional; can also be sent later via announce
 };
 
-export type Announce = {
-  type: "announce";
-  udp_port: number;
-};
-
-export type Signal = {
-  type: "signal";
-  to: string; // peer name within the same camp
-  payload: unknown;
-};
-
-export type List = { type: "list" };
-export type Ping = { type: "ping" };
-
-export type ClientMsg = Hello | Announce | Signal | List | Ping;
-
-// ---- server → client ----
-
-export type Welcome = {
-  type: "welcome";
+// Server's reply on success.
+export type AnnouncedResp = {
+  t: "announced";
   you: PeerInfo;
-  camp_id: string;
-  peers: PeerInfo[];
 };
 
-export type ErrorMsg = {
-  type: "error";
-  code: string;
+// Server's reply on error.
+export type AnnounceErr = {
+  t: "error";
+  code: string; // bad_name | bad_camp_id | camp_full | name_conflict | …
   message: string;
 };
-
-export type PeerJoined = {
-  type: "peer-joined";
-  peer: PeerInfo;
-};
-
-export type PeerUpdated = {
-  type: "peer-updated";
-  peer: PeerInfo;
-};
-
-export type PeerLeft = {
-  type: "peer-left";
-  name: string;
-};
-
-export type SignalDelivery = {
-  type: "signal";
-  from: string;
-  payload: unknown;
-};
-
-export type Pong = { type: "pong" };
-
-export type ServerMsg =
-  | Welcome
-  | ErrorMsg
-  | PeerJoined
-  | PeerUpdated
-  | PeerLeft
-  | SignalDelivery
-  | Pong;

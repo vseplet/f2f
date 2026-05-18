@@ -1,88 +1,50 @@
 //go:build darwin
 
-// Package rendezvous talks to the f2f-camp server: discovers our external
-// UDP endpoint via the STUN-like probe, and uses a WebSocket to register
-// our identity and learn about the other peer in our camp.
+// Package rendezvous talks to the f2f-camp server using a UDP announce
+// protocol on the same socket as the tunnel, plus an HTTP peer-list
+// poller. There is no WebSocket — see TODO.md for the history of why
+// we moved off WS.
 //
-// All JSON wire types here mirror those in source/camp/src/types.ts —
-// keep them in sync.
+// Wire types here mirror source/camp/src — keep them in sync.
 package rendezvous
 
-// PeerInfo is the camp server's view of a connected peer.
+// PeerInfo is the camp server's view of a connected peer. The same
+// shape is used in announce replies (`you`) and in /api/id/:id.
 type PeerInfo struct {
 	Name        string `json:"name"`
 	PublicIP    string `json:"public_ip"`
 	UDPPort     int    `json:"udp_port,omitempty"`
 	UDPEndpoint string `json:"udp_endpoint,omitempty"`
-	TunnelIP    string `json:"tunnel_ip"` // camp-assigned IP inside the camp's /24 overlay
+	TunnelIP    string `json:"tunnel_ip"`
 	JoinedAt    int64  `json:"joined_at"`
 }
 
-// --- client → server ---
+// --- UDP wire types ---
 
-type helloMsg struct {
-	Type    string `json:"type"` // "hello"
-	Name    string `json:"name"`
-	CampID  string `json:"camp_id"`
-	UDPPort int    `json:"udp_port,omitempty"`
+// announceReq is what we send to camp every ~20s. The server reads our
+// (public_ip, udp_port) off the packet itself, so we don't put those
+// in the body.
+type announceReq struct {
+	T      string `json:"t"` // "announce"
+	Name   string `json:"name"`
+	CampID string `json:"camp_id"`
 }
 
-type announceMsg struct {
-	Type    string `json:"type"` // "announce"
-	UDPPort int    `json:"udp_port"`
+// announceResp is what camp sends back. Same shape parsed inline in
+// AnnounceClient.HandlePacket; this declaration documents the type.
+//
+//nolint:unused
+type announceResp struct {
+	T   string   `json:"t"` // "announced"
+	You PeerInfo `json:"you"`
 }
 
-type signalMsg struct {
-	Type    string `json:"type"` // "signal"
-	To      string `json:"to"`
-	Payload any    `json:"payload"`
-}
-
-type pingMsg struct {
-	Type string `json:"type"` // "ping"
-}
-
-// --- server → client ---
-
-type welcomeMsg struct {
-	Type   string     `json:"type"` // "welcome"
-	You    PeerInfo   `json:"you"`
-	CampID string     `json:"camp_id"`
-	Peers  []PeerInfo `json:"peers"`
-}
-
-type errorMsg struct {
-	Type    string `json:"type"`
+// announceErr is the error reply (bad_name, bad_camp_id, camp_full,
+// name_conflict, etc.).
+//
+//nolint:unused
+type announceErr struct {
+	T       string `json:"t"` // "error"
 	Code    string `json:"code"`
 	Message string `json:"message"`
-}
-
-type peerEventMsg struct {
-	Type string   `json:"type"`           // "peer-joined" | "peer-updated"
-	Peer PeerInfo `json:"peer"`
-}
-
-type peerLeftMsg struct {
-	Type string `json:"type"` // "peer-left"
-	Name string `json:"name"`
-}
-
-type signalDeliveryMsg struct {
-	Type    string `json:"type"` // "signal"
-	From    string `json:"from"`
-	Payload any    `json:"payload"`
-}
-
-// stunProbe and stunReflex are the wire types of the UDP-side
-// reflexive-address discovery exchange.
-type stunProbe struct {
-	T  string `json:"t"`  // "probe"
-	ID string `json:"id"`
-}
-
-type stunReflex struct {
-	T    string `json:"t"`  // "reflex"
-	ID   string `json:"id"`
-	IP   string `json:"ip"`
-	Port int    `json:"port"`
 }

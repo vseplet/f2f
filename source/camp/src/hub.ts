@@ -1,20 +1,13 @@
-import type { ServerWebSocket } from "bun";
-import type { PeerInfo, ServerMsg } from "./types";
+import type { PeerInfo } from "./types";
 
-// Peer is the live state for a connected WebSocket. The PeerInfo we expose
-// to other peers is derived from this; campID is kept here (not in
-// PeerInfo) because it's a server-side membership thing, not part of the
-// peer's public identity.
+// Peer is the live state for a registered peer. We key by camp_id+name
+// in the parent Hub; the campID field here is mainly for outbound
+// PeerInfo construction (we never publish it, but the Hub keeps a
+// reverse map for eviction).
 export type Peer = {
-  ws: ServerWebSocket<SocketData>;
   campID: string;
   info: PeerInfo;
-};
-
-// SocketData is attached to each WebSocket so we know which peer owns it
-// without an extra lookup map. It's only populated after the hello handshake.
-export type SocketData = {
-  peer: Peer | null;
+  lastSeen: number; // epoch ms
 };
 
 // Each camp is its own /24 overlay (10.99.0.0/24): peers reserve a
@@ -34,23 +27,38 @@ type Camp = {
 export class Hub {
   private camps = new Map<string, Camp>();
 
-  // Add peer to its camp and assign a tunnel_ip from the camp's pool.
-  // The chosen address is written back into peer.info.tunnel_ip so the
-  // caller sees it for the welcome message. Throws if the pool is full.
-  join(campID: string, peer: Peer): { existing: PeerInfo[]; tunnelIP: string } {
+  // Upsert is the announce-driven path: either refresh an existing
+  // peer's endpoint+lastSeen, or join a brand-new one. Returns the
+  // PeerInfo to send back in the announce reply. Throws if the camp is
+  // full when joining for the first time.
+  upsert(campID: string, name: string, publicIP: string, udpPort: number): PeerInfo {
     let c = this.camps.get(campID);
     if (!c) {
       c = { peers: new Map(), allocated: new Set() };
       this.camps.set(campID, c);
     }
+    const now = Date.now();
+    const existing = c.peers.get(name);
+    if (existing) {
+      existing.info.public_ip = publicIP;
+      existing.info.udp_port = udpPort;
+      existing.info.udp_endpoint = `${publicIP}:${udpPort}`;
+      existing.lastSeen = now;
+      return existing.info;
+    }
     const octet = this.nextOctet(c);
     if (octet < 0) throw new Error(`camp ${campID} is full`);
     c.allocated.add(octet);
-    const tunnelIP = `${SUBNET_PREFIX}.${octet}`;
-    peer.info.tunnel_ip = tunnelIP;
-    const existing = Array.from(c.peers.values()).map((p) => p.info);
-    c.peers.set(peer.info.name, peer);
-    return { existing, tunnelIP };
+    const info: PeerInfo = {
+      name,
+      public_ip: publicIP,
+      udp_port: udpPort,
+      udp_endpoint: `${publicIP}:${udpPort}`,
+      tunnel_ip: `${SUBNET_PREFIX}.${octet}`,
+      joined_at: now,
+    };
+    c.peers.set(name, { campID, info, lastSeen: now });
+    return info;
   }
 
   private nextOctet(c: Camp): number {
@@ -60,53 +68,45 @@ export class Hub {
     return -1;
   }
 
-  // Remove peer from its camp and release its tunnel_ip. Returns true if
-  // anything was removed. Empty camps are dropped from the map so memory
-  // doesn't leak on long-lived servers.
-  leave(campID: string, name: string): boolean {
-    const c = this.camps.get(campID);
-    if (!c) return false;
-    const peer = c.peers.get(name);
-    if (!peer) return false;
-    c.peers.delete(name);
-    const octet = parseOctet(peer.info.tunnel_ip);
-    if (octet >= 0) c.allocated.delete(octet);
-    if (c.peers.size === 0) this.camps.delete(campID);
-    return true;
-  }
-
-  // Find a specific peer in a camp (for direct signal forwarding).
+  // Find a specific peer in a camp. Currently unused but cheap to keep
+  // around for future signal forwarding etc.
   get(campID: string, name: string): Peer | undefined {
     return this.camps.get(campID)?.peers.get(name);
   }
 
-  // Snapshot of every peer's PeerInfo in a camp. Empty array if the camp
-  // doesn't exist (which is indistinguishable from "0 peers" in this model).
+  // True if a peer with this name already lives in the camp. Used to
+  // distinguish first-time joins from refreshes when validating.
+  has(campID: string, name: string): boolean {
+    return this.camps.get(campID)?.peers.has(name) ?? false;
+  }
+
+  // Snapshot of every peer's PeerInfo in a camp. Empty array if the
+  // camp doesn't exist (which is indistinguishable from "0 peers" in
+  // this model).
   list(campID: string): PeerInfo[] {
     const c = this.camps.get(campID);
     if (!c) return [];
     return Array.from(c.peers.values()).map((p) => p.info);
   }
 
-  // True if a peer with this name already lives in the camp.
-  has(campID: string, name: string): boolean {
-    return this.camps.get(campID)?.peers.has(name) ?? false;
-  }
-
-  // Send a message to every peer in the camp *except* the excluded one.
-  broadcast(campID: string, msg: ServerMsg, excludeName?: string): void {
-    const c = this.camps.get(campID);
-    if (!c) return;
-    const data = JSON.stringify(msg);
-    for (const p of c.peers.values()) {
-      if (p.info.name === excludeName) continue;
-      try {
-        p.ws.send(data);
-      } catch {
-        // Dead socket. We'll find out via close handler; no need to act
-        // here.
+  // Evict peers whose lastSeen is older than threshold. Called on a
+  // timer so stale entries don't keep tunnel_ips reserved or pollute
+  // the per-camp HTTP view.
+  evictStale(threshold: number): number {
+    let removed = 0;
+    for (const [campID, c] of this.camps) {
+      for (const [name, p] of c.peers) {
+        if (p.lastSeen < threshold) {
+          c.peers.delete(name);
+          const octet = parseOctet(p.info.tunnel_ip);
+          if (octet >= 0) c.allocated.delete(octet);
+          removed++;
+          console.log(`evict: ${name}@${campID} (idle)`);
+        }
       }
+      if (c.peers.size === 0) this.camps.delete(campID);
     }
+    return removed;
   }
 
   // Snapshot of the whole hub — used by /api/stats for ops visibility.

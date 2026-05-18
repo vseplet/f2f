@@ -93,11 +93,15 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun     *tunnel.Tunnel
-	udp     *net.UDPConn
-	routes  *route.Manager
-	egr     *egress.Egress
-	camp    *rendezvous.Client
+	tun      *tunnel.Tunnel
+	udp      *net.UDPConn
+	routes   *route.Manager
+	egr      *egress.Egress
+	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
+	// campAddr is the resolved UDP endpoint of the camp server. The main
+	// read loop checks each incoming packet's source against this so we
+	// can dispatch announce replies before they hit IP-version parsing.
+	campAddr atomic.Pointer[net.UDPAddr]
 	// campReflex / campPeerName / campPeerTunnelIP are display-only and
 	// updated from adoptCampPeer, which can run while Start already holds
 	// e.mu. Keep them lock-free via atomics so they can't deadlock.
@@ -208,43 +212,39 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
-	// Camp: discover external endpoint via STUN, then connect to the
-	// rendezvous WebSocket. Welcome carries our camp-assigned tunnel IP,
-	// which utun will be opened with below.
+	// Camp: announce ourselves over UDP on the same socket the tunnel
+	// uses. The reply carries our camp-assigned tunnel IP (which utun
+	// will be opened with below) and our public endpoint as observed
+	// by camp — that doubles as STUN. The peer list comes from the
+	// periodic HTTP poller started further down.
 	var (
-		welcome  *rendezvous.Welcome
-		localIP  = cfg.LocalIP
-		peerIP   = cfg.PeerIP
+		localIP = cfg.LocalIP
+		peerIP  = cfg.PeerIP
 	)
 	if cfg.Camp != nil {
-		reflex, err := rendezvous.Probe(e.udp, cfg.Camp.StunAddr, 5*time.Second)
+		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID)
 		if err != nil {
 			e.rollbackPartial()
-			return fmt.Errorf("camp stun: %w", err)
+			return fmt.Errorf("camp announce client: %w", err)
 		}
-		log.Printf("camp: STUN reflex %s (advertised port %d)", reflex, reflex.Port)
-
-		dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		client, w, err := rendezvous.Dial(dialCtx, cfg.Camp.URL, cfg.Camp.Name, cfg.Camp.ID, reflex.Port)
-		dialCancel()
+		self, err := ac.AnnounceOnce(5 * time.Second)
 		if err != nil {
 			e.rollbackPartial()
-			return fmt.Errorf("camp dial: %w", err)
+			return fmt.Errorf("camp announce: %w", err)
 		}
-		if w.You.TunnelIP == "" {
-			_ = client.Close()
+		if self.TunnelIP == "" {
 			e.rollbackPartial()
-			return fmt.Errorf("camp welcome did not assign a tunnel_ip")
+			return fmt.Errorf("camp announce reply did not include tunnel_ip")
 		}
-		e.camp = client
-		rs := reflex.String()
-		e.campReflex.Store(&rs)
-		welcome = w
-		localIP = w.You.TunnelIP
-		// peerIP stays as the user-provided value; it's only used for
-		// utun's point-to-point pair in static mode. In Camp mode utun
-		// is opened as a subnet so peerIP doesn't matter.
-		log.Printf("camp: registered as %s in camp %s, tunnel_ip=%s", cfg.Camp.Name, cfg.Camp.ID, localIP)
+		e.announce = ac
+		e.campAddr.Store(ac.CampAddr())
+		reflex := self.UDPEndpoint
+		if reflex == "" {
+			reflex = self.PublicIP
+		}
+		e.campReflex.Store(&reflex)
+		localIP = self.TunnelIP
+		log.Printf("camp: registered as %s in camp %s, tunnel_ip=%s reflex=%s", cfg.Camp.Name, cfg.Camp.ID, localIP, reflex)
 	}
 
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
@@ -293,18 +293,6 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
-	// If camp's welcome told us about peers already in the camp, adopt
-	// the first one with a known UDP endpoint — two-party tunnel for now.
-	if welcome != nil {
-		log.Printf("camp: %d existing peer(s) in camp", len(welcome.Peers))
-		for _, p := range welcome.Peers {
-			if p.UDPEndpoint != "" {
-				e.adoptCampPeer(p)
-				break
-			}
-		}
-	}
-
 	// Workers.
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
@@ -320,15 +308,53 @@ func (e *Engine) Start(cfg Config) error {
 	}
 	e.workers.Add(1)
 	go e.domainRefreshLoop(ctx)
-	if e.camp != nil {
+	if e.announce != nil {
+		// Periodic announce keeps both camp's last_seen fresh and the
+		// camp-facing NAT mapping alive (matters under symmetric NAT).
 		e.workers.Add(1)
-		go e.campLoop(ctx, e.camp)
+		go func() {
+			defer e.workers.Done()
+			e.announce.Run(ctx, 20*time.Second)
+		}()
+		// Peer list poller. onUpdate runs in the poller goroutine.
+		base, err := rendezvous.CampHTTPBase(cfg.Camp.URL)
+		if err != nil {
+			log.Printf("camp: %v (peer list disabled)", err)
+		} else {
+			poller := rendezvous.NewPeerListPoller(base, cfg.Camp.ID, e.applyPeerList)
+			e.workers.Add(1)
+			go func() {
+				defer e.workers.Done()
+				poller.Run(ctx, 3*time.Second)
+			}()
+		}
 	}
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.keepaliveLoop(ctx)
 	}
 	return nil
+}
+
+// applyPeerList reconciles our adopted peer with the camp's current
+// view. For now we operate in two-party mode: pick the first OTHER
+// peer with a known UDP endpoint and adopt it; do nothing if our peer
+// is still present in the list. Multi-peer mesh would replace this.
+func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
+	var ourName string
+	if cfg := e.cfg.Camp; cfg != nil {
+		ourName = cfg.Name
+	}
+	for _, p := range peers {
+		if p.Name == ourName {
+			continue
+		}
+		if p.UDPEndpoint == "" {
+			continue
+		}
+		e.adoptCampPeer(p)
+		return
+	}
 }
 
 // keepaliveLoop fires a one-byte UDP packet at the current peer every
@@ -370,17 +396,12 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
-	camp := e.camp
 	e.mu.Unlock()
 
 	cancel()
-	// Close the camp WebSocket early so its read loop unblocks before we
-	// wait on workers below.
-	if camp != nil {
-		_ = camp.Close()
-	}
 	// Close UDP first; this aborts the peerToTun worker. It is independent
-	// of utun and routes, so it's safe to do early.
+	// of utun and routes, so it's safe to do early. The announce loop and
+	// peer-list poller respond to ctx cancellation above.
 	if udp != nil {
 		_ = udp.Close()
 	}
@@ -415,7 +436,8 @@ func (e *Engine) Stop() error {
 	e.udp = nil
 	e.routes = nil
 	e.egr = nil
-	e.camp = nil
+	e.announce = nil
+	e.campAddr.Store(nil)
 	e.campReflex.Store(nil)
 	e.campPeerName.Store(nil)
 	e.campPeerTunnelIP.Store(nil)
@@ -471,7 +493,7 @@ func (e *Engine) Status() Status {
 			st.EgressSubnet = e.cfg.EgressSubnet
 		}
 		if e.cfg.Camp != nil {
-			st.CampActive = e.camp != nil
+			st.CampActive = e.announce != nil
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
 			st.CampID = e.cfg.Camp.ID
@@ -807,12 +829,20 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			return
 		}
 		pkt := buf[:n]
+		// Camp announce replies arrive on this same socket. Dispatch
+		// them to the AnnounceClient before any IP-shape checks so they
+		// don't get logged as drops.
+		if ca := e.campAddr.Load(); ca != nil && sameUDPAddr(ca, from) {
+			if e.announce != nil && e.announce.HandlePacket(pkt) {
+				continue
+			}
+		}
 		// Anything not shaped like an IPv4/IPv6 packet — hole-punch
-		// markers, stale STUN reflexes that raced past Probe(), random
-		// scans — gets dropped here before it can pollute peer tracking
-		// or fail utun.Write. Only after we've decided this is a real
-		// tunnel packet do we let it update peerPtr (so peer-NAT rebinds
-		// can still be followed) and reach utun.
+		// markers, random scans — gets dropped here before it can
+		// pollute peer tracking or fail utun.Write. Only after we've
+		// decided this is a real tunnel packet do we let it update
+		// peerPtr (so peer-NAT rebinds can still be followed) and reach
+		// utun.
 		if n < 20 {
 			continue
 		}
@@ -908,59 +938,7 @@ func (e *Engine) rollbackPartial() {
 		_ = e.egr.Close()
 		e.egr = nil
 	}
-	if e.camp != nil {
-		_ = e.camp.Close()
-		e.camp = nil
-	}
-}
-
-// campLoop runs the WebSocket reader and dispatches peer events from the
-// rendezvous server. Cancelled via ctx; Run also returns when the socket
-// is closed by Stop.
-func (e *Engine) campLoop(ctx context.Context, c *rendezvous.Client) {
-	defer e.workers.Done()
-
-	// Run blocks until ctx is cancelled or the socket closes; surface
-	// non-cancellation errors but don't crash — Stop will tidy up.
-	runErr := make(chan error, 1)
-	go func() { runErr <- c.Run(ctx) }()
-
-	events := c.Events()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case err := <-runErr:
-			if err != nil && !rendezvous.IsCancelled(err) {
-				log.Printf("camp: connection closed: %v", err)
-			}
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			e.handleCampEvent(ev)
-		}
-	}
-}
-
-func (e *Engine) handleCampEvent(ev rendezvous.Event) {
-	switch ev.Kind {
-	case rendezvous.EventJoined:
-		log.Printf("camp: peer %s joined (%s)", ev.Peer.Name, ev.Peer.UDPEndpoint)
-		if ev.Peer.UDPEndpoint != "" {
-			e.adoptCampPeer(ev.Peer)
-		}
-	case rendezvous.EventUpdated:
-		log.Printf("camp: peer %s updated (%s)", ev.Peer.Name, ev.Peer.UDPEndpoint)
-		if ev.Peer.UDPEndpoint != "" {
-			e.adoptCampPeer(ev.Peer)
-		}
-	case rendezvous.EventLeft:
-		log.Printf("camp: peer %s left", ev.Name)
-	case rendezvous.EventSignal:
-		log.Printf("camp: signal from %s (ignored)", ev.From)
-	}
+	e.announce = nil
 }
 
 // adoptCampPeer sets the engine's peer address from a camp announcement

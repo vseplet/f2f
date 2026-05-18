@@ -133,6 +133,14 @@ $(function () {
   // the user's first manual Stop would be immediately followed by an
   // auto-Start, which races with camp's session cleanup and fails with
   // "name_taken".
+  // `pendingOp` guards the engine button against periodic /api/status
+  // races while a Start/Stop is in flight. Both Start and Stop on the
+  // server take a few seconds (utun, routes, STUN, WS close+wait); during
+  // that window the 3s refresh would see the stale running flag and
+  // overwrite our "starting…/stopping…" loading state, then the user's
+  // next click triggers a second operation that races the first and gets
+  // "already running" / a name_taken.
+  let pendingOp = null; // 'starting' | 'stopping' | null
   let autoStarted = false;
   function maybeAutoStart(s) {
     if (autoStarted) return;
@@ -149,7 +157,11 @@ $(function () {
 
   function applyStatus(s) {
     maybeAutoStart(s);
-    if (s.running) {
+    if (pendingOp) {
+      // Hold the loading state while an op is in flight; inputs stay
+      // locked too so the user doesn't edit them mid-transition.
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
+    } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
@@ -397,21 +409,27 @@ $(function () {
       camp_name: $('#camp-name').val().trim(),
       camp_id: $('#camp-id').val().trim(),
     };
+    pendingOp = 'starting';
     setEngineState('loading', 'starting…', '');
     $.ajax({
       url: '/api/start',
       method: 'POST',
       contentType: 'application/json',
       data: JSON.stringify(cfg)
-    }).done(refreshStatus).fail((xhr) => {
-      refreshStatus();
-      alert('Start failed: ' + errorOf(xhr));
-    });
+    })
+      .always(() => { pendingOp = null; })
+      .done(refreshStatus)
+      .fail((xhr) => {
+        refreshStatus();
+        alert('Start failed: ' + errorOf(xhr));
+      });
   }
 
   function triggerStop() {
+    pendingOp = 'stopping';
     setEngineState('loading', 'stopping…', '');
     $.ajax({ url: '/api/stop', method: 'POST' })
+      .always(() => { pendingOp = null; })
       .done(refreshStatus)
       .fail((xhr) => {
         refreshStatus();
