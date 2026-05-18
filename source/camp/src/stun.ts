@@ -46,7 +46,7 @@ export async function startUDP(port: number, hub: Hub) {
     port,
     hostname,
     socket: {
-      data(sock, buf, srcPort, srcAddr) {
+      async data(sock, buf, srcPort, srcAddr) {
         // Hard cap on payload size — both as a sanity check and to keep
         // reflection amplification cheap.
         if (buf.length > 1024) {
@@ -78,7 +78,7 @@ export async function startUDP(port: number, hub: Hub) {
         const wasNew = !hub.has(campID, name);
         let info;
         try {
-          info = hub.upsert(campID, name, srcAddr, srcPort);
+          info = await hub.upsert(campID, name, srcAddr, srcPort);
         } catch (err) {
           sendErr(sock, srcAddr, srcPort, "camp_full", (err as Error).message);
           return;

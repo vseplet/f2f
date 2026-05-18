@@ -1,42 +1,56 @@
+import { loadBindings, saveBinding, touchBinding } from "./db";
 import type { PeerInfo } from "./types";
 
-// Peer is the live state for a registered peer. We key by camp_id+name
-// in the parent Hub; the campID field here is mainly for outbound
-// PeerInfo construction (we never publish it, but the Hub keeps a
-// reverse map for eviction).
+// Peer is the live state for a registered peer.
 export type Peer = {
   campID: string;
   info: PeerInfo;
   lastSeen: number; // epoch ms
 };
 
-// Each camp is its own /24 overlay (10.99.0.0/24): peers reserve a
-// 10.99.0.X within the camp when they join, and release it when they
-// leave. The 0th address is reserved as the subnet's network address;
-// .255 is reserved as broadcast. Two camps can both use .1, .2 — they
-// never share a subnet between them at the wire level.
+// Each camp is its own /24 overlay (10.99.0.0/24). The mapping
+// name → octet is sticky across leave/rejoin: Hub holds it in
+// `bindings` in-memory (write-through to Turso), so a peer that
+// reconnects gets back the same tunnel_ip they had before.
 const SUBNET_PREFIX = "10.99.0";
 const FIRST_HOST = 1;
 const LAST_HOST = 254;
 
 type Camp = {
   peers: Map<string, Peer>;
-  allocated: Set<number>; // last octet of in-use IPs
+  bindings: Map<string, number>; // name → octet, sticky
+  loaded: boolean;               // bindings have been hydrated from db
 };
 
 export class Hub {
   private camps = new Map<string, Camp>();
 
-  // Upsert is the announce-driven path: either refresh an existing
-  // peer's endpoint+lastSeen, or join a brand-new one. Returns the
-  // PeerInfo to send back in the announce reply. Throws if the camp is
-  // full when joining for the first time.
-  upsert(campID: string, name: string, publicIP: string, udpPort: number): PeerInfo {
+  // ensureLoaded lazy-loads the camp's persisted bindings on first
+  // touch. Subsequent calls are no-ops.
+  private async ensureLoaded(campID: string): Promise<Camp> {
     let c = this.camps.get(campID);
     if (!c) {
-      c = { peers: new Map(), allocated: new Set() };
+      c = { peers: new Map(), bindings: new Map(), loaded: false };
       this.camps.set(campID, c);
     }
+    if (!c.loaded) {
+      const persisted = await loadBindings(campID);
+      // If we already had in-memory entries (from concurrent upserts
+      // racing the load), keep ours and merge.
+      for (const [name, octet] of persisted) {
+        if (!c.bindings.has(name)) c.bindings.set(name, octet);
+      }
+      c.loaded = true;
+    }
+    return c;
+  }
+
+  // Upsert is the announce-driven path: refresh an existing peer or
+  // welcome a new one. The peer's octet is sticky via `bindings` —
+  // same name in same camp → same tunnel_ip across sessions. Throws
+  // if the camp's /24 pool is exhausted on a fresh allocation.
+  async upsert(campID: string, name: string, publicIP: string, udpPort: number): Promise<PeerInfo> {
+    const c = await this.ensureLoaded(campID);
     const now = Date.now();
     const existing = c.peers.get(name);
     if (existing) {
@@ -44,11 +58,27 @@ export class Hub {
       existing.info.udp_port = udpPort;
       existing.info.udp_endpoint = `${publicIP}:${udpPort}`;
       existing.lastSeen = now;
+      void touchBinding(campID, name);
       return existing.info;
     }
-    const octet = this.nextOctet(c);
-    if (octet < 0) throw new Error(`camp ${campID} is full`);
-    c.allocated.add(octet);
+    // First time we see this name in this camp's live state — figure
+    // out which octet they get.
+    let octet = c.bindings.get(name) ?? -1;
+    if (octet < 0 || c.bindings.size === 0) {
+      // No prior binding (in-memory or db). Allocate next free.
+      octet = this.nextFreeOctet(c);
+      if (octet < 0) throw new Error(`camp ${campID} is full`);
+      c.bindings.set(name, octet);
+    } else if (!isOctetTaken(c, octet, name)) {
+      // Prior binding is still ours to use.
+    } else {
+      // Octet is taken by someone else currently (unusual: only
+      // happens if a name was reassigned out-of-band, or a long-dead
+      // entry never got cleaned). Reallocate.
+      octet = this.nextFreeOctet(c);
+      if (octet < 0) throw new Error(`camp ${campID} is full`);
+      c.bindings.set(name, octet);
+    }
     const info: PeerInfo = {
       name,
       public_ip: publicIP,
@@ -58,58 +88,72 @@ export class Hub {
       joined_at: now,
     };
     c.peers.set(name, { campID, info, lastSeen: now });
+
+    // Write-through to Turso. Tolerate failures (we still have the
+    // binding in-memory for this session).
+    saveBinding(campID, name, octet).catch((err) => {
+      console.error(`db: saveBinding(${campID},${name}) failed: ${(err as Error).message}`);
+    });
     return info;
   }
 
-  private nextOctet(c: Camp): number {
+  private nextFreeOctet(c: Camp): number {
+    const taken = new Set<number>();
+    for (const p of c.peers.values()) {
+      const o = parseOctet(p.info.tunnel_ip);
+      if (o >= 0) taken.add(o);
+    }
+    // Also avoid octets that have a binding (sticky for absent peers).
+    for (const o of c.bindings.values()) taken.add(o);
     for (let i = FIRST_HOST; i <= LAST_HOST; i++) {
-      if (!c.allocated.has(i)) return i;
+      if (!taken.has(i)) return i;
     }
     return -1;
   }
 
-  // Find a specific peer in a camp. Currently unused but cheap to keep
-  // around for future signal forwarding etc.
+  // Find a specific peer (live) in a camp.
   get(campID: string, name: string): Peer | undefined {
     return this.camps.get(campID)?.peers.get(name);
   }
 
-  // True if a peer with this name already lives in the camp. Used to
-  // distinguish first-time joins from refreshes when validating.
+  // True if a peer with this name is currently in the camp.
   has(campID: string, name: string): boolean {
     return this.camps.get(campID)?.peers.has(name) ?? false;
   }
 
-  // Snapshot of every peer's PeerInfo in a camp. Empty array if the
-  // camp doesn't exist (which is indistinguishable from "0 peers" in
-  // this model).
+  // Snapshot of every peer's PeerInfo in a camp.
   list(campID: string): PeerInfo[] {
     const c = this.camps.get(campID);
     if (!c) return [];
     return Array.from(c.peers.values()).map((p) => p.info);
   }
 
-  // Evict peers whose lastSeen is older than threshold. Called on a
-  // timer so stale entries don't keep tunnel_ips reserved or pollute
-  // the per-camp HTTP view.
+  // Evict peers whose lastSeen is older than threshold. The binding
+  // stays (so the same name returns to the same tunnel_ip on next
+  // announce) — only the live-peer entry is removed. The camp itself
+  // is kept around as long as it has bindings; empty camps are
+  // dropped purely from the live map.
   evictStale(threshold: number): number {
     let removed = 0;
     for (const [campID, c] of this.camps) {
       for (const [name, p] of c.peers) {
         if (p.lastSeen < threshold) {
           c.peers.delete(name);
-          const octet = parseOctet(p.info.tunnel_ip);
-          if (octet >= 0) c.allocated.delete(octet);
           removed++;
           console.log(`evict: ${name}@${campID} (idle)`);
         }
       }
-      if (c.peers.size === 0) this.camps.delete(campID);
+      // Drop the camp object if it has neither live peers nor any
+      // sticky bindings — nothing to remember.
+      if (c.peers.size === 0 && c.bindings.size === 0) {
+        this.camps.delete(campID);
+      }
     }
     return removed;
   }
 
-  // Snapshot of the whole hub — used by /api/stats for ops visibility.
+  // Stats — kept in sync with the previous shape so external callers
+  // don't break.
   stats() {
     const camps: Array<{ id: string; peers: string[] }> = [];
     for (const [id, camp] of this.camps.entries()) {
@@ -117,6 +161,13 @@ export class Hub {
     }
     return { camps, total_peers: camps.reduce((s, c) => s + c.peers.length, 0) };
   }
+}
+
+function isOctetTaken(c: Camp, octet: number, exceptName: string): boolean {
+  for (const [name, o] of c.bindings) {
+    if (name !== exceptName && o === octet) return true;
+  }
+  return false;
 }
 
 function parseOctet(ip: string | undefined): number {

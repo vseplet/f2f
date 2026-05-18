@@ -10,20 +10,28 @@
 // for MVP. Two instances would require pinning peers in the same camp
 // to the same node (sticky sessions) or moving to a shared store.
 
+import { cleanupStale, initDB } from "./db";
 import { Hub } from "./hub";
 import { startUDP } from "./stun";
 import type { PeerInfo } from "./types";
 
 const PORT = Number(Bun.env.PORT ?? 8080);
 const STUN_PORT = Number(Bun.env.STUN_PORT ?? 3478);
-// Peers must announce at least every EVICT_AFTER_MS or we drop them.
-// Client cadence is ~20s, so 60s gives 2 missed announces of slack.
+// Peers must announce at least every EVICT_AFTER_MS or we drop them
+// from the live roster. Client cadence is ~20s, so 60s gives two
+// missed announces of slack.
 const EVICT_AFTER_MS = 60_000;
 const EVICT_INTERVAL_MS = 10_000;
+// Sticky (name → octet) bindings older than BINDING_STALE_AFTER_MS are
+// dropped from Turso entirely — releases the slot if the name never
+// comes back.
+const BINDING_STALE_AFTER_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+const BINDING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const MAX_CAMP_ID_LEN = 128;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
 const hub = new Hub();
+await initDB();
 
 const server = Bun.serve({
   port: PORT,
@@ -76,6 +84,12 @@ try {
 setInterval(() => {
   hub.evictStale(Date.now() - EVICT_AFTER_MS);
 }, EVICT_INTERVAL_MS);
+
+// Periodic DB cleanup of long-stale bindings. Hourly is plenty —
+// nothing fails if it runs less often.
+setInterval(() => {
+  void cleanupStale(Date.now() - BINDING_STALE_AFTER_MS);
+}, BINDING_CLEANUP_INTERVAL_MS);
 
 function isValidCampID(name: string): boolean {
   return name.length > 0 && name.length <= MAX_CAMP_ID_LEN && NAME_RE.test(name);
