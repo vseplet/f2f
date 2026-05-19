@@ -548,25 +548,6 @@
     });
     setVolume(80);
 
-    // ---- keyboard shortcuts ----
-    // Active only when the audio tab is visible and the user isn't typing
-    // into a form field.
-    function audioTabActive() {
-      return !document.getElementById('tab-audio').classList.contains('hidden');
-    }
-    function inField(e) {
-      const t = e.target;
-      return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-    }
-    document.addEventListener('keydown', (e) => {
-      if (!audioTabActive() || inField(e)) return;
-      if (e.key === 'Enter' && !pc) { e.preventDefault(); call(); return; }
-      if (e.key === 'm') { e.preventDefault(); $micBtn.click(); return; }
-      if (e.key === 'v') { e.preventDefault(); $camBtn.click(); return; }
-      if (e.key === 'c') { e.preventDefault(); $logClear.click(); return; }
-      if ((e.metaKey || e.ctrlKey) && e.key === '.') { e.preventDefault(); if (pc) hangup(); return; }
-    });
-
     setState('idle');
     startSignaling();
   }

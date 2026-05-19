@@ -35,107 +35,107 @@
     </div>
 
     <div id="tab-camp" class="tab-panel">
-      <!-- Identity: who we are in the camp. Editing these is the main
-           thing the user does on the camp tab; engine reads them on
-           start. -->
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— identity</span>
-        </div>
-        <div class="ax-grid-2">
-          <div class="ax-field">
-            <label>name</label>
-            <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— identity</span>
           </div>
-          <div class="ax-field">
-            <label>camp id</label>
-            <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+          <div class="ax-grid-2">
+            <div class="ax-field">
+              <label>name</label>
+              <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+            </div>
+            <div class="ax-field">
+              <label>camp id</label>
+              <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— peers</span>
-          <span class="ax-meta" id="camp-id-meta"></span>
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— peers</span>
+            <span class="ax-meta" id="camp-id-meta"></span>
+          </div>
+          <div id="camp-peers-status" class="ax-section-status">loading…</div>
+          <table id="camp-peers-table" class="ax-peers hidden">
+            <thead>
+              <tr>
+                <th class="ax-peers-dot"></th>
+                <th>name</th>
+                <th>tunnel ip</th>
+                <th>endpoint</th>
+                <th>joined</th>
+              </tr>
+            </thead>
+            <tbody id="camp-peers-tbody"></tbody>
+          </table>
+          <div class="ax-section-status muted" style="margin-top:8px">use the meet tab to pick a peer for calls; intercepts route per-entry via their bound peer</div>
         </div>
-        <div id="camp-peers-status" class="ax-section-status">loading…</div>
-        <table id="camp-peers-table" class="ax-peers hidden">
-          <thead>
-            <tr>
-              <th class="ax-peers-dot"></th>
-              <th>name</th>
-              <th>tunnel ip</th>
-              <th>endpoint</th>
-              <th>joined</th>
-            </tr>
-          </thead>
-          <tbody id="camp-peers-tbody"></tbody>
-        </table>
-        <div class="ax-section-status muted" style="margin-top:8px">use the meet tab to pick a peer for calls; intercepts route per-entry via their bound peer</div>
       </div>
     </div><!-- /#tab-camp -->
 
     <div id="tab-tunnel" class="tab-panel hidden">
-      <!-- Engine config — everything that isn't identity. Camp name/id
-           live on the camp tab now. -->
-      <!-- Intercepts: the active list -->
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— intercepts</span>
-          <span class="ax-meta" id="intercept-meta">0</span>
-        </div>
-        <div id="intercept-list" class="ax-list"></div>
-        <div class="ax-add-row">
-          <input id="intercept-input" type="text" class="ax-input" placeholder="domain, ip, or cidr — comma separated">
-          <select id="intercept-peer" class="ax-select">
-            <option value="">— peer —</option>
-          </select>
-          <button id="btn-add-intercept" class="ax-btn ax-btn-primary">+ add</button>
-        </div>
-      </div>
-
-      <!-- Counters + topology under one collapsed diagnostics -->
-      <div class="ax-frame ax-section">
-        <details class="ax-advanced">
-          <summary>diagnostics · counters &amp; topology</summary>
-          <div class="ax-advanced-body">
-            <div class="ax-counters">
-              <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
-              <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
-              <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
-              <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
-            </div>
-            <svg id="topology" style="width:100%;height:300px;background:#15130f;border:1px solid #2a251c;border-radius:3px;margin-top:8px"></svg>
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— intercepts</span>
+            <span class="ax-meta" id="intercept-meta">0</span>
           </div>
-        </details>
-      </div>
-
-      <!-- Log -->
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— log</span>
-          <button id="btn-clear-log" class="ax-list-remove" style="margin:0">clear</button>
+          <div id="intercept-list" class="ax-list"></div>
+          <div class="ax-add-row">
+            <input id="intercept-input" type="text" class="ax-input" placeholder="domain, ip, or cidr — comma separated">
+            <select id="intercept-peer" class="ax-select">
+              <option value="">— peer —</option>
+            </select>
+            <button id="btn-add-intercept" class="ax-btn ax-btn-primary">+ add</button>
+          </div>
         </div>
-        <pre id="log" style="height:280px;overflow-y:auto;white-space:pre-wrap;margin:0"></pre>
+
+        <div class="ax-section">
+          <details class="ax-advanced">
+            <summary>diagnostics · counters &amp; topology</summary>
+            <div class="ax-advanced-body">
+              <div class="ax-counters">
+                <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
+                <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
+                <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
+                <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
+              </div>
+              <svg id="topology" style="width:100%;height:300px;background:#15130f;border:1px solid #2a251c;border-radius:3px;margin-top:8px"></svg>
+            </div>
+          </details>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— log</span>
+            <button id="btn-clear-log" class="ax-list-remove" style="margin:0">clear</button>
+          </div>
+          <pre id="log" style="height:280px;overflow-y:auto;white-space:pre-wrap;margin:0"></pre>
+        </div>
       </div>
     </div><!-- /#tab-tunnel -->
 
     <div id="tab-dns" class="tab-panel hidden">
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— dns</span>
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— dns</span>
+          </div>
+          <div class="ax-section-status">empty</div>
         </div>
-        <div class="ax-section-status">empty</div>
       </div>
     </div><!-- /#tab-dns -->
 
     <div id="tab-ssh" class="tab-panel hidden">
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— ssh</span>
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— ssh</span>
+          </div>
+          <div class="ax-section-status">empty</div>
         </div>
-        <div class="ax-section-status">empty</div>
       </div>
     </div><!-- /#tab-ssh -->
 
@@ -191,17 +191,14 @@
             <span class="ax-btn-state">▶</span>
             <span class="ax-btn-label">call peer</span>
             <span class="ax-btn-meta" id="ax-call-meta"></span>
-            <span class="ax-btn-kbd ax-kbd">↵</span>
           </button>
           <button id="ax-mic-btn" class="ax-btn ax-btn-mic" disabled>
             <span class="ax-btn-state">●</span>
             <span>mic</span>
-            <span class="ax-btn-kbd ax-kbd">m</span>
           </button>
           <button id="ax-cam-btn" class="ax-btn ax-btn-cam" disabled>
             <span class="ax-btn-state">□</span>
             <span>cam</span>
-            <span class="ax-btn-kbd ax-kbd">v</span>
           </button>
           <div class="ax-vol">
             <span class="ax-vol-label">vol</span>
@@ -215,33 +212,26 @@
         <div class="ax-log">
           <div class="ax-log-header">
             <span>— stream · <span id="ax-log-count">0</span> lines</span>
-            <button id="ax-log-clear" class="ax-log-clear">clear <span class="ax-kbd">c</span></button>
+            <button id="ax-log-clear" class="ax-log-clear">clear</button>
           </div>
           <div class="ax-log-body" id="ax-log-body"></div>
           <div class="ax-chat-input">
             <span class="ax-chat-prompt">›</span>
             <input id="ax-chat-input" type="text" autocomplete="off" placeholder="connect to chat" disabled />
-            <span class="ax-kbd">↵</span>
           </div>
         </div>
 
-        <div class="ax-footer">
-          <div class="ax-shortcuts">
-            <span class="ax-shortcut"><span class="ax-kbd">↵</span>call</span>
-            <span class="ax-shortcut"><span class="ax-kbd">m</span>mute</span>
-            <span class="ax-shortcut"><span class="ax-kbd">v</span>cam</span>
-            <span class="ax-shortcut"><span class="ax-kbd">⌘.</span>hang</span>
-          </div>
-        </div>
       </div>
     </div><!-- /#tab-audio -->
 
     <div id="tab-drop" class="tab-panel hidden">
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— drop</span>
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— drop</span>
+          </div>
+          <div class="ax-section-status">empty</div>
         </div>
-        <div class="ax-section-status">empty</div>
       </div>
     </div><!-- /#tab-drop -->
   </div>

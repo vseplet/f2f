@@ -12,10 +12,10 @@
   border-radius: 6px;
 }
 
-/* Top-level tabbar: by default sits flush with whatever frame is below
-   it (audio panel), sharing a single dotted border. When the tunnel tab
-   is active the tabbar becomes a self-contained rounded box again
-   because there's no terminal-style frame below it. */
+/* Tabbar sits flush with the single .ax-frame below it: dotted border
+   on the tabbar's bottom doubles as the frame's top, so the two render
+   as one continuous box. Every tab-panel uses the same one-frame layout
+   (see HTML). */
 .ax-tabbar {
   padding: 14px 20px;
   margin-bottom: 0;
@@ -24,16 +24,10 @@
 }
 .ax-tabbar .ax-header { margin-bottom: 0; }
 
-#tab-audio > .ax-frame {
+.tab-panel > .ax-frame {
   border-top-style: none;
   border-radius: 0 0 6px 6px;
   margin-top: 0;
-}
-
-body:has(#tab-tunnel:not(.hidden)) .ax-tabbar {
-  border-radius: 6px;
-  border-bottom-style: dotted;
-  margin-bottom: 24px;
 }
 
 /* Header row (used inside .ax-tabbar — no bottom margin since the
@@ -358,9 +352,17 @@ body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log-body {
   min-height: 0;
 }
 
-/* ---- Tunnel tab: terminal-styled sections ---- */
-.ax-section { padding: 16px 20px; }
-.ax-section + .ax-section { margin-top: 12px; }
+/* ---- Sections inside .ax-frame ---- */
+/* Each tab-panel is one .ax-frame containing sequential .ax-section
+   blocks. Sections inherit frame padding via the outer .ax-frame; they
+   add only inter-section spacing + a dotted divider so the seams feel
+   intentional. */
+.ax-section { padding: 0; }
+.ax-frame > .ax-section + .ax-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dotted #2a251c;
+}
 
 .ax-section-title {
   display: flex;
