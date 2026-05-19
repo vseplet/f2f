@@ -509,6 +509,12 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			e.mu.Lock()
 			targets := make([]*peerState, 0, len(e.peers))
 			for _, p := range e.peers {
+				// Skip peers without a known UDP target: camp marked them
+				// offline, or we've never observed their endpoint. Punch
+				// resumes the moment they reappear in applyPeerList.
+				if p.UDPAddr == nil {
+					continue
+				}
 				targets = append(targets, p)
 			}
 			e.mu.Unlock()

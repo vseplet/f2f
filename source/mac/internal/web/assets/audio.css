@@ -325,28 +325,46 @@
   padding: 8px 12px;
 }
 
-/* When the call tab is active, expand the whole panel to the viewport
-   height and let the log/chat soak up everything that's left after the
-   fixed-size video, dB meter, controls, and footer rows. */
-body:has(#tab-audio:not(.hidden)) {
+/* Stretch the active tab's frame to fill the viewport below the tabbar.
+   Used by every tab uniformly (formerly meet-only). The frame's last
+   child grows to soak up leftover space so the bottom doesn't feel
+   empty when content is short. */
+html, body {
   height: 100vh;
   overflow: hidden;
 }
-body:has(#tab-audio:not(.hidden)) .max-w-5xl {
+.max-w-5xl {
   height: 100vh;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
 }
-body:has(#tab-audio:not(.hidden)) #tab-audio,
-body:has(#tab-audio:not(.hidden)) #tab-audio > .ax-frame,
-body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log {
+.tab-panel,
+.tab-panel > .ax-frame {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log-body {
+.tab-panel.hidden { display: none; }
+/* Default: when frame content exceeds viewport, scroll the frame itself.
+   Meet overrides this — its log scrolls inside a fixed frame instead. */
+.tab-panel > .ax-frame { overflow-y: auto; }
+.tab-panel > .ax-frame > :last-child {
+  flex: 1;
+  min-height: 0;
+}
+
+#tab-audio > .ax-frame { overflow: hidden; }
+
+/* Meet's log body needs to scroll independently inside its section. */
+#tab-audio .ax-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#tab-audio .ax-log-body {
   flex: 1;
   max-height: none;
   min-height: 0;
@@ -396,8 +414,19 @@ body:has(#tab-audio:not(.hidden)) #tab-audio .ax-log-body {
   border-radius: 3px;
   outline: none;
 }
-.ax-input:focus, .ax-select:focus { border-color: #4a4030; background: #1a1814; }
-.ax-input:disabled, .ax-select:disabled { color: #7a6e5a; }
+.ax-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6' fill='none' stroke='%237a6e5a' stroke-width='1.4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 9px 6px;
+  cursor: pointer;
+}
+.ax-input:focus, .ax-select:focus { border-color: #4a4030; background-color: #1a1814; }
+.ax-input:disabled, .ax-select:disabled { color: #7a6e5a; cursor: default; }
 .ax-input::placeholder { color: #4a4030; opacity: 1; }
 .ax-input:focus::placeholder { color: #5a4e3a; }
 
@@ -476,39 +505,66 @@ details.ax-advanced > .ax-advanced-body {
 }
 .ax-btn-danger:hover { background: rgba(194, 86, 86, 0.18); }
 
-/* List of intercepts / inbound-allow */
-.ax-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+/* List of intercepts */
+.ax-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .ax-list-empty { color: #6a5e4a; font-size: 12px; padding: 6px 4px; }
-.ax-list-item {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: start;
-  gap: 12px;
-  padding: 8px 10px;
+
+.ax-intercept {
   background: #15130f;
   border: 1px solid #2a251c;
   border-radius: 3px;
   font-size: 12px;
 }
-.ax-list-item .ax-list-icon { color: #4a4030; padding-top: 1px; }
-.ax-list-item .ax-list-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ax-list-item .ax-list-spec { color: #d4c8a6; font-weight: 500; }
-.ax-list-item .ax-list-meta {
-  color: #7a6e5a;
-  font-size: 11px;
-  word-break: break-all;
+.ax-intercept-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
 }
-.ax-list-item .ax-pill {
+.ax-intercept-head:hover { background: rgba(212, 200, 166, 0.03); }
+.ax-intercept.is-expanded .ax-intercept-head { border-bottom: 1px dotted #2a251c; }
+.ax-intercept-caret { color: #4a4030; font-size: 10px; width: 10px; display: inline-block; }
+.ax-intercept-spec { color: #d4c8a6; font-weight: 500; }
+.ax-intercept-meta { margin-left: auto; color: #7a6e5a; font-size: 11px; white-space: nowrap; }
+.ax-meta-routes { color: #86b86b; }
+.ax-meta-reject { color: #c47070; }
+
+.ax-intercept .ax-pill {
   display: inline-block;
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 2px;
-  margin-left: 6px;
   border: 1px solid;
 }
 .ax-pill-active { color: #86b86b; border-color: #3a5a30; background: rgba(134, 184, 107, 0.06); }
 .ax-pill-pending { color: #c4a554; border-color: #6a5030; background: rgba(196, 165, 84, 0.06); }
 .ax-pill-peer    { color: #8aa8c8; border-color: #355068; background: rgba(138, 168, 200, 0.06); }
+
+.ax-intercept-body { padding: 8px 12px 12px 30px; }
+.ax-intercept-empty { color: #6a5e4a; font-size: 12px; }
+
+.ax-intercept-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.ax-intercept-table th {
+  text-align: left;
+  color: #6a5e4a;
+  font-weight: normal;
+  font-size: 11px;
+  padding-bottom: 6px;
+}
+.ax-intercept-table th.ax-policy { text-align: right; }
+.ax-intercept-table td { padding: 2px 0; vertical-align: top; }
+.ax-intercept-table td.ax-kind { color: #6a5e4a; width: 40px; }
+.ax-intercept-table td.ax-resolved { color: #d4c8a6; word-break: break-all; }
+.ax-intercept-table tr.v6 td.ax-resolved { color: #c47070; }
+.ax-intercept-table td.ax-policy { color: #7a6e5a; text-align: right; white-space: nowrap; }
+.ax-intercept-table tr.v6 td.ax-policy { color: #c47070; }
+
 .ax-list-remove {
   background: transparent;
   border: none;

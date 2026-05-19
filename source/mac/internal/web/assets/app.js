@@ -57,6 +57,7 @@ $(function () {
 
   let liveIntercepts = []; // last seen from /api/status
   let livePeers = [];      // last seen camp peers from /api/status
+  const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
   // Persist config form values across reloads. Each field has a localStorage
   // key; we restore on load and save on every change. Engine-driven updates
@@ -204,31 +205,79 @@ $(function () {
     }
 
     items.forEach((it) => {
-      const $row = $('<div class="ax-list-item">');
-      $row.append('<span class="ax-list-icon">›</span>');
-      const $main = $('<div class="ax-list-main">');
-      const $spec = $('<div class="ax-list-spec">').text(it.spec);
-      $spec.append('<span class="ax-pill ax-pill-peer">via ' + escapeHtml(it.peer) + '</span>');
-      if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
-      else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
-      if (it.orphan) $spec.append('<span class="ax-pill ax-pill-pending">unsaved</span>');
-      $main.append($spec);
+      const key = it.spec + '\x00' + it.peer;
       const prefixes = it.live ? (it.live.prefixes || []) : [];
-      if (prefixes.length) {
-        $main.append($('<div class="ax-list-meta">').text(prefixes.join(', ')));
+      const parsed = prefixes.map(parsePrefixEntry);
+      const v4count = parsed.filter((p) => p.kind === 'v4').length;
+      const v6count = parsed.filter((p) => p.kind === 'v6').length;
+      const expanded = expandedIntercepts.has(key);
+
+      const $row = $('<div class="ax-intercept">').toggleClass('is-expanded', expanded);
+      const $head = $('<div class="ax-intercept-head">');
+      $head.append($('<span class="ax-intercept-caret">').text(expanded ? '▼' : '▶'));
+      $head.append($('<span class="ax-intercept-spec">').text(it.spec));
+      $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + it.peer));
+      if (it.live) $head.append($('<span class="ax-pill ax-pill-active">').text('active'));
+      else         $head.append($('<span class="ax-pill ax-pill-pending">').text('pending'));
+      if (it.orphan) $head.append($('<span class="ax-pill ax-pill-pending">').text('unsaved'));
+
+      const $meta = $('<span class="ax-intercept-meta">');
+      if (parsed.length) {
+        const bits = [];
+        if (v4count) bits.push(`<span class="ax-meta-routes">${v4count} route${v4count === 1 ? '' : 's'}</span>`);
+        if (v6count) bits.push(`<span class="ax-meta-reject">${v6count} reject</span>`);
+        $meta.html(bits.join(' · '));
       }
-      $row.append($main);
-      const $btn = $('<button class="ax-list-remove">remove</button>');
-      $btn.on('click', () => removeSpec(it.spec, it.peer, it.live));
-      $row.append($btn);
+      $head.append($meta);
+
+      const $rm = $('<button class="ax-list-remove">remove</button>');
+      $rm.on('click', (e) => { e.stopPropagation(); removeSpec(it.spec, it.peer, it.live); });
+      $head.append($rm);
+
+      $head.on('click', () => {
+        if (expandedIntercepts.has(key)) expandedIntercepts.delete(key);
+        else expandedIntercepts.add(key);
+        renderIntercepts();
+      });
+      $row.append($head);
+
+      if (expanded) {
+        const $body = $('<div class="ax-intercept-body">');
+        if (parsed.length === 0) {
+          $body.append($('<div class="ax-intercept-empty">').text('no resolved routes yet'));
+        } else {
+          const $tbl = $('<table class="ax-intercept-table">');
+          $tbl.append('<thead><tr><th>kind</th><th>resolved</th><th class="ax-policy">policy</th></tr></thead>');
+          const $tb = $('<tbody>');
+          parsed.forEach((p) => {
+            const $tr = $('<tr>').addClass(p.kind);
+            $tr.append($('<td class="ax-kind">').text(p.kind));
+            $tr.append($('<td class="ax-resolved">').text(p.resolved));
+            $tr.append($('<td class="ax-policy">').text(p.policy));
+            $tb.append($tr);
+          });
+          $tbl.append($tb);
+          $body.append($tbl);
+        }
+        $row.append($body);
+      }
+
       $list.append($row);
     });
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    })[c]);
+  // parsePrefixEntry takes a string like "5.255.255.242/32" or
+  // "2a02:6b8::2:242/128 (reject)" and pulls the kind/resolved/policy
+  // fields the UI shows in the expanded view.
+  function parsePrefixEntry(s) {
+    const reject = / \(reject\)$/.test(s);
+    const cidr = s.replace(/ \(reject\)$/, '');
+    const kind = cidr.indexOf(':') >= 0 ? 'v6' : 'v4';
+    return {
+      kind,
+      resolved: cidr,
+      policy: reject ? 'reject' : '→ peer',
+    };
   }
 
   function removeSpec(spec, peer, live) {
