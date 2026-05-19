@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -56,11 +55,15 @@ func usage() {
 	fmt.Fprint(os.Stderr, `f2f-mac — macOS-side traffic interceptor
 
 Usage:
-  sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
+  sudo f2f-mac run [--listen :PORT --peer HOST:PORT]
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
                    [--egress-iface en0]
                    [--camp-url wss://… --name X --id Y]
   sudo f2f-mac ui  [--bind 127.0.0.1:8080]
+
+Intercepts (domains/IPs to route through a specific peer) are managed
+exclusively via the web UI — each entry must be bound to a peer at
+creation time.
 
 Rendezvous (Camp) mode:
   Instead of supplying --peer, point at a camp server: each peer discovers
@@ -75,8 +78,6 @@ Rendezvous (Camp) mode:
   ui              Start the local web UI. Configure and operate the engine
                   from a browser. Same engine as 'run', just driven over HTTP.
 
-  --intercept     comma-separated IPs/CIDRs/domains routed into utun.
-                  Omit on the egress side.
   --listen        UDP address to receive from peer (e.g. :9000).
   --peer          UDP address of the remote peer (e.g. 10.0.0.5:9000).
                   Auto-updates when traffic arrives from elsewhere.
@@ -85,16 +86,10 @@ Rendezvous (Camp) mode:
                   ip.forwarding=1) is always on; this flag is just an
                   override for multi-homed boxes.
 
-Example (two-machine setup — A drives traffic, B is the exit):
-  # A (ingress, routes 1tv.ru into the tunnel):
-  sudo f2f-mac run --intercept 1tv.ru \
-                   --local-ip 10.99.0.1 --peer-ip 10.99.0.2 \
-                   --listen :9000 --peer B_LAN_IP:9000
-
-  # B (egress, NATs tunnel traffic out to the real internet):
-  sudo f2f-mac run --local-ip 10.99.0.2 --peer-ip 10.99.0.1 \
-                   --listen :9000 --peer A_LAN_IP:9000 \
-                   --egress-iface en0
+Example (two-machine camp setup — both sides are symmetric):
+  sudo f2f-mac run --listen :9000 \
+                   --camp-url wss://f2f-camp.fly.dev/ws \
+                   --name vasya --id beer
 
 Manual rescue (if f2f-mac was kill -9'd and left state behind):
   sudo pfctl -a com.apple/f2f-mac -F all
@@ -105,7 +100,6 @@ Manual rescue (if f2f-mac was kill -9'd and left state behind):
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	intercept := fs.String("intercept", "", "comma-separated list of IPs, CIDRs, and domains to route into the tunnel")
 	localIP := fs.String("local-ip", "10.99.0.1", "local end of the point-to-point address on utun")
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
 	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000)")
@@ -125,12 +119,11 @@ func runCmd(args []string) error {
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	cfg := engine.Config{
-		LocalIP:      *localIP,
-		PeerIP:       *peerIP,
-		Listen:       *listen,
-		Peer:         *peerAddr,
-		Intercepts:   splitCSV(*intercept),
-		EgressIface:  *egressIface,
+		LocalIP:     *localIP,
+		PeerIP:      *peerIP,
+		Listen:      *listen,
+		Peer:        *peerAddr,
+		EgressIface: *egressIface,
 	}
 	if *campName != "" && *campID != "" {
 		cfg.Camp = &engine.CampConfig{
@@ -193,12 +186,3 @@ func uiCmd(args []string) error {
 	return nil
 }
 
-func splitCSV(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if p := strings.TrimSpace(part); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}

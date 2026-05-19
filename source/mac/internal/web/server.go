@@ -332,45 +332,33 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 type startRequest struct {
-	LocalIP    string   `json:"local_ip"`
-	PeerIP     string   `json:"peer_ip"`
-	Listen     string   `json:"listen"`
-	Peer       string   `json:"peer"`
-	Intercepts []string `json:"intercepts"`
-	CampURL    string   `json:"camp_url"`
-	CampStun   string   `json:"camp_stun"`
-	CampName   string   `json:"camp_name"`
-	CampID     string   `json:"camp_id"`
+	CampName string `json:"camp_name"`
+	CampID   string `json:"camp_id"`
 }
 
+// handleStart accepts only camp identity from the UI now; everything else
+// (utun addresses, UDP listen port, camp endpoint) uses sensible defaults
+// that the engine fills in. Static-peer mode is no longer reachable from
+// the UI — use the CLI if you need it.
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	var req startRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	cfg := engine.Config{
-		LocalIP:    req.LocalIP,
-		PeerIP:     req.PeerIP,
-		Listen:     req.Listen,
-		Peer:       req.Peer,
-		Intercepts: req.Intercepts,
+	if req.CampName == "" || req.CampID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name and camp_id are required"))
+		return
 	}
-	if req.CampName != "" && req.CampID != "" {
-		url := req.CampURL
-		if url == "" {
-			url = "wss://f2f-camp.fly.dev/ws"
-		}
-		stun := req.CampStun
-		if stun == "" {
-			stun = "f2f-camp.fly.dev:3478"
-		}
-		cfg.Camp = &engine.CampConfig{
-			URL:      url,
-			StunAddr: stun,
+	cfg := engine.Config{
+		LocalIP: "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
+		Listen:  ":9000",
+		Camp: &engine.CampConfig{
+			URL:      "wss://f2f-camp.fly.dev/ws",
+			StunAddr: "f2f-camp.fly.dev:3478",
 			Name:     req.CampName,
 			ID:       req.CampID,
-		}
+		},
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -389,6 +377,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 type addInterceptRequest struct {
 	Spec string `json:"spec"`
+	Peer string `json:"peer"`
 }
 
 func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
@@ -397,7 +386,7 @@ func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	info, err := s.engine.AddIntercept(req.Spec)
+	info, err := s.engine.AddIntercept(req.Spec, req.Peer)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

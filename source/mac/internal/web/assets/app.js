@@ -26,47 +26,43 @@ $(function () {
   // localStorage. The engine has its own copy while running (the "live"
   // entries with IDs and resolved prefixes) — we reconcile the two on
   // every status refresh.
-  // Two persistent lists in localStorage: intercept specs (what we send
-  // INTO the tunnel) and inbound-allow specs (what we let peer's traffic
-  // reach OUT of the tunnel on our side). Mirror structures, same helpers.
-  function makeList(key) {
-    return {
-      get() {
-        try {
-          const raw = localStorage.getItem(key);
-          if (!raw) return [];
-          const arr = JSON.parse(raw);
-          return Array.isArray(arr) ? arr.filter((s) => typeof s === 'string') : [];
-        } catch (_) { return []; }
-      },
-      set(arr) { localStorage.setItem(key, JSON.stringify(arr)); },
-      add(spec) {
-        const list = this.get();
-        if (!list.includes(spec)) list.push(spec);
-        this.set(list);
-      },
-      remove(spec) {
-        this.set(this.get().filter((s) => s !== spec));
-      },
-    };
+  // Stored as a JSON array of {spec, peer} objects. Legacy entries
+  // (strings, or {spec} without peer) are dropped on load — peer is
+  // mandatory now.
+  const STORE_KEY = 'f2f:intercepts';
+  function getStoredSpecs() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      return arr.filter((e) => e && typeof e === 'object'
+        && typeof e.spec === 'string' && e.spec
+        && typeof e.peer === 'string' && e.peer);
+    } catch (_) { return []; }
   }
-  const intercepts = makeList('f2f:intercepts');
-
-  // Back-compat wrappers (some existing code uses these names).
-  const getStoredSpecs = () => intercepts.get();
-  const addStoredSpec = (s) => intercepts.add(s);
-  const removeStoredSpec = (s) => intercepts.remove(s);
+  function setStoredSpecs(arr) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(arr));
+  }
+  function addStoredSpec(spec, peer) {
+    const list = getStoredSpecs();
+    if (!list.some((e) => e.spec === spec && e.peer === peer)) {
+      list.push({ spec, peer });
+      setStoredSpecs(list);
+    }
+  }
+  function removeStoredSpec(spec, peer) {
+    setStoredSpecs(getStoredSpecs().filter((e) => !(e.spec === spec && e.peer === peer)));
+  }
 
   let liveIntercepts = []; // last seen from /api/status
+  let livePeers = [];      // last seen camp peers from /api/status
 
   // Persist config form values across reloads. Each field has a localStorage
   // key; we restore on load and save on every change. Engine-driven updates
   // (when running) also write to localStorage so the form starts from the
   // last actual state next time.
-  const FIELDS = [
-    '#local-ip', '#peer-ip', '#listen', '#peer-udp',
-    '#camp-url', '#camp-stun', '#camp-name', '#camp-id',
-  ];
+  const FIELDS = ['#camp-name', '#camp-id'];
   const storageKey = (sel) => 'f2f:' + sel.slice(1);
   function restoreForm() {
     // One-shot migration: the old key was f2f:camp-room before the
@@ -157,34 +153,23 @@ $(function () {
     if (pendingOp) {
       // Hold the loading state while an op is in flight; inputs stay
       // locked too so the user doesn't edit them mid-transition.
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
+      $('#camp-name, #camp-id').prop('disabled', true);
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
-      // Reflect the actual running config so the form shows truth, not stale input.
-      const live = {
-        '#local-ip': s.local_ip,
-        '#peer-ip': s.peer_ip,
-        '#listen': s.listen_addr,
-        '#peer-udp': s.peer_addr,
-      };
-      Object.entries(live).forEach(([sel, val]) => {
-        if (val) {
-          $(sel).val(val);
-          persistField(sel);
-        }
-      });
+      $('#camp-name, #camp-id').prop('disabled', true);
     } else {
       setEngineState('stopped', 'start', '');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', false);
+      $('#camp-name, #camp-id').prop('disabled', false);
     }
-    // Identity meta in section title shows compact running indicator.
-    $('#identity-meta').text(s.running ? (s.utun_name || '') : '');
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
     $btnAdd.prop('disabled', false);
 
     liveIntercepts = s.intercepts || [];
+    livePeers = s.peers || [];
+    refreshInterceptPeerSelect();
+    refreshCallPeerSelect(s.active_peer_tunnel_ip || '');
+    reconcileStoredIntercepts();
     renderIntercepts();
 
     $('#tx-packets').text(s.tx_packets || 0);
@@ -196,17 +181,19 @@ $(function () {
   function renderIntercepts() {
     $list.empty();
     const stored = getStoredSpecs();
-    const liveBySpec = {};
-    liveIntercepts.forEach((l) => { liveBySpec[l.spec] = l; });
+    const liveKey = (spec, peer) => spec + '\x00' + peer;
+    const liveByKey = {};
+    liveIntercepts.forEach((l) => { liveByKey[liveKey(l.spec, l.peer)] = l; });
 
-    const seen = new Set();
-    const items = stored.map((spec) => {
-      seen.add(spec);
-      const live = liveBySpec[spec];
-      return { spec, live: live || null };
+    const seenKeys = new Set();
+    const items = stored.map((e) => {
+      const k = liveKey(e.spec, e.peer);
+      seenKeys.add(k);
+      return { spec: e.spec, peer: e.peer, live: liveByKey[k] || null };
     });
     liveIntercepts.forEach((l) => {
-      if (!seen.has(l.spec)) items.push({ spec: l.spec, live: l, orphan: true });
+      const k = liveKey(l.spec, l.peer);
+      if (!seenKeys.has(k)) items.push({ spec: l.spec, peer: l.peer, live: l, orphan: true });
     });
 
     $('#intercept-meta').text(items.length);
@@ -221,6 +208,7 @@ $(function () {
       $row.append('<span class="ax-list-icon">›</span>');
       const $main = $('<div class="ax-list-main">');
       const $spec = $('<div class="ax-list-spec">').text(it.spec);
+      $spec.append('<span class="ax-pill ax-pill-peer">via ' + escapeHtml(it.peer) + '</span>');
       if (it.live) $spec.append('<span class="ax-pill ax-pill-active">active</span>');
       else         $spec.append('<span class="ax-pill ax-pill-pending">pending</span>');
       if (it.orphan) $spec.append('<span class="ax-pill ax-pill-pending">unsaved</span>');
@@ -231,14 +219,20 @@ $(function () {
       }
       $row.append($main);
       const $btn = $('<button class="ax-list-remove">remove</button>');
-      $btn.on('click', () => removeSpec(it.spec, it.live));
+      $btn.on('click', () => removeSpec(it.spec, it.peer, it.live));
       $row.append($btn);
       $list.append($row);
     });
   }
 
-  function removeSpec(spec, live) {
-    removeStoredSpec(spec);
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+  }
+
+  function removeSpec(spec, peer, live) {
+    removeStoredSpec(spec, peer);
     const after = () => { refreshStatus(); };
     if (live && live.id) {
       $.ajax({ url: '/api/intercepts/' + encodeURIComponent(live.id), method: 'DELETE' })
@@ -252,18 +246,38 @@ $(function () {
     }
   }
 
+  // refreshInterceptPeerSelect populates the dropdown next to the add-input
+  // with currently visible camp peers (excluding self). Preserves the
+  // current selection if still valid.
+  function refreshInterceptPeerSelect() {
+    const $sel = $('#intercept-peer');
+    const current = $sel.val();
+    $sel.empty();
+    $sel.append($('<option>').val('').text('— peer —'));
+    livePeers
+      .filter((p) => !p.self)
+      .forEach((p) => $sel.append($('<option>').val(p.name).text(p.name)));
+    if (current && livePeers.some((p) => p.name === current && !p.self)) {
+      $sel.val(current);
+    }
+  }
+
+  // reconcileStoredIntercepts retries POSTing any stored intercept that's
+  // not currently live. Runs on every status refresh while the engine is
+  // up. Silent failures are fine — they'll be retried next tick.
+  function reconcileStoredIntercepts() {
+    if (!engineRunning) return;
+    const liveKey = (spec, peer) => spec + '\x00' + peer;
+    const liveSet = new Set(liveIntercepts.map((l) => liveKey(l.spec, l.peer)));
+    getStoredSpecs().forEach((e) => {
+      if (liveSet.has(liveKey(e.spec, e.peer))) return;
+      addOne(e.spec, e.peer).fail(() => { /* retry next refresh */ });
+    });
+  }
+
 
   function triggerStart() {
     const cfg = {
-      local_ip: $('#local-ip').val().trim(),
-      peer_ip: $('#peer-ip').val().trim(),
-      listen: $('#listen').val().trim(),
-      peer: $('#peer-udp').val().trim(),
-      // Seed the engine with whatever the user has saved locally — that
-      // way pending intercepts become active immediately on Start.
-      intercepts: getStoredSpecs(),
-      camp_url: $('#camp-url').val().trim(),
-      camp_stun: $('#camp-stun').val().trim(),
       camp_name: $('#camp-name').val().trim(),
       camp_id: $('#camp-id').val().trim(),
     };
@@ -301,33 +315,36 @@ $(function () {
     else triggerStart();
   });
 
-  function addOne(spec) {
+  function addOne(spec, peer) {
     return $.ajax({
       url: '/api/intercepts',
       method: 'POST',
       contentType: 'application/json',
-      data: JSON.stringify({ spec: spec })
+      data: JSON.stringify({ spec, peer })
     });
   }
 
   $btnAdd.on('click', () => {
     const raw = $interceptInput.val();
+    const peer = $('#intercept-peer').val();
     const specs = raw.split(',').map((s) => s.trim()).filter(Boolean);
     if (specs.length === 0) return;
+    if (!peer) {
+      alert('Pick a peer to route this intercept through.');
+      return;
+    }
 
-    // Save locally first — this is the source of truth for the next Start
-    // and survives engine restarts.
-    specs.forEach(addStoredSpec);
+    // Save locally first — survives engine restarts; reconciliation
+    // pushes anything stored-but-not-live into engine on next status tick.
+    specs.forEach((spec) => addStoredSpec(spec, peer));
     $interceptInput.val('');
     renderIntercepts();
 
-    // If the engine is currently running, apply the new entries live so
-    // the user doesn't have to Stop/Start.
     if (!engineRunning) return;
 
     const errors = [];
     const requests = specs.map((spec) =>
-      addOne(spec).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`))
+      addOne(spec, peer).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`))
     );
     $.when(...requests).always(() => {
       refreshStatus();
@@ -598,20 +615,37 @@ $(function () {
     $campTable.removeClass('hidden');
   }
 
-  // Click on a non-self row → make it active.
-  $campBody.on('click', 'tr', function () {
-    if ($(this).hasClass('is-self')) return;
-    const tip = $(this).attr('data-tunnel-ip');
-    if (!tip) return;
+  // Meet-tab peer selector: set the engine's active peer (the one
+  // signalling/HTTP-forward in /api/signal/outbox goes to). Reflected
+  // on every status refresh in refreshCallPeerSelect.
+  $('#ax-call-peer').on('change', function () {
+    const name = $(this).val();
+    const peer = livePeers.find((p) => !p.self && p.name === name);
+    const tunnelIP = peer ? peer.tunnel_ip : '';
     $.ajax({
       url: '/api/peers/active',
       method: 'POST',
       contentType: 'application/json',
-      data: JSON.stringify({ tunnel_ip: tip }),
+      data: JSON.stringify({ tunnel_ip: tunnelIP }),
     })
-      .done(refreshCampPeers)
+      .done(refreshStatus)
       .fail((xhr) => alert('Set active failed: ' + errorOf(xhr)));
   });
+
+  // refreshCallPeerSelect mirrors live camp peers into the meet-tab
+  // dropdown, preserving the currently-active selection.
+  function refreshCallPeerSelect(activeTunnelIP) {
+    const $sel = $('#ax-call-peer');
+    const others = livePeers.filter((p) => !p.self);
+    $sel.empty();
+    $sel.append($('<option>').val('').text('— peer —'));
+    others.forEach((p) => {
+      const label = p.name + (p.reachable ? '' : ' (unreachable)');
+      $sel.append($('<option>').val(p.name).text(label));
+    });
+    const activePeer = others.find((p) => p.tunnel_ip === activeTunnelIP);
+    $sel.val(activePeer ? activePeer.name : '');
+  }
 
   function refreshCampPeers() {
     $.ajax({ url: '/api/camp/peers', dataType: 'json' })

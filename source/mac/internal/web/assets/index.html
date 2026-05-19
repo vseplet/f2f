@@ -73,51 +73,13 @@
           </thead>
           <tbody id="camp-peers-tbody"></tbody>
         </table>
-        <div class="ax-section-status muted" style="margin-top:8px">click row to select the active peer (tunnel + meet target)</div>
+        <div class="ax-section-status muted" style="margin-top:8px">use the meet tab to pick a peer for calls; intercepts route per-entry via their bound peer</div>
       </div>
     </div><!-- /#tab-camp -->
 
     <div id="tab-tunnel" class="tab-panel hidden">
       <!-- Engine config — everything that isn't identity. Camp name/id
            live on the camp tab now. -->
-      <div class="ax-frame ax-section">
-        <div class="ax-section-title">
-          <span>— config</span>
-          <span class="ax-meta" id="identity-meta"></span>
-        </div>
-        <details class="ax-advanced">
-          <summary>advanced</summary>
-          <div class="ax-advanced-body">
-            <div class="ax-grid-2">
-              <div class="ax-field">
-                <label>camp url</label>
-                <input id="camp-url" type="text" class="ax-input" value="wss://f2f-camp.fly.dev/ws">
-              </div>
-              <div class="ax-field">
-                <label>camp stun</label>
-                <input id="camp-stun" type="text" class="ax-input" value="f2f-camp.fly.dev:3478">
-              </div>
-              <div class="ax-field">
-                <label>local tunnel ip</label>
-                <input id="local-ip" type="text" class="ax-input" value="10.99.0.1">
-              </div>
-              <div class="ax-field">
-                <label>peer tunnel ip</label>
-                <input id="peer-ip" type="text" class="ax-input" value="10.99.0.2">
-              </div>
-              <div class="ax-field">
-                <label>listen udp</label>
-                <input id="listen" type="text" class="ax-input" value=":9000">
-              </div>
-              <div class="ax-field">
-                <label>peer udp (static mode)</label>
-                <input id="peer-udp" type="text" class="ax-input" placeholder="host:9000">
-              </div>
-            </div>
-          </div>
-        </details>
-      </div>
-
       <!-- Intercepts: the active list -->
       <div class="ax-frame ax-section">
         <div class="ax-section-title">
@@ -127,6 +89,9 @@
         <div id="intercept-list" class="ax-list"></div>
         <div class="ax-add-row">
           <input id="intercept-input" type="text" class="ax-input" placeholder="domain, ip, or cidr — comma separated">
+          <select id="intercept-peer" class="ax-select">
+            <option value="">— peer —</option>
+          </select>
           <button id="btn-add-intercept" class="ax-btn ax-btn-primary">+ add</button>
         </div>
       </div>
@@ -220,6 +185,9 @@
         </div>
 
         <div class="ax-controls">
+          <select id="ax-call-peer" class="ax-select">
+            <option value="">— peer —</option>
+          </select>
           <button id="ax-call-btn" class="ax-btn ax-btn-call">
             <span class="ax-btn-state">▶</span>
             <span class="ax-btn-label">call peer</span>

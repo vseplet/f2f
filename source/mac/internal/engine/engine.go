@@ -47,7 +47,6 @@ type Config struct {
 	PeerIP       string      // utun remote point-to-point address (static mode only)
 	Listen       string      // UDP listen address (":9000"), empty = no peer mode
 	Peer         string      // UDP peer address ("host:9000"); ignored when Camp is set
-	Intercepts   []string    // user-provided IPs/CIDRs/domains, resolved at Start
 	EgressIface  string      // physical interface for NAT; empty = auto-detect default route
 	Camp         *CampConfig // optional: use a rendezvous server instead of static Peer
 }
@@ -100,10 +99,14 @@ type PeerStatusInfo struct {
 	Self        bool   `json:"self,omitempty"`
 }
 
-// InterceptInfo describes one intercept entry and what host routes it owns.
+// InterceptInfo describes one intercept entry, what host routes it owns,
+// and which peer its traffic is routed through. Peer is the peer's name
+// in the camp; route lookups translate it to the current UDPAddr at
+// send time.
 type InterceptInfo struct {
 	ID       string   `json:"id"`
 	Spec     string   `json:"spec"`
+	Peer     string   `json:"peer"`
 	Prefixes []string `json:"prefixes"`
 }
 
@@ -329,13 +332,9 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("UDP listening on %s", e.udp.LocalAddr())
 	}
 
-	// Routes for the initial intercept list.
+	// Route table is empty at start; intercepts are added via UI / API
+	// once peers are visible (peer assignment is mandatory).
 	e.routes = route.New(tun.Name())
-	for _, spec := range cfg.Intercepts {
-		if _, err := e.addInterceptLocked(spec); err != nil {
-			log.Printf("WARN: intercept %q: %v", spec, err)
-		}
-	}
 
 	// Workers.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -714,15 +713,33 @@ func (e *Engine) SetActivePeer(tunnelIP string) error {
 	return nil
 }
 
-// AddIntercept resolves spec and installs its host routes via utun. Returns
-// the new entry's info. Requires Running.
-func (e *Engine) AddIntercept(spec string) (InterceptInfo, error) {
+// AddIntercept resolves spec, installs its host routes via utun, and binds
+// the entry to the named peer. peer must be a name currently in the camp
+// peers map; if not, the intercept is rejected. Requires Running.
+func (e *Engine) AddIntercept(spec, peer string) (InterceptInfo, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.running {
 		return InterceptInfo{}, errors.New("engine not running")
 	}
-	return e.addInterceptLocked(spec)
+	if peer == "" {
+		return InterceptInfo{}, errors.New("intercept peer is required")
+	}
+	if !e.hasPeerNameLocked(peer) {
+		return InterceptInfo{}, fmt.Errorf("peer %q is not in the camp", peer)
+	}
+	return e.addInterceptLocked(spec, peer)
+}
+
+// hasPeerNameLocked reports whether any peer in the camp currently has
+// this name. Called with e.mu held.
+func (e *Engine) hasPeerNameLocked(name string) bool {
+	for _, p := range e.peers {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveIntercept deletes all routes installed for the given entry ID.
@@ -764,7 +781,8 @@ func isDomainSpec(spec string) bool {
 }
 
 // addInterceptLocked must be called with e.mu held and e.running == true.
-func (e *Engine) addInterceptLocked(spec string) (InterceptInfo, error) {
+// peer is the camp-peer name traffic for this intercept is routed to.
+func (e *Engine) addInterceptLocked(spec, peer string) (InterceptInfo, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return InterceptInfo{}, errors.New("empty intercept spec")
@@ -779,7 +797,7 @@ func (e *Engine) addInterceptLocked(spec string) (InterceptInfo, error) {
 
 	e.nextItemID++
 	id := "i" + strconv.FormatUint(e.nextItemID, 10)
-	info := &InterceptInfo{ID: id, Spec: spec}
+	info := &InterceptInfo{ID: id, Spec: spec, Peer: peer}
 	for _, p := range prefixes {
 		// IPv6 destinations get a -reject route instead of being sent into
 		// the utun: our tunnel is IPv4-only, and forwarding IPv6 packets
@@ -956,7 +974,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		peerAddr := e.routeFor(pkt)
 		if peerAddr == nil {
 			if e.cfg.Camp != nil {
-				action = "drop-no-active"
+				action = "drop-no-route"
 			} else {
 				action = "drop-no-peer"
 			}
@@ -979,8 +997,10 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 
 // routeFor decides where an outgoing tunnel packet goes.
 //
-// Camp mode: if the IP dst is a known peer's tunnel_ip → straight to
-// that peer; otherwise → the active peer (if any).
+// Camp mode:
+//   1. dst is a known peer's tunnel_ip → that peer (meet, direct).
+//   2. dst is covered by an intercept → that intercept's bound peer.
+//   3. otherwise → drop (no implicit catch-all peer).
 //
 // Static mode: always to the configured static peer.
 func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
@@ -988,24 +1008,43 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 		return e.staticPeer.Load()
 	}
 	dst := packet.ExtractDst(pkt)
-	if dst.IsValid() {
-		e.mu.Lock()
-		if p, ok := e.peers[dst.String()]; ok && p.UDPAddr != nil {
-			e.mu.Unlock()
-			return p.UDPAddr
-		}
-		e.mu.Unlock()
-	}
-	active := e.activeTunnelIP.Load()
-	if active == nil {
+	if !dst.IsValid() {
 		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if p, ok := e.peers[*active]; ok && p.UDPAddr != nil {
+	if p, ok := e.peers[dst.String()]; ok && p.UDPAddr != nil {
 		return p.UDPAddr
 	}
+	target := e.interceptPeerForLocked(dst)
+	if target == "" {
+		return nil
+	}
+	for _, p := range e.peers {
+		if p.Name == target && p.UDPAddr != nil {
+			return p.UDPAddr
+		}
+	}
 	return nil
+}
+
+// interceptPeerForLocked returns the bound peer name for the first
+// intercept whose prefix contains dst, or "" if none match. Called with
+// e.mu held.
+func (e *Engine) interceptPeerForLocked(dst netip.Addr) string {
+	for _, info := range e.intercepts {
+		for _, prefStr := range info.Prefixes {
+			prefStr = strings.TrimSuffix(prefStr, " (reject)")
+			p, err := netip.ParsePrefix(prefStr)
+			if err != nil {
+				continue
+			}
+			if p.Contains(dst) {
+				return info.Peer
+			}
+		}
+	}
+	return ""
 }
 
 func (e *Engine) peerToTunLoop(ctx context.Context) {
