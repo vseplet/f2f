@@ -14,9 +14,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"os/exec"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -84,7 +82,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
-	mux.HandleFunc("GET /api/ifaces", s.handleIfaces)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
@@ -335,17 +332,15 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 type startRequest struct {
-	LocalIP      string   `json:"local_ip"`
-	PeerIP       string   `json:"peer_ip"`
-	Listen       string   `json:"listen"`
-	Peer         string   `json:"peer"`
-	Intercepts   []string `json:"intercepts"`
-	EgressIface  string   `json:"egress_iface"`
-	EgressSubnet string   `json:"egress_subnet"`
-	CampURL      string   `json:"camp_url"`
-	CampStun     string   `json:"camp_stun"`
-	CampName     string   `json:"camp_name"`
-	CampID       string   `json:"camp_id"`
+	LocalIP    string   `json:"local_ip"`
+	PeerIP     string   `json:"peer_ip"`
+	Listen     string   `json:"listen"`
+	Peer       string   `json:"peer"`
+	Intercepts []string `json:"intercepts"`
+	CampURL    string   `json:"camp_url"`
+	CampStun   string   `json:"camp_stun"`
+	CampName   string   `json:"camp_name"`
+	CampID     string   `json:"camp_id"`
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -355,13 +350,11 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:      req.LocalIP,
-		PeerIP:       req.PeerIP,
-		Listen:       req.Listen,
-		Peer:         req.Peer,
-		Intercepts:   req.Intercepts,
-		EgressIface:  req.EgressIface,
-		EgressSubnet: req.EgressSubnet,
+		LocalIP:    req.LocalIP,
+		PeerIP:     req.PeerIP,
+		Listen:     req.Listen,
+		Peer:       req.Peer,
+		Intercepts: req.Intercepts,
 	}
 	if req.CampName != "" && req.CampID != "" {
 		url := req.CampURL
@@ -437,65 +430,6 @@ func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-type ifaceInfo struct {
-	Name      string `json:"name"`
-	IP        string `json:"ip,omitempty"`
-	IsDefault bool   `json:"is_default,omitempty"`
-}
-
-func (s *Server) handleIfaces(w http.ResponseWriter, r *http.Request) {
-	ifs, err := net.Interfaces()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defaultName := defaultRouteIface()
-	out := []ifaceInfo{}
-	for _, iface := range ifs {
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-		if strings.HasPrefix(iface.Name, "utun") {
-			continue
-		}
-		info := ifaceInfo{Name: iface.Name, IsDefault: iface.Name == defaultName}
-		addrs, _ := iface.Addrs()
-		for _, a := range addrs {
-			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil {
-				info.IP = ipn.IP.String()
-				break
-			}
-		}
-		out = append(out, info)
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// defaultRouteIface returns the interface name of the IPv4 default route,
-// or "" if it can't be determined. We never pick a utun* (avoids loops if
-// another VPN owns the default route).
-func defaultRouteIface() string {
-	out, err := exec.Command("/sbin/route", "-n", "get", "default").Output()
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "interface:") {
-			continue
-		}
-		name := strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
-		if strings.HasPrefix(name, "utun") {
-			return ""
-		}
-		return name
-	}
-	return ""
 }
 
 func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {

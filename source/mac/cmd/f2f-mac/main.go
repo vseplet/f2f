@@ -58,7 +58,7 @@ func usage() {
 Usage:
   sudo f2f-mac run [--intercept LIST] [--listen :PORT --peer HOST:PORT]
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
-                   [--egress-iface en0 [--egress-subnet 10.99.0.0/24]]
+                   [--egress-iface en0]
                    [--camp-url wss://… --name X --id Y]
   sudo f2f-mac ui  [--bind 127.0.0.1:8080]
 
@@ -81,7 +81,9 @@ Rendezvous (Camp) mode:
   --peer          UDP address of the remote peer (e.g. 10.0.0.5:9000).
                   Auto-updates when traffic arrives from elsewhere.
   --egress-iface  physical interface to NAT tunnel traffic out of (e.g. en0).
-                  Enables egress mode: pf NAT + ip.forwarding=1.
+                  Empty = auto-detect default route. Egress (pf NAT +
+                  ip.forwarding=1) is always on; this flag is just an
+                  override for multi-homed boxes.
 
 Example (two-machine setup — A drives traffic, B is the exit):
   # A (ingress, routes 1tv.ru into the tunnel):
@@ -108,8 +110,7 @@ func runCmd(args []string) error {
 	peerIP := fs.String("peer-ip", "10.99.0.2", "remote end of the point-to-point address on utun")
 	listen := fs.String("listen", "", "UDP address to listen on (e.g. :9000)")
 	peerAddr := fs.String("peer", "", "UDP address of the remote peer (e.g. 127.0.0.1:9001)")
-	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (enables egress mode)")
-	egressSubnet := fs.String("egress-subnet", "10.99.0.0/24", "subnet to NAT out of --egress-iface")
+	egressIface := fs.String("egress-iface", "", "physical interface to NAT tunnel traffic out of (empty = auto-detect default route)")
 	campURL := fs.String("camp-url", "wss://f2f-camp.fly.dev/ws", "rendezvous WebSocket URL; Camp mode activates when --name and --id are both set")
 	campStun := fs.String("camp-stun", "f2f-camp.fly.dev:3478", "STUN host:port for external endpoint discovery")
 	campName := fs.String("name", "", "our identity on the rendezvous server (enables Camp mode together with --id)")
@@ -130,7 +131,6 @@ func runCmd(args []string) error {
 		Peer:         *peerAddr,
 		Intercepts:   splitCSV(*intercept),
 		EgressIface:  *egressIface,
-		EgressSubnet: *egressSubnet,
 	}
 	if *campName != "" && *campID != "" {
 		cfg.Camp = &engine.CampConfig{

@@ -65,7 +65,6 @@ $(function () {
   // last actual state next time.
   const FIELDS = [
     '#local-ip', '#peer-ip', '#listen', '#peer-udp',
-    '#egress-iface', '#egress-subnet',
     '#camp-url', '#camp-stun', '#camp-name', '#camp-id',
   ];
   const storageKey = (sel) => 'f2f:' + sel.slice(1);
@@ -158,18 +157,16 @@ $(function () {
     if (pendingOp) {
       // Hold the loading state while an op is in flight; inputs stay
       // locked too so the user doesn't edit them mid-transition.
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', true);
       // Reflect the actual running config so the form shows truth, not stale input.
       const live = {
         '#local-ip': s.local_ip,
         '#peer-ip': s.peer_ip,
         '#listen': s.listen_addr,
         '#peer-udp': s.peer_addr,
-        '#egress-iface': s.egress_iface,
-        '#egress-subnet': s.egress_subnet,
       };
       Object.entries(live).forEach(([sel, val]) => {
         if (val) {
@@ -179,19 +176,7 @@ $(function () {
       });
     } else {
       setEngineState('stopped', 'start', '');
-      $('#local-ip, #peer-ip, #listen, #peer-udp, #egress-iface, #egress-subnet, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', false);
-    }
-    // Camp status row — shown only when camp is actually active.
-    const $campStatus = $('#camp-status');
-    if (s.camp_active) {
-      const lines = [
-        `connected as ${s.camp_name}@${s.camp_id}`,
-        s.camp_reflex ? `reflex ${s.camp_reflex}` : '',
-        s.camp_peer_name ? `peer ${s.camp_peer_name} @ ${s.peer_addr || '?'}` : 'waiting for peer',
-      ].filter(Boolean);
-      $campStatus.text(lines.join(' · ')).addClass('live');
-    } else {
-      $campStatus.text('').removeClass('live');
+      $('#local-ip, #peer-ip, #listen, #peer-udp, #camp-url, #camp-stun, #camp-name, #camp-id').prop('disabled', false);
     }
     // Identity meta in section title shows compact running indicator.
     $('#identity-meta').text(s.running ? (s.utun_name || '') : '');
@@ -268,36 +253,6 @@ $(function () {
   }
 
 
-  function loadIfaces() {
-    $.getJSON('/api/ifaces', (ifs) => {
-      const $sel = $('#egress-iface');
-      const current = $sel.val();
-      const stored = localStorage.getItem(storageKey('#egress-iface'));
-      $sel.empty();
-      $sel.append($('<option>').val('').text('— disabled —'));
-      let defaultName = '';
-      (ifs || []).forEach((i) => {
-        let label = i.name;
-        if (i.ip) label += '  (' + i.ip + ')';
-        if (i.is_default) {
-          label += '  · default route';
-          defaultName = i.name;
-        }
-        $sel.append($('<option>').val(i.name).text(label));
-      });
-      // Priority: existing form value → previously stored choice → default
-      // route interface → "disabled".
-      if (current) {
-        $sel.val(current);
-      } else if (stored) {
-        $sel.val(stored);
-      } else if (defaultName) {
-        $sel.val(defaultName);
-        persistField('#egress-iface');
-      }
-    });
-  }
-
   function triggerStart() {
     const cfg = {
       local_ip: $('#local-ip').val().trim(),
@@ -307,8 +262,6 @@ $(function () {
       // Seed the engine with whatever the user has saved locally — that
       // way pending intercepts become active immediately on Start.
       intercepts: getStoredSpecs(),
-      egress_iface: $('#egress-iface').val(),
-      egress_subnet: $('#egress-subnet').val().trim(),
       camp_url: $('#camp-url').val().trim(),
       camp_stun: $('#camp-stun').val().trim(),
       camp_name: $('#camp-name').val().trim(),
@@ -670,7 +623,6 @@ $(function () {
   }
 
   restoreForm();
-  loadIfaces();
   refreshStatus();
   refreshTopology();
   refreshCampPeers();

@@ -26,6 +26,10 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
 )
 
+// tunnelSubnetCIDR is the /24 every camp lives in. Hardcoded — camp's
+// hub uses the same prefix when allocating tunnel_ips.
+const tunnelSubnetCIDR = "10.99.0.0/24"
+
 // CampConfig points the engine at a rendezvous (camp) server: instead of
 // the user supplying the peer's UDP endpoint via --peer, we discover our
 // own external endpoint via STUN, register with camp under (Name, ID),
@@ -44,8 +48,7 @@ type Config struct {
 	Listen       string      // UDP listen address (":9000"), empty = no peer mode
 	Peer         string      // UDP peer address ("host:9000"); ignored when Camp is set
 	Intercepts   []string    // user-provided IPs/CIDRs/domains, resolved at Start
-	EgressIface  string      // physical interface for NAT (empty = no egress)
-	EgressSubnet string      // CIDR to NAT (default "10.99.0.0/24")
+	EgressIface  string      // physical interface for NAT; empty = auto-detect default route
 	Camp         *CampConfig // optional: use a rendezvous server instead of static Peer
 }
 
@@ -61,7 +64,6 @@ type Status struct {
 	EgressActive bool   `json:"egress_active"`
 	EgressIface  string `json:"egress_iface,omitempty"`
 	EgressAnchor string `json:"egress_anchor,omitempty"`
-	EgressSubnet string `json:"egress_subnet,omitempty"`
 	CampActive   bool   `json:"camp_active"`
 	CampURL      string `json:"camp_url,omitempty"`
 	CampName     string `json:"camp_name,omitempty"`
@@ -217,15 +219,14 @@ func (e *Engine) Start(cfg Config) error {
 	}
 
 	// Egress goes first so its rollback runs last on the way down.
+	// Empty EgressIface means: auto-pick the default route's interface.
+	// We always run egress in camp mode — the tunnel is useless without
+	// a path to the internet.
+	if cfg.EgressIface == "" {
+		cfg.EgressIface = detectDefaultRouteIface()
+	}
 	if cfg.EgressIface != "" {
-		subnetStr := cfg.EgressSubnet
-		if subnetStr == "" {
-			subnetStr = "10.99.0.0/24"
-		}
-		subnet, err := netip.ParsePrefix(subnetStr)
-		if err != nil {
-			return fmt.Errorf("egress subnet %q: %w", subnetStr, err)
-		}
+		subnet := netip.MustParsePrefix(tunnelSubnetCIDR)
 		egr, err := egress.Open(cfg.EgressIface, subnet)
 		if err != nil {
 			return fmt.Errorf("egress setup: %w", err)
@@ -233,7 +234,8 @@ func (e *Engine) Start(cfg Config) error {
 		e.egr = egr
 		log.Printf("egress: NAT %s → %s via pf anchor %q, ip.forwarding=1",
 			subnet, cfg.EgressIface, egr.Anchor())
-		cfg.EgressSubnet = subnetStr
+	} else {
+		log.Printf("egress: could not detect default route iface; skipping NAT (peers won't reach internet through this node)")
 	}
 
 	// UDP socket.
@@ -620,7 +622,6 @@ func (e *Engine) Status() Status {
 		if e.egr != nil {
 			st.EgressIface = e.cfg.EgressIface
 			st.EgressAnchor = e.egr.Anchor()
-			st.EgressSubnet = e.cfg.EgressSubnet
 		}
 		if e.cfg.Camp != nil {
 			st.CampActive = e.announce != nil
