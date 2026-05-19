@@ -16,6 +16,11 @@ export type PeerInfo = {
   // are how it reaches them through the overlay.
   tunnel_ip: string;
   joined_at: number;
+  // online = peer has announced within EVICT_AFTER_MS. Offline peers
+  // come from the sticky-binding catalog only, so they may lack
+  // public_ip/udp_endpoint (set to "" / undefined in that case).
+  online: boolean;
+  last_seen_at: number;
 };
 
 // --- UDP wire types ---

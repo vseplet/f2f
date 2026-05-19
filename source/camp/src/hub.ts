@@ -57,6 +57,8 @@ export class Hub {
       existing.info.public_ip = publicIP;
       existing.info.udp_port = udpPort;
       existing.info.udp_endpoint = `${publicIP}:${udpPort}`;
+      existing.info.online = true;
+      existing.info.last_seen_at = now;
       existing.lastSeen = now;
       void touchBinding(campID, name);
       return existing.info;
@@ -86,6 +88,8 @@ export class Hub {
       udp_endpoint: `${publicIP}:${udpPort}`,
       tunnel_ip: `${SUBNET_PREFIX}.${octet}`,
       joined_at: now,
+      online: true,
+      last_seen_at: now,
     };
     c.peers.set(name, { campID, info, lastSeen: now });
 
@@ -121,11 +125,27 @@ export class Hub {
     return this.camps.get(campID)?.peers.has(name) ?? false;
   }
 
-  // Snapshot of every peer's PeerInfo in a camp.
+  // Snapshot of every peer in a camp — online (currently announcing)
+  // plus offline (in the sticky-binding catalog but not announcing).
+  // Offline entries lack public_ip/udp_endpoint; consumers must treat
+  // them as "known but unreachable" until they re-announce.
   list(campID: string): PeerInfo[] {
     const c = this.camps.get(campID);
     if (!c) return [];
-    return Array.from(c.peers.values()).map((p) => p.info);
+    const out: PeerInfo[] = [];
+    for (const p of c.peers.values()) out.push(p.info);
+    for (const [name, octet] of c.bindings) {
+      if (c.peers.has(name)) continue;
+      out.push({
+        name,
+        public_ip: "",
+        tunnel_ip: `${SUBNET_PREFIX}.${octet}`,
+        joined_at: 0,
+        online: false,
+        last_seen_at: 0,
+      });
+    }
+    return out;
   }
 
   // Evict peers whose lastSeen is older than threshold. The binding

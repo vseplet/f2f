@@ -193,12 +193,26 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSignalInbox receives forwarded signalling messages from the peer
-// and broadcasts them to local browser subscribers.
+// and broadcasts them to local browser subscribers. As a side effect it
+// auto-selects the sending peer as active — so the receiver doesn't have
+// to manually pick the caller from a dropdown before being able to
+// answer. The source tunnel_ip is read from RemoteAddr, which is the
+// peer's address as routed through utun.
 func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
+		st := s.engine.Status()
+		if st.Running && host != st.ActivePeerTunnelIP {
+			if err := s.engine.SetActivePeer(host); err != nil {
+				// Not fatal — could just be a peer we haven't seen yet
+				// in the camp roster. The signal still gets broadcast.
+				_ = err
+			}
+		}
 	}
 	s.signals.broadcast(body)
 	w.WriteHeader(http.StatusNoContent)

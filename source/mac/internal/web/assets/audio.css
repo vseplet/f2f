@@ -444,14 +444,8 @@ details.ax-advanced > .ax-advanced-body {
 .ax-frame .ax-peers td { padding: 6px 16px 6px 0; vertical-align: middle; }
 .ax-frame .ax-peers tbody tr { cursor: default; }
 .ax-frame .ax-peers tbody tr.is-self { opacity: 0.7; }
-.ax-frame .ax-peers tbody tr.is-active {
-  background: rgba(134, 184, 107, 0.08);
-  color: #d4c8a6;
-}
-.ax-frame .ax-peers tbody tr.is-active td:first-child { box-shadow: inset 2px 0 0 #86b86b; }
 
 .ax-frame .ax-peers-dot { width: 16px; }
-.ax-frame .ax-peers-active { color: #666; }
 
 .ax-frame .ax-dot {
   display: inline-block;
@@ -463,9 +457,10 @@ details.ax-advanced > .ax-advanced-body {
 .ax-frame .ax-dot.reachable { background: #86b86b; box-shadow: 0 0 4px rgba(134, 184, 107, 0.5); }
 .ax-frame .ax-dot.unreachable { background: #c25656; }
 .ax-frame .ax-dot.self { background: #c4a554; }
+.ax-frame .ax-dot.offline { background: #555; }
+.ax-frame .ax-peers tbody tr.is-offline { opacity: 0.55; }
 
 .ax-frame .ax-peers .muted { color: #666; }
-.ax-frame .ax-peers .active-mark { color: #86b86b; }
 .ax-btn-primary {
   background: rgba(134, 184, 107, 0.08);
   border-color: #3a5a30;

@@ -246,6 +246,13 @@ $(function () {
     }
   }
 
+  // peerOptionLabel formats a peer for dropdown display. Offline peers
+  // are still selectable (binding survives until they re-announce); we
+  // just tag them so the user understands the current state.
+  function peerOptionLabel(p) {
+    return p.name + (p.online === false ? ' (offline)' : '');
+  }
+
   // refreshInterceptPeerSelect populates the dropdown next to the add-input
   // with currently visible camp peers (excluding self). Preserves the
   // current selection if still valid.
@@ -256,7 +263,7 @@ $(function () {
     $sel.append($('<option>').val('').text('— peer —'));
     livePeers
       .filter((p) => !p.self)
-      .forEach((p) => $sel.append($('<option>').val(p.name).text(p.name)));
+      .forEach((p) => $sel.append($('<option>').val(p.name).text(peerOptionLabel(p))));
     if (current && livePeers.some((p) => p.name === current && !p.self)) {
       $sel.val(current);
     }
@@ -593,14 +600,16 @@ $(function () {
       $campStatus.hide();
     }
     $campBody.empty();
-    const active = data.active || '';
     for (const p of peers) {
       const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
-      const dotClass = p.self ? 'self' : (p.reachable ? 'reachable' : 'unreachable');
-      const isActive = !p.self && active && p.tunnel_ip === active;
+      let dotClass;
+      if (p.self) dotClass = 'self';
+      else if (p.online === false) dotClass = 'offline';
+      else if (p.reachable) dotClass = 'reachable';
+      else dotClass = 'unreachable';
       const $row = $('<tr>')
         .addClass(p.self ? 'is-self' : '')
-        .addClass(isActive ? 'is-active' : '')
+        .addClass(p.online === false ? 'is-offline' : '')
         .attr('data-tunnel-ip', p.tunnel_ip || '');
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass)),
@@ -608,7 +617,6 @@ $(function () {
         $('<td>').text(p.tunnel_ip || '—'),
         $('<td>').text(endpoint || '—'),
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
-        $('<td>').addClass(isActive ? 'active-mark' : 'muted').text(isActive ? '✓' : ''),
       );
       $campBody.append($row);
     }
@@ -640,7 +648,9 @@ $(function () {
     $sel.empty();
     $sel.append($('<option>').val('').text('— peer —'));
     others.forEach((p) => {
-      const label = p.name + (p.reachable ? '' : ' (unreachable)');
+      let label = p.name;
+      if (p.online === false) label += ' (offline)';
+      else if (!p.reachable) label += ' (unreachable)';
       $sel.append($('<option>').val(p.name).text(label));
     });
     const activePeer = others.find((p) => p.tunnel_ip === activeTunnelIP);

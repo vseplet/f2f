@@ -94,7 +94,8 @@ type PeerStatusInfo struct {
 	UDPEndpoint string `json:"udp_endpoint,omitempty"`
 	JoinedAt    int64  `json:"joined_at,omitempty"`
 	LastSeenMs  int64  `json:"last_seen_ms,omitempty"` // ms since last packet; 0 = never
-	Reachable   bool   `json:"reachable"`
+	Online      bool   `json:"online"`                 // camp-side: announced recently
+	Reachable   bool   `json:"reachable"`              // local: receiving UDP from this peer
 	Active      bool   `json:"active"`
 	Self        bool   `json:"self,omitempty"`
 }
@@ -115,6 +116,10 @@ type InterceptInfo struct {
 // every time peerToTunLoop sees a packet whose source matches us.
 // holePunchLoop reads LastSeenMs to decide between burst (1Hz) and
 // keepalive (~25s) cadence.
+//
+// Online mirrors camp's view (announcing recently). Offline peers stay
+// in the map so intercept bindings survive and the UI keeps showing
+// them; their UDPAddr just stops getting refreshed.
 type peerState struct {
 	Name        string
 	TunnelIP    string
@@ -122,6 +127,8 @@ type peerState struct {
 	UDPPort     int
 	UDPEndpoint string
 	JoinedAt    int64
+	Online      bool
+	LastSeenAt  int64
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -399,15 +406,14 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		if p.Name == ourName || p.TunnelIP == "" {
 			continue
 		}
-		if p.UDPEndpoint == "" {
-			// Camp knows them but their public port hasn't been observed
-			// yet — skip. They'll show up in a subsequent poll.
-			continue
-		}
-		addr, err := net.ResolveUDPAddr("udp", p.UDPEndpoint)
-		if err != nil {
-			log.Printf("WARN: peer %s invalid endpoint %q: %v", p.Name, p.UDPEndpoint, err)
-			continue
+		var addr *net.UDPAddr
+		if p.Online && p.UDPEndpoint != "" {
+			a, err := net.ResolveUDPAddr("udp", p.UDPEndpoint)
+			if err != nil {
+				log.Printf("WARN: peer %s invalid endpoint %q: %v", p.Name, p.UDPEndpoint, err)
+				continue
+			}
+			addr = a
 		}
 		existing, ok := e.peers[p.TunnelIP]
 		if !ok {
@@ -418,30 +424,45 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				UDPPort:     p.UDPPort,
 				UDPEndpoint: p.UDPEndpoint,
 				JoinedAt:    p.JoinedAt,
+				Online:      p.Online,
+				LastSeenAt:  p.LastSeenAt,
 				UDPAddr:     addr,
 			}
 			e.peers[p.TunnelIP] = st
-			log.Printf("camp: peer %s @ %s joined (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
+			if p.Online {
+				log.Printf("camp: peer %s @ %s joined (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
+			} else {
+				log.Printf("camp: peer %s known offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
+			}
 		} else {
 			existing.Name = p.Name
-			existing.PublicIP = p.PublicIP
-			existing.UDPPort = p.UDPPort
-			existing.UDPEndpoint = p.UDPEndpoint
-			if !sameUDPAddr(existing.UDPAddr, addr) {
-				existing.UDPAddr = addr
+			existing.LastSeenAt = p.LastSeenAt
+			if p.Online {
+				existing.PublicIP = p.PublicIP
+				existing.UDPPort = p.UDPPort
+				existing.UDPEndpoint = p.UDPEndpoint
+				if addr != nil && !sameUDPAddr(existing.UDPAddr, addr) {
+					existing.UDPAddr = addr
+				}
+				if !existing.Online {
+					log.Printf("camp: peer %s back online (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				}
+			} else if existing.Online {
+				log.Printf("camp: peer %s went offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
 			}
+			existing.Online = p.Online
 		}
 		seen[p.TunnelIP] = struct{}{}
 	}
-	// Drop peers no longer in the camp roster. If one of them was the
-	// active peer, clear the selection so the UI / tunnel don't keep
-	// trying to route to nobody.
+	// Drop peers no longer in the camp roster at all (binding expired).
+	// Going offline does NOT trigger removal — those still show up in
+	// `peers` with Online=false from the camp side.
 	active := e.activeTunnelIP.Load()
 	for tip, st := range e.peers {
 		if _, alive := seen[tip]; alive {
 			continue
 		}
-		log.Printf("camp: peer %s @ %s left", st.Name, st.UDPAddr)
+		log.Printf("camp: peer %s @ %s removed (binding expired)", st.Name, st.UDPAddr)
 		delete(e.peers, tip)
 		if active != nil && *active == tip {
 			e.activeTunnelIP.Store(nil)
@@ -672,6 +693,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			TunnelIP:    e.cfg.LocalIP,
 			UDPEndpoint: selfEndpoint,
 			JoinedAt:    e.started.UnixMilli(),
+			Online:      true,
 			Reachable:   true,
 			Self:        true,
 		})
@@ -686,7 +708,8 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			UDPEndpoint: p.UDPEndpoint,
 			JoinedAt:    p.JoinedAt,
 			LastSeenMs:  seen,
-			Reachable:   seen != 0 && now-seen < reachableWindowMs,
+			Online:      p.Online,
+			Reachable:   p.Online && seen != 0 && now-seen < reachableWindowMs,
 			Active:      p.TunnelIP == active,
 		})
 	}
