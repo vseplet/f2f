@@ -834,15 +834,45 @@ $(function () {
     });
   }
 
+  // ---- trusted peer CAs (DNS tab, bottom section) ----
+  function refreshTrustedPeers() {
+    $.getJSON('/api/trusted-peers', (list) => {
+      const rows = Array.isArray(list) ? list : [];
+      rows.sort((a, b) => (a.peer_name || '').localeCompare(b.peer_name || ''));
+      $('#trusted-peers-meta').text(rows.length);
+      const $list = $('#trusted-peers-list');
+      $list.empty();
+      if (rows.length === 0) {
+        $list.append('<div class="ax-list-empty">no peer CAs installed yet · they appear automatically as peers join and you confirm with your macOS password.</div>');
+        return;
+      }
+      rows.forEach((r) => {
+        const $row = $('<div class="ax-intercept">');
+        const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+        $head.append($('<span class="ax-intercept-caret">').text(' '));
+        $head.append($('<span class="ax-intercept-spec">').text(r.peer_name || '?'));
+        $head.append($('<span class="ax-pill ax-pill-peer">').text(r.fingerprint || ''));
+        const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '—';
+        $head.append($('<span class="ax-intercept-meta">').text('installed ' + when));
+        $row.append($head);
+        $list.append($row);
+      });
+    }).fail(() => {
+      $('#trusted-peers-meta').text('?');
+    });
+  }
+
   restoreForm();
   refreshStatus();
   refreshTopology();
   refreshCampPeers();
   refreshMyDomains();
+  refreshTrustedPeers();
   setInterval(refreshStatus, 3000);
   setInterval(refreshTopology, 2000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
+  setInterval(refreshTrustedPeers, 5000);
   // Known-domains panel reads from livePeers, which is updated in
   // applyStatus. Trigger a render on each status refresh.
   setInterval(renderKnownDomains, 3000);

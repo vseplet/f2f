@@ -7,6 +7,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -113,6 +114,7 @@ func (s *Server) BindTunnel(ip string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
+	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -146,40 +148,84 @@ func (s *Server) UnbindTunnel() error {
 	return srv.Shutdown(ctx)
 }
 
-// BindProxies starts HTTP reverse-proxy listeners on tunnel_ip:80 and
-// 127.0.0.1:80. The proxy reads the request's Host header, looks up
-// the local published domain (engine.MyDomains), and forwards the
-// request to 127.0.0.1:<configured port>. Bind failures (e.g. port
-// already in use) are logged but not fatal — the engine still works
-// without HTTP-on-:80; users can keep using `<domain>:<port>` URLs.
+// BindProxies starts reverse-proxy listeners for the local published
+// domains on standard web ports — both tunnel_ip and 127.0.0.1:
+//
+//   - :80   plain HTTP
+//   - :443  HTTPS, terminated with leaf certs issued on demand by the
+//           local CA (engine.CA()). Only enabled when a CA is available.
+//
+// The proxy reads Host/SNI, looks up engine.MyDomains, and forwards
+// to 127.0.0.1:<configured port> over plain HTTP. Bind failures (port
+// busy, no CA) are logged but not fatal — users can keep typing
+// explicit ports.
 func (s *Server) BindProxies(tunnelIP string) error {
 	_ = s.UnbindProxies()
-	addrs := []string{net.JoinHostPort("127.0.0.1", "80")}
+	// HTTP listeners: 127.0.0.1:80 (self traffic) + tunnel_ip:80 (peer traffic).
+	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
 	if tunnelIP != "" {
-		addrs = append(addrs, net.JoinHostPort(tunnelIP, "80"))
+		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
 	}
-	for _, a := range addrs {
-		srv := &http.Server{
-			Addr:              a,
-			Handler:           http.HandlerFunc(s.handleProxy),
-			ReadHeaderTimeout: 10 * time.Second,
+	for _, a := range httpAddrs {
+		s.startProxyListener(a, nil)
+	}
+	// HTTPS listeners — same set of addresses, but only if a CA is up.
+	if ca := s.engine.CA(); ca != nil {
+		tlsCfg := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				host := strings.ToLower(strings.TrimSpace(hello.ServerName))
+				if host == "" {
+					return nil, fmt.Errorf("tls: empty SNI")
+				}
+				return ca.IssueLeaf(host)
+			},
 		}
-		ln, err := net.Listen("tcp", a)
-		if err != nil {
-			log.Printf("proxy: bind %s: %v (skipping)", a, err)
-			continue
+		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443")}
+		if tunnelIP != "" {
+			tlsAddrs = append(tlsAddrs, net.JoinHostPort(tunnelIP, "443"))
 		}
-		s.mu.Lock()
-		s.proxySrvs = append(s.proxySrvs, srv)
-		s.mu.Unlock()
-		go func(a string) {
-			log.Printf("proxy: HTTP listening on %s", a)
-			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Printf("WARN: proxy %s: %v", a, err)
-			}
-		}(a)
+		for _, a := range tlsAddrs {
+			s.startProxyListener(a, tlsCfg)
+		}
 	}
 	return nil
+}
+
+// startProxyListener brings up one listener (HTTP if tlsCfg is nil,
+// HTTPS otherwise) and stashes it on s.proxySrvs for shutdown.
+func (s *Server) startProxyListener(addr string, tlsCfg *tls.Config) {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           http.HandlerFunc(s.handleProxy),
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig:         tlsCfg,
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		scheme := "HTTP"
+		if tlsCfg != nil {
+			scheme = "HTTPS"
+		}
+		log.Printf("proxy: bind %s %s: %v (skipping)", scheme, addr, err)
+		return
+	}
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
+	}
+	s.mu.Lock()
+	s.proxySrvs = append(s.proxySrvs, srv)
+	s.mu.Unlock()
+	go func() {
+		scheme := "HTTP"
+		if tlsCfg != nil {
+			scheme = "HTTPS"
+		}
+		log.Printf("proxy: %s listening on %s", scheme, addr)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("WARN: proxy %s: %v", addr, err)
+		}
+	}()
 }
 
 // UnbindProxies stops every active proxy listener. Idempotent.
@@ -272,6 +318,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/my-domains", s.handleListMyDomains)
 	mux.HandleFunc("PUT /api/my-domains", s.handleSetMyDomains)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
+	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
 	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
@@ -599,6 +647,24 @@ func isValidDomainLabel(s string) bool {
 // polling works. Mounted on the loopback listener too as a debug aid.
 func (s *Server) handleListDomains(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+}
+
+// handleCACert serves the local CA's public cert in PEM form. Polled
+// by peers to install us as a trusted root for HTTPS.
+func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
+	ca := s.engine.CA()
+	if ca == nil {
+		http.Error(w, "ca not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	_, _ = w.Write(ca.CertPEM)
+}
+
+// handleTrustedPeers returns the UI's view of which peer CAs we've
+// installed locally — fingerprint, common name, install timestamp.
+func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
 }
 
 type startRequest struct {

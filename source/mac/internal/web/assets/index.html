@@ -140,6 +140,17 @@
           </div>
           <div id="known-domains-list" class="ax-list"></div>
         </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— trusted peer CAs</span>
+            <span class="ax-meta" id="trusted-peers-meta">0</span>
+          </div>
+          <div class="ax-section-status muted">
+            each peer in the camp issues its own HTTPS certs from a local CA constrained to <code>*.&lt;camp_id&gt;.f2f</code> · we install peer CAs as trusted roots so your browser gets a green lock when visiting their domains · macOS prompts for password on each new install (Apple's anti-malware safeguard)
+          </div>
+          <div id="trusted-peers-list" class="ax-list"></div>
+        </div>
       </div>
     </div><!-- /#tab-dns -->
 
