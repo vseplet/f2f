@@ -13,17 +13,34 @@ import (
 
 const systemKeychain = "/Library/Keychains/System.keychain"
 
-// IsInstalled reports whether the system keychain already contains a
-// cert with the given Subject CN. Pure read — does NOT trigger the
-// macOS Authorization Services prompt. Used to skip a redundant
-// AddTrustedRoot on every engine restart.
-func IsInstalled(commonName string) bool {
+// IsInstalledByFingerprint reports whether the system keychain contains
+// a cert whose SHA-256 fingerprint matches sha256HexUpper. Pure read —
+// does NOT trigger Authorization Services.
+//
+// We match by fingerprint (not Subject CN) because a half-failed
+// install in an earlier f2f-mac version might have left a different
+// CA with the SAME CN behind — name-based check would falsely report
+// "already installed", we'd skip AddTrustedRoot, and the user would
+// never get their browser to trust the (now-different) cert.
+func IsInstalledByFingerprint(sha256HexUpper string) bool {
+	if sha256HexUpper == "" {
+		return false
+	}
 	cmd := exec.Command("security",
 		"find-certificate",
-		"-c", commonName,
+		"-a",                 // all matches
+		"-Z",                 // include SHA-1 / SHA-256
 		systemKeychain,
 	)
-	return cmd.Run() == nil
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	// `security` prints lines like "SHA-256 hash: <hex_upper>". Match
+	// the full hex; a substring match is enough because we look for
+	// a 64-char hex.
+	needle := "SHA-256 hash: " + sha256HexUpper
+	return strings.Contains(string(out), needle)
 }
 
 // AddTrustedRoot installs the PEM cert at certPath as a trusted SSL

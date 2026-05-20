@@ -233,6 +233,13 @@ func (ca *CA) Fingerprint() string {
 	return fmt.Sprintf("%x", h[:8])
 }
 
+// Fingerprint256Hex returns the full SHA-256 hex of the DER cert.
+// Uppercase. Format matches what `security find-certificate -Z` prints.
+func (ca *CA) Fingerprint256Hex() string {
+	h := sha256.Sum256(ca.Cert.Raw)
+	return strings.ToUpper(fmt.Sprintf("%x", h[:]))
+}
+
 // CommonName returns the CA's CN field.
 func (ca *CA) CommonName() string {
 	return ca.Cert.Subject.CommonName

@@ -547,10 +547,12 @@ func (e *Engine) ensureCA() error {
 	} else {
 		log.Printf("ca: loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
 	}
-	if keychain.IsInstalled(loaded.CommonName()) {
-		log.Printf("ca: already in keychain — skipping install (no password prompt)")
+	if keychain.IsInstalledByFingerprint(loaded.Fingerprint256Hex()) {
+		log.Printf("ca: already in keychain (fp %s) — skipping install", loaded.Fingerprint())
 	} else if err := keychain.AddTrustedRoot(ca.CertPath(caDir)); err != nil {
 		log.Printf("ca: install in keychain: %v (https will show warnings)", err)
+	} else {
+		log.Printf("ca: installed in keychain (fp %s)", loaded.Fingerprint())
 	}
 	e.ca = loaded
 	return nil
@@ -617,10 +619,21 @@ func certFingerprint(cert *x509.Certificate) string {
 // /api/ca-cert. New CAs (fingerprint not in cache) get persisted on
 // disk and installed into the system keychain via `security`. Each new
 // CA install prompts the user once for their macOS password.
+//
+// First poll fires after a short delay (let camp peer-list populate),
+// then every 30s.
 func (e *Engine) peerCAPollLoop(ctx context.Context) {
 	defer e.workers.Done()
-	const interval = 30 * time.Second
-	ticker := time.NewTicker(interval)
+	// Give camp poller a tick to discover peers before we try to talk
+	// to them. 5s is enough — first announce + first /api/id/<camp>
+	// usually complete in <2s.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Second):
+	}
+	e.pollAllPeerCAs(ctx)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -648,6 +661,10 @@ func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
 	if port == "" {
+		log.Printf("ca-poll: tunnel HTTP port not set (engine running without UI?) — skipping")
+		return
+	}
+	if len(targets) == 0 {
 		return
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -659,11 +676,17 @@ func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			log.Printf("ca-poll: peer %s: GET %s: %v", t.name, url, err)
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()
-		if err != nil || resp.StatusCode != 200 {
+		if err != nil {
+			log.Printf("ca-poll: peer %s: read body: %v", t.name, err)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			log.Printf("ca-poll: peer %s: HTTP %d (peer running an old f2f-mac without /api/ca-cert?)", t.name, resp.StatusCode)
 			continue
 		}
 		e.maybeInstallPeerCA(t.name, body)
@@ -697,8 +720,9 @@ func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
 		log.Printf("ca: write %s: %v", certPath, err)
 		return
 	}
-	if keychain.IsInstalled(cert.Subject.CommonName) {
-		log.Printf("ca: peer %s CA already in keychain — no prompt needed", peerName)
+	full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
+	if keychain.IsInstalledByFingerprint(full256) {
+		log.Printf("ca: peer %s CA already in keychain (fp %s) — no prompt", peerName, fp)
 	} else {
 		log.Printf("ca: installing peer %s CA %q (fp %s) — macOS will prompt for password", peerName, cert.Subject.CommonName, fp)
 		if err := keychain.AddTrustedRoot(certPath); err != nil {
