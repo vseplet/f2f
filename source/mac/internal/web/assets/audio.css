@@ -110,7 +110,20 @@
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 4px;
+  /* macOS hides scrollbars by default on non-trackpad pointer devices;
+     force a thin, always-visible bar so the user can see overflow
+     and grab it. */
+  scrollbar-width: thin;                  /* Firefox */
+  scrollbar-color: #4a4030 transparent;   /* Firefox */
 }
+/* WebKit (Safari + Chrome on macOS): style the native scrollbar. */
+.ax-frame .ax-panes::-webkit-scrollbar { height: 8px; }
+.ax-frame .ax-panes::-webkit-scrollbar-track { background: transparent; }
+.ax-frame .ax-panes::-webkit-scrollbar-thumb {
+  background: #3a3024;
+  border-radius: 4px;
+}
+.ax-frame .ax-panes::-webkit-scrollbar-thumb:hover { background: #4a4030; }
 .ax-frame .ax-pane {
   background: #1c1915;
   background-image: repeating-linear-gradient(45deg,
@@ -230,6 +243,8 @@
 .ax-frame .ax-db-bar.live   { background: #86b86b; }
 .ax-frame .ax-db-bar.warm   { background: #c4a554; }
 .ax-frame .ax-db-bar.hot    { background: #c25656; }
+/* Gap between the local (left) and peer (right) halves of the meter. */
+.ax-frame .ax-db-bar:nth-child(33) { margin-left: 10px; }
 
 /* Controls row */
 .ax-frame .ax-controls {

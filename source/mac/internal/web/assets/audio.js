@@ -7,7 +7,12 @@
 // keeps this working in stock Chrome/Firefox.
 
 (function () {
-  const NUM_DB_BARS = 32;
+  // The dB meter is split in two halves: the first NUM_DB_BARS_HALF
+  // columns are the local mic, the last NUM_DB_BARS_HALF are the peer's
+  // incoming audio. Each half has its own AnalyserNode in the same
+  // shared AudioContext.
+  const NUM_DB_BARS_HALF = 32;
+  const NUM_DB_BARS = NUM_DB_BARS_HALF * 2;
 
   function start() {
     // DOM
@@ -25,6 +30,8 @@
     const $resPeerScreen = document.getElementById('ax-res-peer-screen');
     const $youHost    = document.getElementById('ax-you-host');
     const $peerHost   = document.getElementById('ax-peer-host');
+    const $youScreenHost  = document.getElementById('ax-you-screen-host');
+    const $peerScreenHost = document.getElementById('ax-peer-screen-host');
     const $callBtn    = document.getElementById('ax-call-btn');
     const $callMeta   = document.getElementById('ax-call-meta');
     const $callState  = $callBtn.querySelector('.ax-btn-state');
@@ -69,8 +76,10 @@
     let callTimer = 0;
     let logCount = 0;
     let audioCtx = null;
-    let analyser = null;
-    let dbBuf = null;
+    let localAnalyser = null;
+    let peerAnalyser = null;
+    let localBuf = null;
+    let peerBuf = null;
     let dbRAF = 0;
     let volume = 80;
     let myName = 'you';
@@ -105,6 +114,10 @@
         $youHost.textContent = 'you @ ' + (location.hostname || 'localhost');
         $peerHost.textContent = 'peer @ —';
       }
+      // Mirror the cam-pane label into the screen-share panes so the
+      // user can read who's casting at a glance.
+      $youScreenHost.textContent = $youHost.textContent + ' · screen';
+      $peerScreenHost.textContent = $peerHost.textContent + ' · screen';
 
       const running = !!(s && s.running);
       if (lastRunning === true && !running && pc) {
@@ -271,6 +284,8 @@
           if (!$videoPeer.srcObject) $videoPeer.srcObject = stream;
           $videoPeer.volume = volume / 100;
           $videoPeer.play().catch(() => {});
+          // Visualise peer's audio in the right half of the meter.
+          if (!peerAnalyser) setupDbMeterPeer(new MediaStream([e.track]));
         }
         logLine('event', 'remote ' + e.track.kind + ' track attached (' + (isScreen ? 'screen' : 'cam') + ')');
       };
@@ -371,53 +386,95 @@
       } else {
         $paneYou.classList.remove('has-video');
       }
-      if (micEnabled) setupDbMeter(localStream);
+      if (micEnabled) setupDbMeterLocal(localStream);
       updateMicCamUI();
       const parts = [micEnabled && 'mic', camEnabled && 'cam'].filter(Boolean).join('+');
       logLine('event', parts + ' acquired');
       return localStream;
     }
 
-    function setupDbMeter(stream) {
-      stopDbMeter();
+    function ensureAudioCtx() {
+      if (audioCtx) {
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        return audioCtx;
+      }
       const AudioCtxCtor = window.AudioContext || /** @type {*} */(window).webkitAudioContext;
       audioCtx = new AudioCtxCtor();
-      const source = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.6;
-      source.connect(analyser);
-      dbBuf = new Uint8Array(analyser.frequencyBinCount);
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      return audioCtx;
+    }
+
+    function attachAnalyser(stream) {
+      const ctx = ensureAudioCtx();
+      const source = ctx.createMediaStreamSource(stream);
+      const a = ctx.createAnalyser();
+      a.fftSize = 1024;
+      a.smoothingTimeConstant = 0.6;
+      source.connect(a);
+      return { analyser: a, buf: new Uint8Array(a.frequencyBinCount) };
+    }
+
+    function setupDbMeterLocal(stream) {
+      const { analyser, buf } = attachAnalyser(stream);
+      localAnalyser = analyser;
+      localBuf = buf;
+      startDbTick();
+    }
+
+    function setupDbMeterPeer(stream) {
+      const { analyser, buf } = attachAnalyser(stream);
+      peerAnalyser = analyser;
+      peerBuf = buf;
+      startDbTick();
+    }
+
+    function startDbTick() {
+      if (dbRAF) return;
       const tick = () => {
-        if (!analyser) return;
-        analyser.getByteFrequencyData(dbBuf);
-        // Slice the spectrum into NUM_DB_BARS log-spaced buckets for a more
-        // pleasing visual than evenly-spaced bins.
-        for (let i = 0; i < NUM_DB_BARS; i++) {
-          const lo = Math.floor(Math.pow(i      / NUM_DB_BARS, 2.0) * dbBuf.length);
-          const hi = Math.floor(Math.pow((i + 1) / NUM_DB_BARS, 2.0) * dbBuf.length);
-          let max = 0;
-          for (let j = lo; j <= hi && j < dbBuf.length; j++) {
-            if (dbBuf[j] > max) max = dbBuf[j];
-          }
-          const norm = max / 255;
-          const h = 6 + norm * 94; // 6%..100%
-          const bar = dbBarEls[i];
-          bar.style.height = h.toFixed(0) + '%';
-          bar.classList.remove('live', 'warm', 'hot');
-          if (norm > 0.85)      bar.classList.add('hot');
-          else if (norm > 0.55) bar.classList.add('warm');
-          else if (norm > 0.04) bar.classList.add('live');
-        }
+        fillHalf(0,                   localAnalyser, localBuf);
+        fillHalf(NUM_DB_BARS_HALF,    peerAnalyser,  peerBuf);
         dbRAF = requestAnimationFrame(tick);
       };
       tick();
     }
+
+    function fillHalf(offset, analyser, buf) {
+      if (!analyser || !buf) {
+        for (let i = 0; i < NUM_DB_BARS_HALF; i++) {
+          const bar = dbBarEls[offset + i];
+          bar.style.height = '6%';
+          bar.classList.remove('live', 'warm', 'hot');
+        }
+        return;
+      }
+      analyser.getByteFrequencyData(buf);
+      // Slice the spectrum into NUM_DB_BARS_HALF log-spaced buckets for a more
+      // pleasing visual than evenly-spaced bins.
+      for (let i = 0; i < NUM_DB_BARS_HALF; i++) {
+        const lo = Math.floor(Math.pow(i       / NUM_DB_BARS_HALF, 2.0) * buf.length);
+        const hi = Math.floor(Math.pow((i + 1) / NUM_DB_BARS_HALF, 2.0) * buf.length);
+        let max = 0;
+        for (let j = lo; j <= hi && j < buf.length; j++) {
+          if (buf[j] > max) max = buf[j];
+        }
+        const norm = max / 255;
+        const h = 6 + norm * 94; // 6%..100%
+        const bar = dbBarEls[offset + i];
+        bar.style.height = h.toFixed(0) + '%';
+        bar.classList.remove('live', 'warm', 'hot');
+        if (norm > 0.85)      bar.classList.add('hot');
+        else if (norm > 0.55) bar.classList.add('warm');
+        else if (norm > 0.04) bar.classList.add('live');
+      }
+    }
+
     function stopDbMeter() {
       if (dbRAF) cancelAnimationFrame(dbRAF), dbRAF = 0;
       if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-      analyser = null;
-      dbBuf = null;
+      localAnalyser = null;
+      peerAnalyser = null;
+      localBuf = null;
+      peerBuf = null;
       for (const b of dbBarEls) {
         b.style.height = '2px';
         b.classList.remove('live', 'warm', 'hot');
@@ -730,6 +787,21 @@
       } catch (err) {
         logLine('event', 'forceRenegotiate failed: ' + err.message);
       }
+    }
+
+    // macOS mice without a trackpad don't translate wheel-vertical into
+    // horizontal scroll on overflow-x containers. Forward deltaY → scrollLeft
+    // when the user is hovering the panes row, unless shift is held (in
+    // which case the browser already does horizontal scroll).
+    const $panes = document.querySelector('#tab-audio .ax-panes');
+    if ($panes) {
+      $panes.addEventListener('wheel', (e) => {
+        if (e.shiftKey) return;
+        const dy = e.deltaY;
+        if (Math.abs(dy) <= Math.abs(e.deltaX)) return;
+        $panes.scrollLeft += dy;
+        e.preventDefault();
+      }, { passive: false });
     }
 
     // Fullscreen icons on each pane. Click → request fullscreen on the
