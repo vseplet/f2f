@@ -152,9 +152,13 @@ func uiCmd(args []string) error {
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
+		if err := srv.BindProxies(localIP); err != nil {
+			log.Printf("WARN: bind http proxies: %v", err)
+		}
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
+		_ = srv.UnbindProxies()
 	}
 	// Tell the engine which TCP port to use when polling peers'
 	// /api/domains over the tunnel — same one we host the UI on.

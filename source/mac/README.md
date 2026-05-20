@@ -1,323 +1,233 @@
 # f2f-mac
 
-macOS-сторона проекта f2f. CLI-утилита, которая поднимает виртуальный сетевой
-интерфейс `utunN`, опционально заворачивает в него трафик к указанным
-IP/доменам и гоняет пакеты в UDP-канал со вторым экземпляром себя. Тот же
-бинарь играет оба конца туннеля — отличия только во флагах.
+macOS-сторона проекта f2f. Запускает виртуальный сетевой интерфейс `utunN`,
+поднимает локальный UDP-тоннель к другим участникам camp-а через
+hole-punching, и даёт браузерную веб-морду для всего управления.
 
-Текущая стадия: голый L3-туннель + опциональный NAT на egress-стороне, чтобы
-трафик с одного конца действительно выходил в публичный интернет с IP
-другого. Hole punching и rendezvous ещё нет — для связи нужен прямой
-доступ A↔B по локалке (LAN или VPN между ними).
+Тот же бинарь играет любой конец туннеля. В одном camp-е (виртуальная
+overlay-подсеть `10.99.0.0/24`) могут жить несколько peer-ов одновременно.
+
+## Что внутри
+
+- **L3-тоннель** через `utun` + UDP, прозрачно гоняет IP-пакеты.
+- **Camp** — рандеву-сервер на fly.io (`source/camp`). Каждый peer
+  периодически шлёт UDP-announce, camp видит его public-эндпоинт,
+  раздаёт списки. Hole-punching между peer-ами — направленные
+  1-байтовые пакеты, держат NAT-мэппинги.
+- **Sticky tunnel_ip** — `(camp_id, name)` → конкретный октет в
+  `10.99.0.0/24`, хранится в Turso. Зашёл в кэмп под одним именем
+  — всегда получишь тот же `10.99.0.X`.
+- **Per-intercept маршрутизация** — каждый домен/IP/CIDR в списке
+  intercepts привязан к конкретному peer-у. Можно гнать `gmail.com`
+  через одного, `youtube.com` через другого.
+- **Egress NAT** на принимающей стороне — `pf` anchor +
+  `net.inet.ip.forwarding=1`. Авто-определяет default-route iface.
+- **Локальный DNS-резолвер** для зоны `<camp_id>.f2f` — каждый peer
+  публикует свои домены, остальные peer-ы их видят и резолвят на
+  tunnel_ip владельца.
+- **WebRTC аудио + видео + screen share** между peer-ами поверх
+  туннеля, без STUN/TURN.
 
 ## Зависимости
 
-- macOS (проверено на Apple Silicon)
+- macOS (тестировалось на Apple Silicon)
 - Go 1.22+
-- `sudo` для `run` и `ui` (как только запускаешь движок — нужен root для utun/pf)
-- (опционально, для тестов UI) `uv` — `brew install uv`
+- `sudo` для запуска (нужен root для utun, pf, /etc/resolver)
 
-## Сборка
+## Сборка и запуск
+
+Через Makefile в корне репо:
 
 ```sh
-go build -o f2f-mac ././source/mac
+make build       # собирает бинарь ./f2f-mac
+make run         # sudo go run, UI на 127.0.0.1:2202
+make kill        # прибить процессы f2f-mac
 ```
 
-## Команды
+Или напрямую:
 
-- `f2f-mac run` — классический CLI-режим, конфиг через флаги
-- `f2f-mac [--bind 127.0.0.1:2202]` — поднимает локальную веб-морду в браузере. Тот же движок, что и `run`, только управляется через HTTP.
+```sh
+go build -o f2f-mac ./source/mac
+sudo ./f2f-mac                          # UI на 127.0.0.1:2202 по умолчанию
+sudo ./f2f-mac --bind 127.0.0.1:3333    # на другом порту
+```
 
-## Флаги `run`
+Открой `http://127.0.0.1:2202` — это все управление.
+
+## UI
+
+Пять вкладок:
+
+### `camp`
+
+Identity + peers. Пишешь свой **name** и **camp id**, жмёшь **Start** в
+правом углу — engine стартует, регистрируется на `f2f-camp.fly.dev`,
+получает свой `tunnel_ip`, начинает hole-punching ко всем остальным
+peer-ам в этом camp-е. Таблица peers показывает их с точкой статуса:
+зелёная — пакеты ходят, красная — peer online но не отвечает на punch,
+серая — peer offline, жёлтая — это ты сам.
+
+### `tunnel`
+
+Intercepts. Добавляешь `gitlab.com` или `1.2.3.4/24` и выбираешь к
+**какому peer-у** этот трафик отправлять. Engine ставит host-маршруты
+через утун, при попадании пакета в утун — отправляет UDP'ом выбранному
+peer-у. У них поднимется egress, и пакет уйдёт в публичный интернет от
+их имени.
+
+Под ним — `diagnostics` (счётчики + d3-граф топологии) и `log`.
+
+### `dns`
+
+Публикуешь свои сервисы как **локальные имена** в зоне
+`<camp_id>.f2f`. Добавил `gitlab:3000` — у всех остальных peer-ов в
+твоём camp-е резолвится `gitlab.<camp_id>.f2f` в твой `tunnel_ip`. Они
+ходят `http://gitlab.<camp_id>.f2f:3000` и попадают на твой сервис
+через туннель.
+
+Под ним — known domains, что объявили другие peer-ы.
+
+### `meet`
+
+WebRTC прямо peer-to-peer через туннель. Без STUN/TURN. Выбираешь
+peer-а из дропдауна, жмёшь call. Поддерживает:
+
+- Голос + видео (`getUserMedia`).
+- Screen share (`getDisplayMedia`).
+- dB-meter (свой mic слева, peer справа).
+- Fullscreen на любой панели.
+- Чат через WebRTC data channel.
+- Несколько панелей с горизонтальной прокруткой.
+
+### `drop`
+
+Пока заглушка.
+
+## Headless-режим `run`
+
+Если UI не нужен (сервер без графики, скрипт):
+
+```sh
+sudo ./f2f-mac run --listen :9000 \
+  --camp-url wss://f2f-camp.fly.dev/ws \
+  --name vasya --id beer
+```
 
 | флаг | описание |
 | --- | --- |
-| `--intercept` | список через запятую: IP, CIDR, домен. Маршруты `/32` через `utun`. Необязателен. |
-| `--local-ip` / `--peer-ip` | p2p-адреса на `utun` (по умолчанию `10.99.0.1`/`10.99.0.2`). |
-| `--listen` | UDP-адрес для приёма от пира (`:9000`). |
-| `--peer` | UDP-адрес пира (`10.0.0.5:9000`). Автоматически обновляется при поступлении датаграммы с другого `(host, port)`. |
-| `--egress-iface` | физический интерфейс для NAT'а (`en0`). **Включает egress-режим**: `pf` anchor + `sysctl net.inet.ip.forwarding=1`. |
-| `--egress-subnet` | подсеть для NAT'а (по умолчанию `10.99.0.0/24`). |
+| `--name` | твоё имя в camp-е |
+| `--id` | shared camp id |
+| `--camp-url` | URL camp-сервера, по умолчанию `wss://f2f-camp.fly.dev/ws` |
+| `--camp-stun` | host:port для STUN-наблюдения, дефолт `f2f-camp.fly.dev:3478` |
+| `--listen` | UDP-порт для туннеля (`:9000`) |
+| `--egress-iface` | физический интерфейс для NAT'а (пусто = авто-детект default route) |
+| `--local-ip` / `--peer-ip` | placeholder'ы, camp всё равно их перепишет |
 
-`--listen` + `--peer` или оба заданы (peer mode), или оба пустые.
+Intercepts и доменные имена в headless'е недоступны — добавляются только через UI.
 
-## Сценарии
+## Что делает engine в системе
 
-### 1. Single-process тест перехвата (без UDP, без второй машины)
+При старте (в camp-режиме):
 
-```sh
-sudo ./f2f-mac run --intercept 198.51.100.5
-ping -c 3 198.51.100.5
-```
+1. Открывает utun, ставит на него адрес из camp-а (`10.99.0.X`).
+2. Биндит UDP-сокет на `:9000`.
+3. Шлёт announce на `f2f-camp.fly.dev:3478` UDP'ом.
+4. Поднимает HTTP UI на `127.0.0.1:2202` (loopback) + узкий tunnel-listener на `<tunnel_ip>:2202` (только `POST /api/signal/inbox` + `GET /api/domains`).
+5. Поднимает локальный DNS на `127.0.0.1:5354` + пишет `/etc/resolver/<camp_id>.f2f`.
+6. Включает egress NAT: `pf` anchor `com.apple/f2f-mac` с правилом `nat on en0 from 10.99.0.0/24 to any -> (en0)`, плюс `sysctl net.inet.ip.forwarding=1`. Старое значение forwarding сохраняется в `/var/run/f2f-mac.egress.json` для отката.
+7. Запускает воркеры: hole-punch (1Hz burst / 25s keepalive), camp peer-list poll, domain poll, peer-to-tun, tun-to-peer.
 
-`ping` молчит (мы пакеты дропаем), в логе строки `… [drop]`. Проверка
-что маршрут установлен и пакеты идут в нашу программу.
+На выходе всё аккуратно откатывается в обратном порядке. Если `kill -9` — следующий запуск увидит state-файл и подберёт хвост.
 
-### 2. Two-machine «общая локалка» (туннель без NAT)
-
-Каждая машина — это валидный конец L3-туннеля. ICMP, TCP, SSH между
-tunnel-IP друг друга работают «как настоящая локалка».
-
-```sh
-# на A:
-sudo ./f2f-mac run \
-  --local-ip 10.99.0.1 --peer-ip 10.99.0.2 \
-  --listen :9000 --peer B_LAN_IP:9000
-
-# на B:
-sudo ./f2f-mac run \
-  --local-ip 10.99.0.2 --peer-ip 10.99.0.1 \
-  --listen :9000 --peer A_LAN_IP:9000
-
-# проверки на A:
-ping -c 3 10.99.0.2
-ssh USER@10.99.0.2
-```
-
-### 3. Two-machine с реальным выходом в интернет через B (NAT)
-
-A заворачивает указанный домен в туннель, B NAT'ит этот трафик наружу
-через свой `en0`. Сайт «видит» соединение с публичного IP машины B.
+## Manual rescue (если что-то совсем пошло не так)
 
 ```sh
-# на A — ingress:
-sudo ./f2f-mac run \
-  --intercept 1tv.ru \
-  --local-ip 10.99.0.1 --peer-ip 10.99.0.2 \
-  --listen :9000 --peer B_LAN_IP:9000
-
-# на B — egress (NAT включается флагом --egress-iface):
-sudo ./f2f-mac run \
-  --local-ip 10.99.0.2 --peer-ip 10.99.0.1 \
-  --listen :9000 --peer A_LAN_IP:9000 \
-  --egress-iface en0
-
-# проверка на A:
-curl https://www.1tv.ru/
-curl https://ifconfig.me     # должен показать публичный IP машины B
+sudo pfctl -a com.apple/f2f-mac -F all
+sudo sysctl -w net.inet.ip.forwarding=0      # если у тебя было 0 до запуска
+sudo rm -f /var/run/f2f-mac.egress.json
+sudo rm -f /etc/resolver/<camp_id>.f2f
 ```
 
-⚠️ На одной машине это нельзя — оба экземпляра будут конфликтовать в
-маршрутизации. Нужны две физические машины или физическая + VM с
-отдельным сетевым стеком.
+`pfctl -E` reference-counted token можно проверить через `sudo pfctl -s References`.
 
-## Что меняет egress-режим в системе
+## Архитектура (один peer)
 
-При `--egress-iface en0` программа на старте:
+```
+                              camp.fly.dev
+                              ┌──────────┐
+        announce  ─UDP/3478─► │          │
+        peer list ◄─HTTP/443─ │          │
+                              └──────────┘
+                                   │
+            ╔══════════════════════╪══════════════════════╗
+            ║       f2f-mac на этой машине                ║
+            ║                                             ║
+            ║  ┌──────────┐         ┌──────────────────┐  ║
+            ║  │ engine   │ ◄──────►│ UDP :9000        │ ║─── public internet
+            ║  │          │         └──────────────────┘  ║    (hole-punched
+            ║  │          │                               ║     к другим peer-ам)
+            ║  │          │ ◄──────► utun7 (10.99.0.2)    ║
+            ║  │          │                               ║
+            ║  │          │ ◄──────► dns :5354 (127.0.0.1)║
+            ║  │          │                               ║
+            ║  └──────────┘                               ║
+            ║       ▲                                     ║
+            ║       │ HTTP                                ║
+            ║       ▼                                     ║
+            ║  ┌──────────┐                               ║
+            ║  │ web UI   │ :2202 (127.0.0.1 + tunnel_ip) ║
+            ║  └──────────┘                               ║
+            ╚═════════════════════════════════════════════╝
+```
 
-1. **Сохраняет** текущее значение `sysctl net.inet.ip.forwarding`.
-2. **Включает** форвардинг: `sysctl -w net.inet.ip.forwarding=1`.
-3. **Включает** `pf` (через `pfctl -E`, получая reference-counted токен).
-4. **Загружает** в anchor `com.apple/f2f-mac` правило:
-   ```
-   nat on en0 from 10.99.0.0/24 to any -> (en0)
-   ```
-
-Этот anchor попадает под уже существующий в `/etc/pf.conf` wildcard
-`nat-anchor "com.apple/*"` — то есть мы **не трогаем** `/etc/pf.conf`,
-не лезем в чужие правила, не меняем основной ruleset.
-
-На выходе всё откатывается в обратном порядке. Состояние пишется в
-`/var/run/f2f-mac.egress.json` — следующий запуск проверит, не остался
-ли хвост после `kill -9`, и подберёт его автоматически.
-
-## Manual rescue (если случилось страшное)
-
-Если `f2f-mac` был убит `kill -9` посреди работы И следующий запуск
-не подобрал хвост (например, ты удалил state-файл):
+## Полезные команды
 
 ```sh
-sudo pfctl -a com.apple/f2f-mac -F all       # снести наш NAT
-sudo sysctl -w net.inet.ip.forwarding=0      # только если у тебя было 0
-sudo rm -f /var/run/f2f-mac.egress.json      # обнулить state
+ifconfig | grep -A2 utun                     # утуны и их адреса
+netstat -rn | grep 10.99                     # маршруты в overlay-подсеть
+sudo pfctl -a com.apple/f2f-mac -s nat       # NAT-правила в нашем anchor
+sudo tcpdump -i utun7 -n -vv                 # пакеты на утуне
+sudo tcpdump -i en0 -n udp port 9000         # UDP по сети
+dig @127.0.0.1 -p 5354 gitlab.<camp>.f2f     # ручная проверка DNS
+curl http://127.0.0.1:2202/api/status        # текущий снапшот engine
 ```
 
-При `--egress-iface` потерянный `pfctl -E` токен можно проверить через
-`pfctl -s References` — там видны все живые анкерные ссылки. Чтобы
-быть совсем уверенным что pf отключён (если ты его сам не использовал):
+## API-эндпоинты (для интеграций)
 
-```sh
-sudo pfctl -d
-```
+Loopback (`127.0.0.1:2202`):
 
-## Веб-морда (`f2f-mac`)
-
-```sh
-sudo ./f2f-mac --bind 127.0.0.1:2202
-open http://127.0.0.1:2202
-```
-
-UI разбит на два таба:
-
-**Tunnel** — управление движком:
-
-- задать локальный/удалённый tunnel-IP, UDP-адреса, выбрать `--egress-iface` из списка реальных физических интерфейсов и нажать **Start**;
-- добавлять/удалять интерсепты и inbound-whitelist на лету (без рестарта движка);
-- видеть счётчики tx/rx пакетов и байт, текущий peer-адрес (с авто-обновлением);
-- читать живой лог через SSE;
-- d3-force топологию с draggable-узлами (zoom — Ctrl+wheel, чтобы не мешать обычному скроллу страницы).
-
-**Audio** — прямой WebRTC-звонок между пирами через тунель, без STUN/TURN. См. отдельную секцию ниже.
-
-По умолчанию UI слушает только на `127.0.0.1` — никто из локалки не достучится. Если очень нужно выставить наружу: `--bind 0.0.0.0:2202`, но **аутентификации пока нет** — делай это осознанно.
-
-API эндпоинты:
-
-| метод | путь | описание |
+| метод | путь | назначение |
 | --- | --- | --- |
-| GET | `/api/status` | состояние движка |
-| POST | `/api/start` | старт с JSON-конфигом |
+| GET | `/api/status` | снапшот engine |
+| POST | `/api/start` | старт (тело: `{camp_name, camp_id}`) |
 | POST | `/api/stop` | остановка |
-| POST | `/api/intercepts` | добавить интерсепт (`{"spec":"ya.ru"}`) |
-| DELETE | `/api/intercepts/{id}` | удалить интерсепт |
-| POST | `/api/inbound-allow` | добавить хост во входной whitelist |
-| DELETE | `/api/inbound-allow/{id}` | удалить из whitelist |
-| GET | `/api/ifaces` | список физических интерфейсов |
-| GET | `/api/topology` | граф узлов/связей для d3-визуализации |
-| GET | `/api/log/stream` | SSE поток лога |
-| POST | `/api/signal/outbox` | WebRTC: исходящее signalling-сообщение (browser → peer) |
-| POST | `/api/signal/inbox` | WebRTC: входящее с пира (peer → нас) |
-| GET | `/api/signal/stream` | WebRTC: SSE поток сигналов для браузера |
+| GET | `/api/camp/peers` | список peer-ов в camp-е |
+| POST | `/api/peers/active` | выбрать peer для meet-сигналинга |
+| POST | `/api/intercepts` | добавить intercept (`{spec, peer}`) |
+| DELETE | `/api/intercepts/{id}` | удалить intercept |
+| GET | `/api/my-domains` | мои опубликованные домены |
+| PUT | `/api/my-domains` | заменить список (тело — массив) |
+| GET | `/api/topology` | граф для d3 |
+| GET | `/api/log/stream` | SSE лог engine |
+| POST | `/api/signal/{outbox,inbox}` | WebRTC сигналинг |
+| GET | `/api/signal/stream` | SSE сигналов для браузера |
 
-## WebRTC аудио (таб «Audio»)
+Tunnel listener (`<tunnel_ip>:2202`, поднимается с engine):
 
-Прямой звонок голосом между двумя `f2f-mac`-пирами поверх их же тунеля,
-**без STUN/TURN/коммерческих посредников**. В браузере обычный
-`RTCPeerConnection`, всё RTP-аудио идёт через утун в виде UDP-пакетов
-пира.
-
-### Как устроен сигналинг
-
-WebRTC требует SDP-обмена между пирами до старта медиа. Делаем это
-через наш же HTTP-сервер:
-
-```
-A (browser)              A (web server)           B (web server)            B (browser)
-    │                          │                        │                        │
-    │  POST /signal/outbox     │                        │                        │
-    │ ───── offer ─────────►   │                        │                        │
-    │                          │  POST :2202/signal/inbox (через утун)           │
-    │                          │ ─── offer ───────────► │                        │
-    │                          │                        │  SSE /signal/stream    │
-    │                          │                        │ ────── offer ────────► │
-    │                          │                        │                        │
-    │                          │                        │  POST /signal/outbox   │
-    │                          │  POST :2202/signal/inbox  ◄── answer ───────────│
-    │                          │  ◄─── answer ─────────│                        │
-    │  SSE /signal/stream      │                        │                        │
-    │  ◄── answer ─────────────│                        │                        │
-```
-
-Та же схема для ICE-кандидатов (trickle ICE) и для `hangup`.
-
-Конверты — JSON, проброшенные as-is: `{kind: "offer"|"answer"|"candidate"|"hangup", ...}`.
-Сервер не знает про их семантику — просто форвардит.
-
-### Почему ICE работает без STUN
-
-В `audio.js` пир создаётся как:
-
-```js
-new RTCPeerConnection({ iceServers: [] })
-```
-
-Без STUN/TURN ICE собирает только **host-кандидаты** — IP всех локальных
-интерфейсов. Среди них есть IP utun (`10.99.0.1` на A, `10.99.0.2` на B).
-
-Когда ICE пэйрит кандидаты A и B, пара `(10.99.0.1, 10.99.0.2)`
-оказывается reachable: трафик идёт через утун → движок → UDP-туннель →
-другой движок → утун пира. Никакого NAT'а, потому что у нас своя
-оверлей-сеть.
-
-### Почему пришлось переписывать mDNS-кандидаты
-
-Stock Chrome/Firefox по приватности **маскируют** host-IP в виде
-mDNS-имён: вместо `10.99.0.1` отдают `abc-uuid.local`. Такое имя
-резолвится **только в том же браузере**, на другой машине бесполезно.
-Без обхода ICE намертво висит на `checking`.
-
-Решение в `web/server.go`:
-
-```go
-var mdnsHostCandidateRE = regexp.MustCompile(
-  `(?i)((?:udp|tcp)\s+\d+\s+)([A-Za-z0-9.-]+\.local)(\s+\d+\s+typ\s+host)`)
-```
-
-В `handleSignalOutbox` тело сообщения пропускается через
-`rewriteMDNS(body, engine.Status().LocalIP)` — `*.local` подменяется на
-реальный IP утуна **своей** стороны. Пир получает кандидат, который
-действительно достижим через тунель.
-
-Это работает потому, что у нас есть **известное жёсткое соответствие**
-"одна машина = один tunnel-IP". В большом продакшне с динамическим NAT
-такой трюк бы не сработал — оттого его и нет в апстриме крупных проектов.
-
-### Что важно при настройке
-
-1. **Обе UI должны слушать `0.0.0.0:PORT`**, не `127.0.0.1`. Иначе пир
-   не сможет POST'ить в `/api/signal/inbox` через тунель, и сигналинг
-   зависнет «в одну сторону» (offer прошёл, answer не пришёл).
-2. **Одинаковый порт** UI на обеих сторонах. Сервер форвардит на пир
-   используя `engine.Status().PeerIP` + свой собственный порт.
-3. **Engine должен быть запущен** — без `PeerIP` сервер вернёт 503 на
-   `/api/signal/outbox`. UI это покажет в Signalling log.
-4. Браузерные обработки `getUserMedia` требуют **HTTPS или
-   `localhost`**. Доступ к UI через `10.99.0.x` микрофон **не даст** —
-   ходи каждый на свой локальный `http://localhost:2202`.
-
-### Что выкручено в UI по умолчанию
-
-- `echoCancellation: true`
-- `noiseSuppression: true`
-- `autoGainControl: true`
-
-Это всё нативные WebRTC-фичи — Opus кодек, jitter buffer, адаптивный
-битрейт идут "из коробки".
-
-### Что не сделано
-
-- Видео — лень, но добавляется тривиально (`video: true` в `getUserMedia` + второй media element).
-- Auto-switch в audio-таб при incoming call — сейчас signalling
-  подписан с момента загрузки страницы, но индикации на табе нет.
-- Authentication — если кто-то по тунелю POST'ит в `/api/signal/inbox`,
-  он триггерит звонок. Пока считаем, что пир — это «свой друг».
+| метод | путь | назначение |
+| --- | --- | --- |
+| POST | `/api/signal/inbox` | приём WebRTC-сигналов от peer-а |
+| GET | `/api/domains` | мои домены — peer-ы поллят его |
 
 ## Тесты
 
 ```sh
-go test ./...                                  # unit-тесты Go-пакетов
-cd tests && uv run pytest -v                  # HTTP-уровневые тесты UI (uv поднимет venv сам)
+go test ./...
 ```
 
-Python-тесты сами собирают свежий бинарь и стартуют `f2f-mac` на свободном порту — никаких внешних предусловий.
+## Что осталось
 
-## Полезные команды для отладки
-
-```sh
-ifconfig | grep -A2 utun                     # утуны и их IP
-netstat -rn | grep utun                      # маршруты через утуны
-sudo pfctl -a com.apple/f2f-mac -s nat       # активные NAT-правила в нашем anchor
-
-sudo tcpdump -i utun5 -n -vv                 # пакеты на утуне
-sudo tcpdump -i lo0 -n udp port 9000         # UDP локально
-sudo tcpdump -i en0 -n udp port 9000         # UDP по сети
-```
-
-Wireshark (`brew install --cask wireshark`) видит все эти интерфейсы и
-сильно нагляднее для разбора потоков.
-
-## Что дальше
-
-1. ✅ Перехват + локальный echo
-2. ✅ UDP-транспорт между двумя экземплярами
-3. ✅ Симметричный `run`
-4. ✅ Авто-обнаружение адреса пира (DHCP-renewal больше не ломает)
-5. ✅ NAT/forwarding на egress-стороне через `pf` anchor
-6. ✅ Веб-морда + HTTP API + горячее добавление/удаление интерсептов
-7. ✅ Доменные интерсепты с фоновой ре-резолюцией IP (вместо fake-IP/split-DNS)
-8. ✅ Inbound whitelist (ограничение, куда пир может ходить через нас)
-9. ✅ WebRTC аудио поверх тунеля с server-side rewriting mDNS-кандидатов
-10. IPv6-стэк на utun + IPv6 NAT (сейчас IPv6 утекает мимо туннеля)
-11. UDP hole punching через rendezvous-сервер
-12. Стыковка с виндовой половиной
-13. Видео в WebRTC-табе (тривиально)
+- IPv6 на utun + IPv6 NAT (сейчас IPv6 утекает мимо туннеля).
+- Sleep/wake recovery (macOS-уход в сон порой ломает NAT-state, см. TODO.md).
+- Линукс/винда стороны.
+- Groupcall (mesh → Pion SFU, см. TODO.md).

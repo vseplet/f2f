@@ -16,7 +16,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +42,9 @@ type Server struct {
 	srv    *http.Server
 
 	mu        sync.Mutex
-	tunnelSrv *http.Server // active while engine is running
+	tunnelSrv *http.Server   // signaling/domain listener on <tunnel_ip>:<port>
+	proxySrvs []*http.Server // HTTP-only reverse proxies on :80
+	                         // (tunnel_ip and 127.0.0.1)
 
 	signals    *signalHub
 	signalHTTP *http.Client
@@ -75,6 +80,7 @@ func (s *Server) ListenAndServe() error {
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	_ = s.UnbindTunnel()
+	_ = s.UnbindProxies()
 	if s.srv == nil {
 		return nil
 	}
@@ -138,6 +144,109 @@ func (s *Server) UnbindTunnel() error {
 	defer cancel()
 	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
 	return srv.Shutdown(ctx)
+}
+
+// BindProxies starts HTTP reverse-proxy listeners on tunnel_ip:80 and
+// 127.0.0.1:80. The proxy reads the request's Host header, looks up
+// the local published domain (engine.MyDomains), and forwards the
+// request to 127.0.0.1:<configured port>. Bind failures (e.g. port
+// already in use) are logged but not fatal — the engine still works
+// without HTTP-on-:80; users can keep using `<domain>:<port>` URLs.
+func (s *Server) BindProxies(tunnelIP string) error {
+	_ = s.UnbindProxies()
+	addrs := []string{net.JoinHostPort("127.0.0.1", "80")}
+	if tunnelIP != "" {
+		addrs = append(addrs, net.JoinHostPort(tunnelIP, "80"))
+	}
+	for _, a := range addrs {
+		srv := &http.Server{
+			Addr:              a,
+			Handler:           http.HandlerFunc(s.handleProxy),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			log.Printf("proxy: bind %s: %v (skipping)", a, err)
+			continue
+		}
+		s.mu.Lock()
+		s.proxySrvs = append(s.proxySrvs, srv)
+		s.mu.Unlock()
+		go func(a string) {
+			log.Printf("proxy: HTTP listening on %s", a)
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("WARN: proxy %s: %v", a, err)
+			}
+		}(a)
+	}
+	return nil
+}
+
+// UnbindProxies stops every active proxy listener. Idempotent.
+func (s *Server) UnbindProxies() error {
+	s.mu.Lock()
+	srvs := s.proxySrvs
+	s.proxySrvs = nil
+	s.mu.Unlock()
+	for _, srv := range srvs {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = srv.Shutdown(ctx)
+		cancel()
+		log.Printf("proxy: stopped %s", srv.Addr)
+	}
+	return nil
+}
+
+// handleProxy is the single reverse-proxy handler shared between both
+// proxy listeners. Looks up the Host header's label in the local
+// published-domains list and forwards to 127.0.0.1:<port>. Anything
+// outside our zone or with no matching label returns 404.
+func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	campID := strings.ToLower(strings.TrimSpace(st.CampID))
+	if campID == "" {
+		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
+		return
+	}
+	suffix := "." + campID + ".f2f"
+
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		host = h
+	}
+	host = strings.ToLower(host)
+	if !strings.HasSuffix(host, suffix) {
+		http.Error(w, "not in this camp's f2f zone", http.StatusNotFound)
+		return
+	}
+	label := strings.TrimSuffix(host, suffix)
+	if label == "" || strings.Contains(label, ".") {
+		http.Error(w, "bad subdomain", http.StatusNotFound)
+		return
+	}
+
+	var port int
+	for _, d := range s.engine.MyDomains() {
+		if strings.EqualFold(d.Name, label) {
+			port = d.Port
+			break
+		}
+	}
+	if port == 0 {
+		http.Error(w, "no such domain published locally", http.StatusNotFound)
+		return
+	}
+
+	target, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	// httputil's default ErrorHandler logs to stderr; replace with a
+	// 502 so the client gets a meaningful response instead of a half-open
+	// connection.
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("proxy: %s → %s: %v", host, target, err)
+		http.Error(w, "upstream unreachable", http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
 }
 
 func (s *Server) routes(mux *http.ServeMux) {
