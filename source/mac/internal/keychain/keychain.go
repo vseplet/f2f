@@ -13,14 +13,28 @@ import (
 
 const systemKeychain = "/Library/Keychains/System.keychain"
 
+// IsInstalled reports whether the system keychain already contains a
+// cert with the given Subject CN. Pure read — does NOT trigger the
+// macOS Authorization Services prompt. Used to skip a redundant
+// AddTrustedRoot on every engine restart.
+func IsInstalled(commonName string) bool {
+	cmd := exec.Command("security",
+		"find-certificate",
+		"-c", commonName,
+		systemKeychain,
+	)
+	return cmd.Run() == nil
+}
+
 // AddTrustedRoot installs the PEM cert at certPath as a trusted SSL
 // root in the system keychain. After this call, system services
 // (Safari, Chrome via macOS trust store, curl with default options,
 // Go's crypto/x509 fetching system roots) accept certs signed by this
 // CA without warnings.
 //
-// Idempotent — re-adding the same cert is a no-op (security tool just
-// re-affirms the trust).
+// This call always prompts for the macOS user password — Apple's
+// anti-malware guard. Use IsInstalled() to skip when the cert is
+// already trusted.
 func AddTrustedRoot(certPath string) error {
 	cmd := exec.Command("security",
 		"add-trusted-cert",

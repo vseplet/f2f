@@ -527,7 +527,9 @@ func (e *Engine) ensureCA() error {
 	} else {
 		log.Printf("ca: loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
 	}
-	if err := keychain.AddTrustedRoot(ca.CertPath(caDir)); err != nil {
+	if keychain.IsInstalled(loaded.CommonName()) {
+		log.Printf("ca: already in keychain — skipping install (no password prompt)")
+	} else if err := keychain.AddTrustedRoot(ca.CertPath(caDir)); err != nil {
 		log.Printf("ca: install in keychain: %v (https will show warnings)", err)
 	}
 	e.ca = loaded
@@ -675,10 +677,14 @@ func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
 		log.Printf("ca: write %s: %v", certPath, err)
 		return
 	}
-	log.Printf("ca: installing peer %s CA %q (fp %s) — macOS will prompt for password", peerName, cert.Subject.CommonName, fp)
-	if err := keychain.AddTrustedRoot(certPath); err != nil {
-		log.Printf("ca: install peer %s: %v", peerName, err)
-		return
+	if keychain.IsInstalled(cert.Subject.CommonName) {
+		log.Printf("ca: peer %s CA already in keychain — no prompt needed", peerName)
+	} else {
+		log.Printf("ca: installing peer %s CA %q (fp %s) — macOS will prompt for password", peerName, cert.Subject.CommonName, fp)
+		if err := keychain.AddTrustedRoot(certPath); err != nil {
+			log.Printf("ca: install peer %s: %v", peerName, err)
+			return
+		}
 	}
 	e.trustedPeerCAsMu.Lock()
 	e.trustedPeerCAs[fp] = TrustedPeerCA{
