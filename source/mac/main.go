@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -154,6 +155,11 @@ func uiCmd(args []string) error {
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
+	}
+	// Tell the engine which TCP port to use when polling peers'
+	// /api/domains over the tunnel — same one we host the UI on.
+	if _, port, err := net.SplitHostPort(*bind); err == nil {
+		eng.SetTunnelHTTPPort(port)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

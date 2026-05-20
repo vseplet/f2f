@@ -119,9 +119,26 @@
       <div class="ax-frame">
         <div class="ax-section">
           <div class="ax-section-title">
-            <span>— dns</span>
+            <span>— my domains</span>
+            <span class="ax-meta" id="my-domains-meta">0</span>
           </div>
-          <div class="ax-section-status">empty</div>
+          <div class="ax-section-status muted" id="my-domains-hint">
+            published as <code>&lt;name&gt;.&lt;camp_id&gt;.f2f</code> to every other peer · port is informational only, you still type it in URLs
+          </div>
+          <div id="my-domains-list" class="ax-list"></div>
+          <div class="ax-add-row">
+            <input id="my-domain-name" type="text" class="ax-input" placeholder="name (e.g. gitlab)">
+            <input id="my-domain-port" type="number" class="ax-input" placeholder="port (optional)" min="1" max="65535">
+            <button id="btn-add-my-domain" class="ax-btn ax-btn-primary">+ add</button>
+          </div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— known domains</span>
+            <span class="ax-meta" id="known-domains-meta">0</span>
+          </div>
+          <div id="known-domains-list" class="ax-list"></div>
         </div>
       </div>
     </div><!-- /#tab-dns -->

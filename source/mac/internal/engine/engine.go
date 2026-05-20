@@ -8,10 +8,12 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internaldns "github.com/vseplet/f2f/source/mac/internal/dns"
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
@@ -87,17 +90,18 @@ type Status struct {
 // with Self=true represents us so the UI can render a single uniform
 // table.
 type PeerStatusInfo struct {
-	Name        string `json:"name"`
-	TunnelIP    string `json:"tunnel_ip"`
-	PublicIP    string `json:"public_ip,omitempty"`
-	UDPPort     int    `json:"udp_port,omitempty"`
-	UDPEndpoint string `json:"udp_endpoint,omitempty"`
-	JoinedAt    int64  `json:"joined_at,omitempty"`
-	LastSeenMs  int64  `json:"last_seen_ms,omitempty"` // ms since last packet; 0 = never
-	Online      bool   `json:"online"`                 // camp-side: announced recently
-	Reachable   bool   `json:"reachable"`              // local: receiving UDP from this peer
-	Active      bool   `json:"active"`
-	Self        bool   `json:"self,omitempty"`
+	Name        string        `json:"name"`
+	TunnelIP    string        `json:"tunnel_ip"`
+	PublicIP    string        `json:"public_ip,omitempty"`
+	UDPPort     int           `json:"udp_port,omitempty"`
+	UDPEndpoint string        `json:"udp_endpoint,omitempty"`
+	JoinedAt    int64         `json:"joined_at,omitempty"`
+	LastSeenMs  int64         `json:"last_seen_ms,omitempty"` // ms since last packet; 0 = never
+	Online      bool          `json:"online"`                 // camp-side: announced recently
+	Reachable   bool          `json:"reachable"`              // local: receiving UDP from this peer
+	Active      bool          `json:"active"`
+	Self        bool          `json:"self,omitempty"`
+	Domains     []DomainEntry `json:"domains,omitempty"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -111,6 +115,17 @@ type InterceptInfo struct {
 	Prefixes []string `json:"prefixes"`
 }
 
+// DomainEntry is one (name, port, proto) record this engine — or another
+// peer — publishes inside the camp's <camp_id>.f2f zone. Port and proto
+// are advisory: DNS only carries the IP, the user types the port in
+// their URLs. Name is the short label (e.g. "gitlab") and gets the
+// camp-wide TLD appended at resolution time.
+type DomainEntry struct {
+	Name  string `json:"name"`
+	Port  int    `json:"port,omitempty"`
+	Proto string `json:"proto,omitempty"`
+}
+
 // peerState is our per-peer view: identity from camp + when we last
 // received UDP from this peer. LastSeenMs starts at 0 and gets updated
 // every time peerToTunLoop sees a packet whose source matches us.
@@ -120,6 +135,10 @@ type InterceptInfo struct {
 // Online mirrors camp's view (announcing recently). Offline peers stay
 // in the map so intercept bindings survive and the UI keeps showing
 // them; their UDPAddr just stops getting refreshed.
+//
+// Domains is populated by domainPollLoop polling each peer's
+// /api/domains over the tunnel. Stale (failed poll) → cleared; offline
+// (camp says) → kept stale until next refresh.
 type peerState struct {
 	Name        string
 	TunnelIP    string
@@ -129,6 +148,7 @@ type peerState struct {
 	JoinedAt    int64
 	Online      bool
 	LastSeenAt  int64
+	Domains     []DomainEntry
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -146,6 +166,7 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	egr      *egress.Egress
+	dnsSrv   *internaldns.Server // local DNS for <camp_id>.f2f
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
@@ -175,6 +196,15 @@ type Engine struct {
 
 	intercepts map[string]*InterceptInfo
 	nextItemID uint64
+
+	// myDomains is the list this peer publishes to others. Read by
+	// /api/domains on the tunnel listener; written by the UI via
+	// SetMyDomains. Atomic pointer keeps the read path lock-free.
+	myDomains atomic.Pointer[[]DomainEntry]
+	// tunnelHTTPPort is the port other peers expose their /api/domains
+	// on (= our UI bind port, since both sides run f2f-mac). Wired by
+	// main via SetTunnelHTTPPort.
+	tunnelHTTPPort string
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -390,6 +420,29 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
 	}
+	if e.cfg.Camp != nil {
+		e.workers.Add(1)
+		go e.domainPollLoop(ctx)
+	}
+	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
+	// — 5353 is contended on macOS by mDNSResponder and any running
+	// Bonjour/mDNS client (notably Chrome). Drops /etc/resolver pointing
+	// macOS at us for the zone. Failures here are non-fatal — the rest
+	// of the engine works without DNS.
+	if e.cfg.Camp != nil {
+		const dnsAddr = "127.0.0.1:5354"
+		srv, err := internaldns.Open(dnsAddr, e.cfg.Camp.ID, e)
+		if err != nil {
+			log.Printf("dns: %v (resolver disabled)", err)
+		} else {
+			e.dnsSrv = srv
+			if rerr := internaldns.WriteResolver(e.cfg.Camp.ID, dnsAddr); rerr != nil {
+				log.Printf("dns: write resolver: %v", rerr)
+			} else {
+				log.Printf("dns: serving %s.f2f on %s", e.cfg.Camp.ID, dnsAddr)
+			}
+		}
+	}
 	if e.OnStarted != nil {
 		e.OnStarted(cfg.LocalIP)
 	}
@@ -501,6 +554,93 @@ func (e *Engine) CampPeers() []rendezvous.PeerInfo {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
+// domainPollLoop walks every online peer once per tick and pulls their
+// /api/domains list over HTTP-through-tunnel. The result is stashed on
+// each peerState so the local DNS server can answer queries. We poll
+// even peers we haven't seen "fresh" via punch — the tunnel listener
+// is independent of the punch path and may still be reachable.
+func (e *Engine) domainPollLoop(ctx context.Context) {
+	defer e.workers.Done()
+	const interval = 10 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	// Wait one tick before the first poll so peers have time to register.
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		e.pollAllPeerDomains(ctx)
+	}
+}
+
+func (e *Engine) pollAllPeerDomains(ctx context.Context) {
+	type target struct {
+		tunnelIP string
+		name     string
+	}
+	var targets []target
+	e.mu.Lock()
+	for tip, p := range e.peers {
+		if !p.Online {
+			continue
+		}
+		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+	}
+	port := domainPollPort(e)
+	e.mu.Unlock()
+	if port == "" {
+		return
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, t := range targets {
+		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/domains"
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			// Network blip; clear stale list so we don't keep resolving
+			// names the peer might have already removed.
+			e.mu.Lock()
+			if p, ok := e.peers[t.tunnelIP]; ok {
+				p.Domains = nil
+			}
+			e.mu.Unlock()
+			continue
+		}
+		var list []DomainEntry
+		err = json.NewDecoder(resp.Body).Decode(&list)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		e.mu.Lock()
+		if p, ok := e.peers[t.tunnelIP]; ok {
+			p.Domains = list
+		}
+		e.mu.Unlock()
+	}
+}
+
+// domainPollPort returns the port our peers' tunnel-side HTTP listener
+// is on. Same port we host UI on — currently engine doesn't know that
+// directly (the UI cmd holds it), so we expose it via a hook field set
+// by main. Empty disables polling.
+func domainPollPort(e *Engine) string {
+	if e.tunnelHTTPPort != "" {
+		return e.tunnelHTTPPort
+	}
+	return ""
+}
+
+func (e *Engine) SetTunnelHTTPPort(port string) {
+	e.tunnelHTTPPort = port
+}
+
 func (e *Engine) holePunchLoop(ctx context.Context) {
 	defer e.workers.Done()
 	ticker := time.NewTicker(1 * time.Second)
@@ -571,7 +711,24 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
+	dnsSrv := e.dnsSrv
+	var dnsCampID string
+	if e.cfg.Camp != nil {
+		dnsCampID = e.cfg.Camp.ID
+	}
 	e.mu.Unlock()
+
+	// Local DNS first — drop the /etc/resolver file so macOS stops
+	// routing queries our way as soon as Stop begins, then shut the
+	// listener down. Failures here are advisory.
+	if dnsCampID != "" {
+		if err := internaldns.RemoveResolver(dnsCampID); err != nil {
+			log.Printf("dns: remove resolver: %v", err)
+		}
+	}
+	if dnsSrv != nil {
+		_ = dnsSrv.Close()
+	}
 
 	cancel()
 	// Close UDP first; this aborts the peerToTun worker. It is independent
@@ -611,6 +768,7 @@ func (e *Engine) Stop() error {
 	e.udp = nil
 	e.routes = nil
 	e.egr = nil
+	e.dnsSrv = nil
 	e.announce = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
@@ -715,6 +873,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Online:      true,
 			Reachable:   true,
 			Self:        true,
+			Domains:     e.MyDomains(),
 		})
 	}
 	for _, p := range e.peers {
@@ -730,6 +889,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Online:      p.Online,
 			Reachable:   p.Online && seen != 0 && now-seen < reachableWindowMs,
 			Active:      p.TunnelIP == active,
+			Domains:     append([]DomainEntry(nil), p.Domains...),
 		})
 	}
 	return out
@@ -753,6 +913,55 @@ func (e *Engine) SetActivePeer(tunnelIP string) error {
 	e.activeTunnelIP.Store(&tunnelIP)
 	log.Printf("camp: active peer = %s (%s)", p.Name, tunnelIP)
 	return nil
+}
+
+// MyDomains returns a copy of the local-published domain list, never nil.
+func (e *Engine) MyDomains() []DomainEntry {
+	p := e.myDomains.Load()
+	if p == nil {
+		return []DomainEntry{}
+	}
+	out := make([]DomainEntry, len(*p))
+	copy(out, *p)
+	return out
+}
+
+// SetMyDomains replaces the local-published list atomically. Other peers
+// pick up the change on their next /api/domains poll (~10s).
+func (e *Engine) SetMyDomains(list []DomainEntry) {
+	dup := make([]DomainEntry, len(list))
+	copy(dup, list)
+	e.myDomains.Store(&dup)
+}
+
+// PeerDomains returns a snapshot of every known peer's domains, indexed
+// by the IP to resolve them to. Other peers' names map to their
+// tunnel_ip; our own names map to 127.0.0.1 — looking up a service we
+// host on its own tunnel_ip would round-trip through utun → engine →
+// drop (engine has no route to "self"), so loopback is the only address
+// that lets local apps reach our own published services.
+func (e *Engine) PeerDomains() map[string][]internaldns.DomainEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make(map[string][]internaldns.DomainEntry, len(e.peers)+1)
+	for tip, p := range e.peers {
+		if len(p.Domains) == 0 {
+			continue
+		}
+		out[tip] = toDNSEntries(p.Domains)
+	}
+	if mine := e.MyDomains(); len(mine) > 0 {
+		out["127.0.0.1"] = toDNSEntries(mine)
+	}
+	return out
+}
+
+func toDNSEntries(in []DomainEntry) []internaldns.DomainEntry {
+	out := make([]internaldns.DomainEntry, len(in))
+	for i, e := range in {
+		out[i] = internaldns.DomainEntry{Name: e.Name, Port: e.Port, Proto: e.Proto}
+	}
+	return out
 }
 
 // AddIntercept resolves spec, installs its host routes via utun, and binds

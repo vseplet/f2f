@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,7 @@ func (s *Server) BindTunnel(ip string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
+	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -154,6 +156,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
+
+	// Local DNS / domain management. /api/my-domains is the UI side
+	// (read/write our own list); /api/domains is the read-only side
+	// exposed on the tunnel listener for peers to poll.
+	mux.HandleFunc("GET /api/my-domains", s.handleListMyDomains)
+	mux.HandleFunc("PUT /api/my-domains", s.handleSetMyDomains)
+	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
 	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
@@ -326,21 +335,21 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // topologyNode and topologyEdge feed the d3 force graph in the UI. The
-// graph is a simple star: this node in the middle, the peer next to it,
-// and each intercept as a leaf attached to the peer.
+// graph is: self in the middle, one node per known camp peer, and each
+// intercept hung off its bound peer's node. Orphan intercepts (peer
+// unknown) hang off self.
 type topologyNode struct {
-	ID    string   `json:"id"`
-	Label string   `json:"label"`
-	Kind  string   `json:"kind"` // "self" | "peer" | "intercept"
-	Spec  string   `json:"spec,omitempty"`
-	IPs   []string `json:"ips,omitempty"`
+	ID     string   `json:"id"`
+	Label  string   `json:"label"`
+	Kind   string   `json:"kind"` // "self" | "peer" | "intercept"
+	Spec   string   `json:"spec,omitempty"`
+	IPs    []string `json:"ips,omitempty"`
+	Online bool     `json:"online,omitempty"` // peer nodes only
 }
 
 type topologyEdge struct {
-	Source  string `json:"source"`
-	Target  string `json:"target"`
-	TxBytes uint64 `json:"tx_bytes"`
-	RxBytes uint64 `json:"rx_bytes"`
+	Source string `json:"source"`
+	Target string `json:"target"`
 }
 
 type topology struct {
@@ -356,36 +365,44 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, t)
 		return
 	}
-	selfLabel := st.UtunName
+	// Unified node labels: every actor in the camp is "<name> · <tunnel_ip>".
+	// Interface name (utun7) and public endpoints are diagnostic detail,
+	// shown elsewhere — here we want the user-visible identity.
+	selfName := st.CampName
+	if selfName == "" {
+		selfName = "you"
+	}
+	selfLabel := selfName
 	if st.LocalIP != "" {
-		selfLabel = selfLabel + " · " + st.LocalIP
+		selfLabel += " · " + st.LocalIP
 	}
 	t.Nodes = append(t.Nodes, topologyNode{ID: "self", Label: selfLabel, Kind: "self"})
 
-	peerID := ""
-	if st.PeerAddr != "" {
-		peerID = "peer"
-		t.Nodes = append(t.Nodes, topologyNode{ID: peerID, Label: st.PeerAddr, Kind: "peer"})
-		// The aggregate tx/rx are reported on the self↔peer edge, since
-		// every byte we count flows through it.
-		t.Edges = append(t.Edges, topologyEdge{
-			Source: "self", Target: peerID,
-			TxBytes: st.TxBytes, RxBytes: st.RxBytes,
-		})
+	peerIDByName := map[string]string{}
+	for _, p := range st.Peers {
+		if p.Self {
+			continue
+		}
+		id := "peer:" + p.Name
+		peerIDByName[p.Name] = id
+		label := p.Name
+		if p.TunnelIP != "" {
+			label += " · " + p.TunnelIP
+		}
+		t.Nodes = append(t.Nodes, topologyNode{ID: id, Label: label, Kind: "peer", Online: p.Online})
+		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})
 	}
 
-	// Hang each intercept off the peer so the visual flow reads
-	// self → peer → destination.
-	parent := "self"
-	if peerID != "" {
-		parent = peerID
-	}
 	for _, it := range st.Intercepts {
 		id := "intercept:" + it.ID
 		t.Nodes = append(t.Nodes, topologyNode{
 			ID: id, Label: it.Spec, Kind: "intercept",
 			Spec: it.Spec, IPs: it.Prefixes,
 		})
+		parent := peerIDByName[it.Peer]
+		if parent == "" {
+			parent = "self" // orphan — peer not visible right now
+		}
 		t.Edges = append(t.Edges, topologyEdge{Source: parent, Target: id})
 	}
 	writeJSON(w, http.StatusOK, t)
@@ -412,6 +429,67 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 		"active":  st.ActivePeerTunnelIP,
 		"peers":   st.Peers,
 	})
+}
+
+// handleListMyDomains returns this peer's own published domain list.
+// UI-facing — served only on the loopback listener.
+func (s *Server) handleListMyDomains(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+}
+
+// handleSetMyDomains replaces the entire list. PUT semantics — the
+// body is the new full list; missing entries are removed.
+func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
+	var list []engine.DomainEntry
+	if err := json.NewDecoder(r.Body).Decode(&list); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cleaned := make([]engine.DomainEntry, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, e := range list {
+		name := strings.ToLower(strings.TrimSpace(e.Name))
+		if name == "" || !isValidDomainLabel(name) {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		entry := engine.DomainEntry{Name: name}
+		if e.Port > 0 && e.Port < 65536 {
+			entry.Port = e.Port
+		}
+		if e.Proto != "" {
+			entry.Proto = e.Proto
+		}
+		cleaned = append(cleaned, entry)
+	}
+	s.engine.SetMyDomains(cleaned)
+	writeJSON(w, http.StatusOK, cleaned)
+}
+
+func isValidDomainLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return s[0] != '-' && s[len(s)-1] != '-'
+}
+
+// handleListDomains exposes the list to OTHER peers. Identical body to
+// handleListMyDomains but mounted on the tunnel listener so cross-peer
+// polling works. Mounted on the loopback listener too as a debug aid.
+func (s *Server) handleListDomains(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.MyDomains())
 }
 
 type startRequest struct {

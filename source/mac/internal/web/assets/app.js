@@ -514,13 +514,11 @@ $(function () {
   }
   function bubbleColor(n) {
     if (n.kind === 'self') return '#2563eb';
-    if (n.kind === 'peer') return '#059669';
+    if (n.kind === 'peer') return n.online === false ? '#4a4030' : '#059669';
     return '#d97706';
   }
-  function edgeThickness(e) {
-    const bytes = (e.tx_bytes || 0) + (e.rx_bytes || 0);
-    if (!bytes) return 1.5;
-    return Math.min(7, 1 + Math.log10(bytes + 1) / 1.5);
+  function edgeThickness(_e) {
+    return 1.5;
   }
   function abbrev(s) {
     if (!s) return '';
@@ -715,12 +713,138 @@ $(function () {
       });
   }
 
+  // ---- DNS tab: own published domains + known domains across peers ----
+  // localStorage is the source of truth — engine holds an in-memory copy
+  // that gets blown away on restart, so on every refresh we re-push if
+  // the runtime list lost entries we still have stored.
+  const MY_DOMAINS_KEY = 'f2f:my-domains';
+  function getStoredMyDomains() {
+    try {
+      const raw = localStorage.getItem(MY_DOMAINS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.filter((e) => e && typeof e === 'object' && typeof e.name === 'string') : [];
+    } catch (_) { return []; }
+  }
+  function setStoredMyDomains(list) {
+    localStorage.setItem(MY_DOMAINS_KEY, JSON.stringify(list));
+  }
+  let myDomains = getStoredMyDomains();
+  function refreshMyDomains() {
+    $.getJSON('/api/my-domains', (list) => {
+      const fromEngine = Array.isArray(list) ? list : [];
+      const stored = getStoredMyDomains();
+      // Reconcile: if stored has entries that engine doesn't, re-push.
+      // This survives engine restart while UI keeps running.
+      const sameLen = fromEngine.length === stored.length;
+      const sameAll = sameLen && stored.every((s) =>
+        fromEngine.some((e) => e.name === s.name && (e.port || 0) === (s.port || 0))
+      );
+      if (!sameAll && stored.length > 0) {
+        putMyDomains(stored, { silent: true });
+        return; // putMyDomains calls refreshMyDomains on done — render via that
+      }
+      myDomains = fromEngine;
+      setStoredMyDomains(myDomains);
+      renderMyDomains();
+    });
+  }
+  function renderMyDomains() {
+    const $list = $('#my-domains-list');
+    $list.empty();
+    $('#my-domains-meta').text(myDomains.length);
+    if (myDomains.length === 0) {
+      $list.append('<div class="ax-list-empty">no domains yet. publish one below.</div>');
+      return;
+    }
+    myDomains.forEach((d) => {
+      const fqdn = d.name + '.' + ($('#camp-id').val() || '<camp_id>') + '.f2f';
+      const $row = $('<div class="ax-intercept">');
+      const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+      $head.append($('<span class="ax-intercept-caret">').text(' '));
+      $head.append($('<span class="ax-intercept-spec">').text(fqdn));
+      if (d.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + d.port));
+      const $rm = $('<button class="ax-list-remove">remove</button>');
+      $rm.on('click', () => {
+        myDomains = myDomains.filter((e) => e.name !== d.name);
+        putMyDomains(myDomains);
+      });
+      $head.append($('<span class="ax-intercept-meta">'));
+      $head.append($rm);
+      $row.append($head);
+      $list.append($row);
+    });
+  }
+  function putMyDomains(list, opts) {
+    opts = opts || {};
+    setStoredMyDomains(list); // persist regardless of engine state
+    $.ajax({
+      url: '/api/my-domains',
+      method: 'PUT',
+      contentType: 'application/json',
+      data: JSON.stringify(list),
+    })
+      .done(refreshMyDomains)
+      .fail((xhr) => { if (!opts.silent) alert('Save failed: ' + errorOf(xhr)); });
+  }
+  $('#btn-add-my-domain').on('click', () => {
+    const name = ($('#my-domain-name').val() || '').trim().toLowerCase();
+    if (!name) return;
+    if (!/^[a-z0-9-]+$/.test(name)) {
+      alert('Name may contain only lowercase letters, digits, and "-".');
+      return;
+    }
+    const port = parseInt($('#my-domain-port').val(), 10);
+    const entry = { name };
+    if (port > 0 && port < 65536) entry.port = port;
+    const next = myDomains.filter((e) => e.name !== name).concat(entry);
+    putMyDomains(next);
+    $('#my-domain-name').val('');
+    $('#my-domain-port').val('');
+  });
+
+  function renderKnownDomains() {
+    const $list = $('#known-domains-list');
+    $list.empty();
+    // Collect from livePeers (all online & offline peers we know).
+    const rows = [];
+    livePeers.forEach((p) => {
+      if (p.self) return;
+      const ds = Array.isArray(p.domains) ? p.domains : [];
+      ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.tunnel_ip, online: p.online !== false, ...d }));
+    });
+    $('#known-domains-meta').text(rows.length);
+    if (rows.length === 0) {
+      $list.append('<div class="ax-list-empty">no domains published by any peer yet.</div>');
+      return;
+    }
+    const campID = $('#camp-id').val() || '<camp_id>';
+    rows.forEach((r) => {
+      const fqdn = r.name + '.' + campID + '.f2f';
+      const $row = $('<div class="ax-intercept">');
+      const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+      $head.append($('<span class="ax-intercept-caret">').text(' '));
+      $head.append($('<span class="ax-intercept-spec">').text(fqdn));
+      $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + r.peer));
+      if (r.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + r.port));
+      if (!r.online) $head.append($('<span class="ax-pill ax-pill-pending">').text('offline'));
+      $head.append($('<span class="ax-intercept-meta">').text(r.peerTunnel));
+      $row.append($head);
+      $list.append($row);
+    });
+  }
+
   restoreForm();
   refreshStatus();
   refreshTopology();
   refreshCampPeers();
+  refreshMyDomains();
   setInterval(refreshStatus, 3000);
   setInterval(refreshTopology, 2000);
   setInterval(refreshCampPeers, 3000);
+  setInterval(refreshMyDomains, 5000);
+  // Known-domains panel reads from livePeers, which is updated in
+  // applyStatus. Trigger a render on each status refresh.
+  setInterval(renderKnownDomains, 3000);
   startLogStream();
 });
