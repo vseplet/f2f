@@ -9,9 +9,11 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -24,11 +26,19 @@ import (
 //go:embed assets
 var assetsFS embed.FS
 
-// Server wraps an Engine with an HTTP handler.
+// Server wraps an Engine with an HTTP handler. Two listeners are kept:
+//   - srv on the user-facing loopback bind (the full UI + all API endpoints).
+//   - tunnelSrv on the utun tunnel_ip, exposed once the engine is up,
+//     serving ONLY POST /api/signal/inbox so the remote peer can deliver
+//     WebRTC signalling through the tunnel without us exposing the UI to
+//     the LAN.
 type Server struct {
 	engine *engine.Engine
 	addr   string
 	srv    *http.Server
+
+	mu        sync.Mutex
+	tunnelSrv *http.Server // active while engine is running
 
 	signals    *signalHub
 	signalHTTP *http.Client
@@ -63,10 +73,69 @@ func (s *Server) ListenAndServe() error {
 
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	_ = s.UnbindTunnel()
 	if s.srv == nil {
 		return nil
 	}
 	return s.srv.Shutdown(ctx)
+}
+
+// BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
+// The mux it serves is intentionally tiny — only POST /api/signal/inbox.
+// Everything else 404s, so a LAN attacker who somehow reaches the tunnel
+// listener can't drive Start/Stop or read state. Safe to call multiple
+// times; subsequent calls with a different IP rebind.
+func (s *Server) BindTunnel(ip string) error {
+	if ip == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
+	}
+	addr := net.JoinHostPort(ip, port)
+
+	s.mu.Lock()
+	if s.tunnelSrv != nil && s.tunnelSrv.Addr == addr {
+		s.mu.Unlock()
+		return nil // already bound there
+	}
+	s.mu.Unlock()
+	_ = s.UnbindTunnel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	s.mu.Lock()
+	s.tunnelSrv = srv
+	s.mu.Unlock()
+	go func() {
+		log.Printf("tunnel inbox listening on http://%s", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("WARN: tunnel inbox listener: %v", err)
+		}
+	}()
+	return nil
+}
+
+// UnbindTunnel stops the tunnel-side listener if it's running. No-op if
+// nothing was bound.
+func (s *Server) UnbindTunnel() error {
+	s.mu.Lock()
+	srv := s.tunnelSrv
+	s.tunnelSrv = nil
+	s.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
+	return srv.Shutdown(ctx)
 }
 
 func (s *Server) routes(mux *http.ServeMux) {

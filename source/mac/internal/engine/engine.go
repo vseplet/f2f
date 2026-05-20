@@ -184,6 +184,13 @@ type Engine struct {
 	txPackets, rxPackets atomic.Uint64
 
 	tap *logTap
+
+	// Hooks let the surrounding process (currently web.Server) react to
+	// engine lifecycle without engine importing web. OnStarted fires
+	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
+	// after Stop tears everything down.
+	OnStarted func(localIP string)
+	OnStopped func()
 }
 
 // New returns a fresh Engine. Start it to bring it up.
@@ -382,6 +389,9 @@ func (e *Engine) Start(cfg Config) error {
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
+	}
+	if e.OnStarted != nil {
+		e.OnStarted(cfg.LocalIP)
 	}
 	return nil
 }
@@ -615,6 +625,9 @@ func (e *Engine) Stop() error {
 	e.txPackets.Store(0)
 	e.rxPackets.Store(0)
 	e.mu.Unlock()
+	if e.OnStopped != nil {
+		e.OnStopped()
+	}
 	return errors.Join(errs...)
 }
 

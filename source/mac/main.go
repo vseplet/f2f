@@ -1,12 +1,11 @@
 //go:build darwin
 
-// f2f-mac is the macOS-side CLI for the f2f UDP tunnel.
+// f2f-mac is the macOS-side CLI for the f2f UDP tunnel. By default it
+// launches the web UI on 127.0.0.1:2202 and lets the user drive the
+// engine from a browser. `run` is a headless escape hatch (CLI only,
+// no UI).
 //
-// Subcommand `run` is the thin CLI wrapper around internal/engine. The
-// engine handles utun, UDP, routes, and (optionally) egress NAT setup; the
-// CLI just parses flags and orchestrates start/signal/stop.
-//
-// Needs sudo (utun + routing + pf).
+// Either mode needs sudo (utun + routing + pf).
 package main
 
 import (
@@ -26,67 +25,56 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/web"
 )
 
+const defaultBind = "127.0.0.1:2202"
+
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	// First positional arg picks the mode. With no args, or with flags
+	// like --bind, we default to UI.
+	args := os.Args[1:]
+	mode := "ui"
+	if len(args) > 0 {
+		switch args[0] {
+		case "run":
+			mode = "run"
+			args = args[1:]
+		case "-h", "--help", "help":
+			usage()
+			return
+		}
 	}
-	switch os.Args[1] {
+	var err error
+	switch mode {
 	case "run":
-		if err := runCmd(os.Args[2:]); err != nil {
-			log.Fatal(err)
-		}
+		err = runCmd(args)
 	case "ui":
-		if err := uiCmd(os.Args[2:]); err != nil {
-			log.Fatal(err)
-		}
-	case "-h", "--help", "help":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
+		err = uiCmd(args)
+	}
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `f2f-mac — macOS-side traffic interceptor
+	fmt.Fprintf(os.Stderr, `f2f-mac — macOS-side traffic interceptor
 
 Usage:
-  sudo f2f-mac run [--listen :PORT --peer HOST:PORT]
+  sudo f2f-mac                          # launch web UI on %s
+  sudo f2f-mac --bind 127.0.0.1:2202    # custom bind for the UI
+  sudo f2f-mac run [--listen :PORT]     # headless mode (no UI)
                    [--local-ip 10.99.0.1] [--peer-ip 10.99.0.2]
                    [--egress-iface en0]
                    [--camp-url wss://… --name X --id Y]
-  sudo f2f-mac ui  [--bind 127.0.0.1:8080]
 
 Intercepts (domains/IPs to route through a specific peer) are managed
 exclusively via the web UI — each entry must be bound to a peer at
 creation time.
 
 Rendezvous (Camp) mode:
-  Instead of supplying --peer, point at a camp server: each peer discovers
-  its external UDP endpoint via STUN, registers under (--name, --id),
-  and the engine adopts the other peer in the same camp automatically.
+  Both ends register on a shared camp; the engine adopts the other peer
+  automatically once it announces.
 
-  # both sides:
-  sudo f2f-mac run --listen :9000 \
-                   --camp-url wss://f2f-camp.fly.dev/ws \
-                   --name vasya --id beer
-
-  ui              Start the local web UI. Configure and operate the engine
-                  from a browser. Same engine as 'run', just driven over HTTP.
-
-  --listen        UDP address to receive from peer (e.g. :9000).
-  --peer          UDP address of the remote peer (e.g. 10.0.0.5:9000).
-                  Auto-updates when traffic arrives from elsewhere.
-  --egress-iface  physical interface to NAT tunnel traffic out of (e.g. en0).
-                  Empty = auto-detect default route. Egress (pf NAT +
-                  ip.forwarding=1) is always on; this flag is just an
-                  override for multi-homed boxes.
-
-Example (two-machine camp setup — both sides are symmetric):
   sudo f2f-mac run --listen :9000 \
                    --camp-url wss://f2f-camp.fly.dev/ws \
                    --name vasya --id beer
@@ -95,7 +83,7 @@ Manual rescue (if f2f-mac was kill -9'd and left state behind):
   sudo pfctl -a com.apple/f2f-mac -F all
   sudo sysctl -w net.inet.ip.forwarding=0   # only if it was 0 before f2f-mac
   sudo rm -f /var/run/f2f-mac.egress.json
-`)
+`, defaultBind)
 }
 
 func runCmd(args []string) error {
@@ -114,8 +102,6 @@ func runCmd(args []string) error {
 	}
 
 	eng := engine.New()
-	// Route global log output through the engine's tap as well, so the UI
-	// (and any future subscriber) sees the same lines that go to stderr.
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	cfg := engine.Config{
@@ -149,7 +135,7 @@ func runCmd(args []string) error {
 
 func uiCmd(args []string) error {
 	fs := flag.NewFlagSet("ui", flag.ExitOnError)
-	bind := fs.String("bind", "127.0.0.1:8080", "HTTP bind address; 127.0.0.1 by default to keep the UI local")
+	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI; default keeps the UI off the LAN")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -158,6 +144,17 @@ func uiCmd(args []string) error {
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	srv := web.New(eng, *bind)
+	// engine → web bridge: when the tunnel comes up, expose a tiny
+	// inbox listener on the tunnel_ip so the remote peer can deliver
+	// signalling through utun without us binding the UI to 0.0.0.0.
+	eng.OnStarted = func(localIP string) {
+		if err := srv.BindTunnel(localIP); err != nil {
+			log.Printf("WARN: bind tunnel inbox: %v", err)
+		}
+	}
+	eng.OnStopped = func() {
+		_ = srv.UnbindTunnel()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -185,4 +182,3 @@ func uiCmd(args []string) error {
 	}
 	return nil
 }
-
