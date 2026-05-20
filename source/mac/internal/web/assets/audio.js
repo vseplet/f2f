@@ -13,10 +13,16 @@
     // DOM
     const $paneYou    = document.getElementById('ax-pane-you');
     const $panePeer   = document.getElementById('ax-pane-peer');
+    const $paneYouScreen  = document.getElementById('ax-pane-you-screen');
+    const $panePeerScreen = document.getElementById('ax-pane-peer-screen');
     const $videoYou   = document.getElementById('ax-video-you');
     const $videoPeer  = document.getElementById('ax-video-peer');
+    const $videoYouScreen  = document.getElementById('ax-video-you-screen');
+    const $videoPeerScreen = document.getElementById('ax-video-peer-screen');
     const $resYou     = document.getElementById('ax-res-you');
     const $resPeer    = document.getElementById('ax-res-peer');
+    const $resYouScreen  = document.getElementById('ax-res-you-screen');
+    const $resPeerScreen = document.getElementById('ax-res-peer-screen');
     const $youHost    = document.getElementById('ax-you-host');
     const $peerHost   = document.getElementById('ax-peer-host');
     const $callBtn    = document.getElementById('ax-call-btn');
@@ -27,6 +33,8 @@
     const $micState   = $micBtn.querySelector('.ax-btn-state');
     const $camBtn     = document.getElementById('ax-cam-btn');
     const $camState   = $camBtn.querySelector('.ax-btn-state');
+    const $shareBtn   = document.getElementById('ax-share-btn');
+    const $shareState = $shareBtn.querySelector('.ax-btn-state');
     const $volTrack   = document.getElementById('ax-vol-track');
     const $volFill    = document.getElementById('ax-vol-fill');
     const $volValue   = document.getElementById('ax-vol-value');
@@ -53,6 +61,10 @@
     let pendingRemoteCandidates = [];
     let micEnabled = false;
     let camEnabled = false;
+    let screenStream = null;
+    let screenSenders = []; // RTCRtpSenders for screen tracks (so we can removeTrack on stop)
+    let isOfferer = false;  // true on the side that originated the call; only this side initiates renegotiation
+    let peerScreenStreamId = null; // remembered from incoming screen-share signal
     let callStartedAt = 0;
     let callTimer = 0;
     let logCount = 0;
@@ -223,26 +235,67 @@
       conn.ondatachannel = (e) => attachDataChannel(e.channel);
       conn.ontrack = (e) => {
         const stream = e.streams[0];
-        if (e.track.kind === 'video') {
+        // The sender announces its screen-share stream id via a side
+        // signal (kind: "screen-share") before renegotiating, so we
+        // know which incoming stream is the desktop and which is cam.
+        const isScreen = stream && peerScreenStreamId && stream.id === peerScreenStreamId;
+        if (isScreen) {
+          if (e.track.kind === 'video') {
+            $videoPeerScreen.srcObject = stream;
+            $videoPeerScreen.volume = volume / 100;
+            $panePeerScreen.classList.remove('hidden');
+            $panePeerScreen.classList.add('has-video');
+            $videoPeerScreen.addEventListener('loadedmetadata', () => {
+              $resPeerScreen.textContent = `${$videoPeerScreen.videoHeight}p · ${Math.round($videoPeerScreen.getVideoPlaybackQuality?.().droppedVideoFrames || 30)}fps`;
+            }, { once: true });
+            e.track.addEventListener('ended', hidePeerScreen);
+            e.track.addEventListener('mute',  hidePeerScreen);
+            e.track.addEventListener('unmute', () => $panePeerScreen.classList.add('has-video'));
+          } else if (e.track.kind === 'audio') {
+            // System audio bundled with screen — play through screen pane.
+            if (!$videoPeerScreen.srcObject) $videoPeerScreen.srcObject = stream;
+            $videoPeerScreen.volume = volume / 100;
+            $videoPeerScreen.play().catch(() => {});
+          }
+        } else if (e.track.kind === 'video') {
           $videoPeer.srcObject = stream;
           $videoPeer.volume = 0;
           $panePeer.classList.add('has-video');
           e.track.addEventListener('mute',   () => $panePeer.classList.remove('has-video'));
           e.track.addEventListener('unmute', () => $panePeer.classList.add('has-video'));
-          // Resolution badge updates as soon as metadata arrives.
           $videoPeer.addEventListener('loadedmetadata', () => {
             $resPeer.textContent =
               `${$videoPeer.videoHeight}p · ${Math.round($videoPeer.getVideoPlaybackQuality?.().droppedVideoFrames || 30)}fps`;
           }, { once: true });
         } else if (e.track.kind === 'audio') {
-          // Audio playback goes through the peer <video> element's audio
-          // track so volume is unified with video. Volume reflects slider.
           if (!$videoPeer.srcObject) $videoPeer.srcObject = stream;
           $videoPeer.volume = volume / 100;
           $videoPeer.play().catch(() => {});
         }
-        logLine('event', 'remote ' + e.track.kind + ' track attached');
+        logLine('event', 'remote ' + e.track.kind + ' track attached (' + (isScreen ? 'screen' : 'cam') + ')');
       };
+      conn.onnegotiationneeded = async () => {
+        // Only the originating offerer renegotiates — keeps things glare-free
+        // in a 1-on-1 call. If the answerer ever wants to add a track they
+        // also call scheduleRenegotiation, which will run only on the offerer.
+        if (!isOfferer) return;
+        try {
+          const offer = await conn.createOffer();
+          if (conn.signalingState !== 'stable') return; // racing with another negotiation
+          await conn.setLocalDescription(offer);
+          await sendSignal({ kind: 'offer', sdp: offer.sdp });
+          logLine('event', 'sent renegotiation offer');
+        } catch (err) {
+          logLine('event', 'renegotiation failed: ' + err.message);
+        }
+      };
+
+      function hidePeerScreen() {
+        $videoPeerScreen.srcObject = null;
+        $panePeerScreen.classList.add('hidden');
+        $panePeerScreen.classList.remove('has-video');
+        $resPeerScreen.textContent = '—';
+      }
       conn.onicecandidate = (e) => {
         if (e.candidate) sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
         else logLine('event', 'ICE gathering complete');
@@ -382,6 +435,7 @@
         $panePeer.classList.remove('active');
         $micBtn.disabled = true;
         $camBtn.disabled = true;
+        $shareBtn.disabled = true;
         stopCallTimer();
       } else if (s === 'connecting') {
         $callBtn.classList.add('state-connecting');
@@ -390,6 +444,7 @@
         $callMeta.textContent = '';
         $micBtn.disabled = !localStream;
         $camBtn.disabled = !localStream;
+        $shareBtn.disabled = true;
       } else if (s === 'connected') {
         $callBtn.classList.add('state-connected');
         $callState.textContent = '■';
@@ -398,6 +453,7 @@
         $panePeer.classList.add('active');
         $micBtn.disabled = false;
         $camBtn.disabled = false;
+        $shareBtn.disabled = false;
         startCallTimer();
       }
     }
@@ -437,10 +493,11 @@
         setState('connecting');
         await ensureLocalStream();
         pc = newPC();
+        isOfferer = true;
         // Caller side creates the data channel; the answerer picks it up
         // via pc.ondatachannel. Must happen before createOffer.
         attachDataChannel(pc.createDataChannel('chat', { ordered: true }));
-        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+        if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         await sendSignal({ kind: 'offer', sdp: offer.sdp });
@@ -461,13 +518,30 @@
         localStream.getTracks().forEach((t) => t.stop());
         localStream = null;
       }
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+        screenStream = null;
+      }
+      screenSenders = [];
+      peerScreenStreamId = null;
+      isOfferer = false;
       stopDbMeter();
       $videoYou.srcObject = null;
       $videoPeer.srcObject = null;
+      $videoYouScreen.srcObject = null;
+      $videoPeerScreen.srcObject = null;
       $paneYou.classList.remove('has-video', 'active');
       $panePeer.classList.remove('has-video', 'active');
+      $paneYouScreen.classList.add('hidden');
+      $paneYouScreen.classList.remove('has-video');
+      $panePeerScreen.classList.add('hidden');
+      $panePeerScreen.classList.remove('has-video');
       $resYou.textContent = '—';
       $resPeer.textContent = '—';
+      $resYouScreen.textContent = '—';
+      $resPeerScreen.textContent = '—';
+      $shareState.textContent = '▢';
+      $shareBtn.classList.remove('active');
       $chatInput.disabled = true;
       $chatInput.placeholder = 'connect to chat';
       $chatInput.value = '';
@@ -481,12 +555,27 @@
 
     async function handleSignal(msg) {
       if (msg.kind === 'offer') {
+        if (pc && pc.signalingState !== 'closed') {
+          // Renegotiation from an existing call (peer added/removed a
+          // track, e.g. started/stopped screen share). Don't teardown —
+          // re-answer in place.
+          try {
+            await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await sendSignal({ kind: 'answer', sdp: answer.sdp });
+            logLine('event', 'sent renegotiation answer');
+          } catch (err) {
+            logLine('event', 'renegotiation answer failed: ' + err.message);
+          }
+          return;
+        }
         logLine('event', 'received offer');
-        if (pc) teardown();
         setState('connecting');
         await ensureLocalStream();
         pc = newPC();
-        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+        isOfferer = false;
+        if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
         for (const c of pendingRemoteCandidates) { try { await pc.addIceCandidate(c); } catch (_) {} }
         pendingRemoteCandidates = [];
@@ -504,6 +593,13 @@
         if (!pc || !pc.remoteDescription) { pendingRemoteCandidates.push(msg.candidate); return; }
         try { await pc.addIceCandidate(msg.candidate); }
         catch (err) { logLine('event', 'addIceCandidate failed: ' + err.message); }
+      } else if (msg.kind === 'screen-share') {
+        // Peer announces its screen MediaStream id. Stash it so the next
+        // ontrack with that stream id gets routed to the screen pane.
+        // on=false clears the mapping and hides the pane on the next
+        // track.ended event.
+        peerScreenStreamId = msg.on ? msg.streamId : null;
+        logLine('event', 'peer screen share ' + (msg.on ? 'on (' + msg.streamId + ')' : 'off'));
       } else if (msg.kind === 'hangup') {
         logLine('event', 'peer hung up');
         teardown();
@@ -511,7 +607,37 @@
     }
 
     // ---- controls ----
-    $callBtn.addEventListener('click', () => { pc ? hangup() : call(); });
+    // primeAudio unlocks autoplay for the rest of this page lifetime:
+    // browsers gate <audio>/<video>.play() with non-zero volume on a
+    // recent user gesture. The first call() click is that gesture; by
+    // the time ontrack fires (several async hops later) the gesture is
+    // stale and audio plays silently until the user touches something
+    // (like the volume slider — exactly what was reported). Kicking off
+    // a no-op AudioContext + a 1-frame silent <audio> here flips the
+    // page into "user has allowed audio" mode permanently.
+    let audioPrimed = false;
+    function primeAudio() {
+      if (audioPrimed) return;
+      audioPrimed = true;
+      try {
+        const C = window.AudioContext || /** @type {*} */(window).webkitAudioContext;
+        const ctx = new C();
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+      } catch (_) { /* no audio support, give up silently */ }
+    }
+    $callBtn.addEventListener('click', () => {
+      primeAudio();
+      pc ? hangup() : call();
+    });
+    // Answerers never click the call button — incoming offers connect
+    // automatically — so we also prime on the first pointerdown anywhere
+    // on the page. Once primed, the listener self-removes.
+    document.addEventListener('pointerdown', primeAudio, { once: true, capture: true });
     $micBtn.addEventListener('click', () => {
       if (!localStream) return;
       micEnabled = !micEnabled;
@@ -523,6 +649,98 @@
       camEnabled = !camEnabled;
       localStream.getVideoTracks().forEach((t) => { t.enabled = camEnabled; });
       updateMicCamUI();
+    });
+
+    $shareBtn.addEventListener('click', () => {
+      if (!pc) return;
+      if (screenStream) stopScreenShare();
+      else startScreenShare();
+    });
+
+    async function startScreenShare() {
+      if (!pc || screenStream) return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert('getDisplayMedia not supported by this browser.');
+        return;
+      }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (err) {
+        if (err.name !== 'NotAllowedError') logLine('event', 'getDisplayMedia: ' + err.message);
+        return;
+      }
+      screenStream = stream;
+      // Tell the peer "this stream id is screen" BEFORE renegotiation so
+      // they can tag the incoming track when it arrives.
+      await sendSignal({ kind: 'screen-share', on: true, streamId: stream.id });
+      stream.getTracks().forEach((t) => {
+        screenSenders.push(pc.addTrack(t, stream));
+        t.addEventListener('ended', stopScreenShare);
+      });
+      // Local preview.
+      $videoYouScreen.srcObject = stream;
+      $paneYouScreen.classList.remove('hidden');
+      $paneYouScreen.classList.add('has-video');
+      $videoYouScreen.addEventListener('loadedmetadata', () => {
+        $resYouScreen.textContent = `${$videoYouScreen.videoHeight}p`;
+      }, { once: true });
+      $shareState.textContent = '■';
+      $shareBtn.classList.add('active');
+      logLine('event', 'screen share started (' + stream.id + ')');
+      // addTrack triggers onnegotiationneeded on the offerer. On the
+      // answerer we'd be stuck without an offer route — so for now if a
+      // non-offerer starts share, we send an immediate offer manually.
+      if (!isOfferer) await forceRenegotiate();
+    }
+
+    async function stopScreenShare() {
+      if (!screenStream) return;
+      const stream = screenStream;
+      screenStream = null;
+      stream.getTracks().forEach((t) => t.stop());
+      if (pc) {
+        screenSenders.forEach((s) => { try { pc.removeTrack(s); } catch (_) {} });
+      }
+      screenSenders = [];
+      $videoYouScreen.srcObject = null;
+      $paneYouScreen.classList.add('hidden');
+      $paneYouScreen.classList.remove('has-video');
+      $resYouScreen.textContent = '—';
+      $shareState.textContent = '▢';
+      $shareBtn.classList.remove('active');
+      await sendSignal({ kind: 'screen-share', on: false });
+      logLine('event', 'screen share stopped');
+      if (!isOfferer && pc) await forceRenegotiate();
+    }
+
+    // forceRenegotiate is the answerer's manual offer path — the
+    // onnegotiationneeded handler bails on non-offerers to avoid glare,
+    // but mid-call add/removeTrack from the answerer side still needs to
+    // get an offer out. We just promote ourselves to offerer for the
+    // remainder of the call.
+    async function forceRenegotiate() {
+      if (!pc) return;
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendSignal({ kind: 'offer', sdp: offer.sdp });
+        isOfferer = true;
+        logLine('event', 'sent renegotiation offer (promoted to offerer)');
+      } catch (err) {
+        logLine('event', 'forceRenegotiate failed: ' + err.message);
+      }
+    }
+
+    // Fullscreen icons on each pane. Click → request fullscreen on the
+    // associated <video>.
+    document.querySelectorAll('.ax-pane-fs').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const target = document.getElementById(btn.getAttribute('data-fs'));
+        if (!target || !target.requestFullscreen) return;
+        target.requestFullscreen().catch(() => {});
+      });
     });
 
     function setVolume(v) {

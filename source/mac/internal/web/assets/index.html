@@ -20,8 +20,6 @@
           <span class="ax-sep">·</span>
           <button type="button" data-tab="dns" class="ax-tab">dns</button>
           <span class="ax-sep">·</span>
-          <button type="button" data-tab="ssh" class="ax-tab">ssh</button>
-          <span class="ax-sep">·</span>
           <button type="button" data-tab="audio" class="ax-tab">meet</button>
           <span class="ax-sep">·</span>
           <button type="button" data-tab="drop" class="ax-tab">drop</button>
@@ -128,23 +126,35 @@
       </div>
     </div><!-- /#tab-dns -->
 
-    <div id="tab-ssh" class="tab-panel hidden">
-      <div class="ax-frame">
-        <div class="ax-section">
-          <div class="ax-section-title">
-            <span>— ssh</span>
-          </div>
-          <div class="ax-section-status">empty</div>
-        </div>
-      </div>
-    </div><!-- /#tab-ssh -->
-
     <div id="tab-audio" class="tab-panel hidden">
       <div class="ax-frame">
         <div class="ax-panes">
+          <div class="ax-pane ax-pane-screen hidden" id="ax-pane-you-screen" data-pane="you-screen">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-you-screen-host">you · screen</span></span>
+              <button class="ax-pane-fs" data-fs="ax-video-you-screen" title="fullscreen">⛶</button>
+            </div>
+            <video id="ax-video-you-screen" autoplay muted playsinline></video>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-you-screen">—</span>
+            </div>
+          </div>
+
+          <div class="ax-pane ax-pane-screen hidden" id="ax-pane-peer-screen" data-pane="peer-screen">
+            <div class="ax-pane-header">
+              <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-peer-screen-host">peer · screen</span></span>
+              <button class="ax-pane-fs" data-fs="ax-video-peer-screen" title="fullscreen">⛶</button>
+            </div>
+            <video id="ax-video-peer-screen" autoplay playsinline></video>
+            <div class="ax-pane-footer">
+              <span class="ax-res" id="ax-res-peer-screen">—</span>
+            </div>
+          </div>
+
           <div class="ax-pane" id="ax-pane-you" data-pane="you">
             <div class="ax-pane-header">
               <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-you-host">you @ localhost</span></span>
+              <button class="ax-pane-fs" data-fs="ax-video-you" title="fullscreen">⛶</button>
             </div>
             <video id="ax-video-you" autoplay muted playsinline></video>
             <div class="ax-cam-off">
@@ -162,6 +172,7 @@
           <div class="ax-pane" id="ax-pane-peer" data-pane="peer">
             <div class="ax-pane-header">
               <span class="ax-pane-label"><span class="ax-corner">└</span><span class="ax-pane-host" id="ax-peer-host">peer @ —</span></span>
+              <button class="ax-pane-fs" data-fs="ax-video-peer" title="fullscreen">⛶</button>
             </div>
             <video id="ax-video-peer" autoplay playsinline></video>
             <div class="ax-cam-off">
@@ -199,6 +210,10 @@
           <button id="ax-cam-btn" class="ax-btn ax-btn-cam" disabled>
             <span class="ax-btn-state">□</span>
             <span>cam</span>
+          </button>
+          <button id="ax-share-btn" class="ax-btn ax-btn-share" disabled>
+            <span class="ax-btn-state">▢</span>
+            <span>share</span>
           </button>
           <div class="ax-vol">
             <span class="ax-vol-label">vol</span>
