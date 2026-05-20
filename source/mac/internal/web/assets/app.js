@@ -475,141 +475,6 @@ $(function () {
     };
   }
 
-  // -- Topology graph (d3 force-directed) --
-  const svgEl = document.getElementById('topology');
-  const svg = d3.select('#topology');
-  const width = svgEl.clientWidth || 800;
-  const height = 360;
-
-  const g = svg.append('g');
-  const zoomBehavior = d3.zoom().scaleExtent([0.3, 3])
-    .filter((e) => e.type !== 'wheel' || e.ctrlKey)
-    .on('zoom', (e) => g.attr('transform', e.transform));
-  svg.call(zoomBehavior);
-  // Start zoomed out a bit so 3-4 bubbles fit without scrolling.
-  const initialScale = 0.7;
-  svg.call(
-    zoomBehavior.transform,
-    d3.zoomIdentity
-      .translate(width * (1 - initialScale) / 2, height * (1 - initialScale) / 2)
-      .scale(initialScale),
-  );
-  const linksLayer = g.append('g').attr('class', 'links');
-  const nodesLayer = g.append('g').attr('class', 'nodes');
-
-  const sim = d3.forceSimulation()
-    .force('link', d3.forceLink().id((d) => d.id).distance(130))
-    .force('charge', d3.forceManyBody().strength(-450))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide().radius(44));
-
-  // Keep a stable view of nodes so positions survive refresh.
-  let nodeMap = new Map();
-  let lastTopologyKey = '';
-
-  function bubbleRadius(n) {
-    if (n.kind === 'self') return 28;
-    if (n.kind === 'peer') return 26;
-    return 20;
-  }
-  function bubbleColor(n) {
-    if (n.kind === 'self') return '#2563eb';
-    if (n.kind === 'peer') return n.online === false ? '#4a4030' : '#059669';
-    return '#d97706';
-  }
-  function edgeThickness(_e) {
-    return 1.5;
-  }
-  function abbrev(s) {
-    if (!s) return '';
-    return s.length <= 36 ? s : s.slice(0, 34) + '…';
-  }
-  function fullLabel(n) {
-    let t = n.label;
-    if (n.ips && n.ips.length) t += '\n' + n.ips.join('\n');
-    return t;
-  }
-
-  function refreshTopology() {
-    $.getJSON('/api/topology', (data) => {
-      const incoming = data.nodes || [];
-      const incomingEdges = data.edges || [];
-
-      // Detect whether the structure (not byte counts) actually changed.
-      // If not, skip the d3 selection/simulation work — restarting alpha
-      // every 2s on an unchanged graph keeps the physics loop running
-      // forever and starves the main thread under heavy log volume.
-      const structureKey = incoming.map((n) => n.id).sort().join(',') + '|' +
-        incomingEdges.map((e) => e.source + '>' + e.target).sort().join(',');
-      const structureChanged = structureKey !== lastTopologyKey;
-      lastTopologyKey = structureKey;
-
-      const newMap = new Map();
-      incoming.forEach((n) => {
-        const existing = nodeMap.get(n.id);
-        if (existing) {
-          // Update labels/ips but preserve position
-          Object.assign(existing, n);
-          newMap.set(n.id, existing);
-        } else {
-          newMap.set(n.id, Object.assign({}, n));
-        }
-      });
-      nodeMap = newMap;
-
-      const nodes = Array.from(nodeMap.values());
-      const links = incomingEdges.map((e) => ({ ...e }));
-
-      const linkSel = linksLayer.selectAll('line').data(links, (e) => e.source + '|' + e.target);
-      linkSel.exit().remove();
-      const linkEnter = linkSel.enter().append('line')
-        .attr('stroke', '#94a3b8')
-        .attr('stroke-opacity', 0.75);
-      linkEnter.merge(linkSel).attr('stroke-width', edgeThickness);
-
-      const nodeSel = nodesLayer.selectAll('g.bubble').data(nodes, (n) => n.id);
-      nodeSel.exit().remove();
-      const nodeEnter = nodeSel.enter().append('g').attr('class', 'bubble').style('cursor', 'grab');
-      nodeEnter.append('circle')
-        .attr('stroke', '#0f172a')
-        .attr('stroke-width', 2);
-      // Label sits BELOW the bubble — dark text on the panel background,
-      // no truncation worries.
-      nodeEnter.append('text')
-        .attr('text-anchor', 'middle')
-        .attr('font-size', '12px')
-        .attr('fill', '#9a8e7a')
-        .attr('font-weight', '500')
-        .style('pointer-events', 'none');
-      nodeEnter.append('title');
-      nodeEnter.call(d3.drag()
-        .on('start', (event, d) => {
-          if (!event.active) sim.alphaTarget(0.3).restart();
-          d.fx = d.x; d.fy = d.y;
-        })
-        .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
-        .on('end', (event, d) => {
-          if (!event.active) sim.alphaTarget(0);
-          d.fx = null; d.fy = null;
-        }));
-
-      const allNodes = nodeEnter.merge(nodeSel);
-      allNodes.select('circle').attr('r', bubbleRadius).attr('fill', bubbleColor);
-      allNodes.select('text')
-        .attr('y', (n) => bubbleRadius(n) + 14)
-        .text((n) => abbrev(n.label));
-      allNodes.select('title').text((n) => fullLabel(n));
-
-      sim.nodes(nodes).on('tick', () => {
-        linksLayer.selectAll('line')
-          .attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y)
-          .attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
-        allNodes.attr('transform', (d) => `translate(${d.x},${d.y})`);
-      });
-      sim.force('link').links(links);
-      if (structureChanged) sim.alpha(0.4).restart();
-    });
-  }
 
   // Camp tab — list of peers in our current camp. Polls our local proxy
   // (/api/camp/peers), which in turn fetches /api/id/<camp_id> from the
@@ -713,6 +578,20 @@ $(function () {
       });
   }
 
+  // makeHealthDot renders a small status indicator next to a domain.
+  // `entry.health`: "ok" → green, "fail" → red, "" → grey (untested yet).
+  function makeHealthDot(entry) {
+    const status = entry && entry.health;
+    let cls = 'unknown';
+    let title = 'health unknown';
+    if (status === 'ok') { cls = 'reachable'; title = 'backend is up'; }
+    else if (status === 'fail') { cls = 'unreachable'; title = 'backend not responding'; }
+    return $('<span class="ax-dot">').addClass(cls).attr('title', title).css({
+      'display': 'inline-block', 'width': '8px', 'height': '8px', 'border-radius': '50%',
+      'margin-right': '8px',
+    });
+  }
+
   // ---- DNS tab: own published domains + known domains across peers ----
   // localStorage is the source of truth — engine holds an in-memory copy
   // that gets blown away on restart, so on every refresh we re-push if
@@ -758,14 +637,20 @@ $(function () {
       return;
     }
     myDomains.forEach((d) => {
-      const fqdn = d.name + '.' + ($('#camp-id').val() || '<camp_id>') + '.f2f';
+      const campID = $('#camp-id').val() || '<camp_id>';
+      const fqdn = d.name + '.' + campID + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append($('<span class="ax-intercept-spec">').text(fqdn));
+      $head.append(makeHealthDot(d));
+      const $link = $('<a class="ax-intercept-spec ax-domain-link" target="_blank">')
+        .attr('href', 'https://' + fqdn + '/')
+        .text(fqdn);
+      $head.append($link);
       if (d.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + d.port));
       const $rm = $('<button class="ax-list-remove">remove</button>');
-      $rm.on('click', () => {
+      $rm.on('click', (e) => {
+        e.stopPropagation();
         myDomains = myDomains.filter((e) => e.name !== d.name);
         putMyDomains(myDomains);
       });
@@ -824,7 +709,12 @@ $(function () {
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append($('<span class="ax-intercept-spec">').text(fqdn));
+      $head.append(makeHealthDot(r));
+      const $link = $('<a class="ax-intercept-spec ax-domain-link" target="_blank">')
+        .attr('href', 'https://' + fqdn + '/')
+        .text(fqdn);
+      if (!r.online) $link.css('opacity', '0.5');
+      $head.append($link);
       $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + r.peer));
       if (r.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + r.port));
       if (!r.online) $head.append($('<span class="ax-pill ax-pill-pending">').text('offline'));
@@ -864,12 +754,10 @@ $(function () {
 
   restoreForm();
   refreshStatus();
-  refreshTopology();
   refreshCampPeers();
   refreshMyDomains();
   refreshTrustedPeers();
   setInterval(refreshStatus, 3000);
-  setInterval(refreshTopology, 2000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
   setInterval(refreshTrustedPeers, 5000);

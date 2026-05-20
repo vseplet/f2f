@@ -128,10 +128,17 @@ type InterceptInfo struct {
 // are advisory: DNS only carries the IP, the user types the port in
 // their URLs. Name is the short label (e.g. "gitlab") and gets the
 // camp-wide TLD appended at resolution time.
+//
+// Health / HealthCheckedAt are populated by the engine's own health
+// loop — never read from incoming PUTs. When this entry appears on
+// another peer's machine (via /api/domains poll) the health is the
+// owning peer's self-reported view of its own service.
 type DomainEntry struct {
-	Name  string `json:"name"`
-	Port  int    `json:"port,omitempty"`
-	Proto string `json:"proto,omitempty"`
+	Name            string `json:"name"`
+	Port            int    `json:"port,omitempty"`
+	Proto           string `json:"proto,omitempty"`
+	Health          string `json:"health,omitempty"`            // "ok" | "fail" | "" (unknown)
+	HealthCheckedAt int64  `json:"health_checked_at,omitempty"` // unix seconds
 }
 
 // peerState is our per-peer view: identity from camp + when we last
@@ -210,6 +217,10 @@ type Engine struct {
 	// /api/domains on the tunnel listener; written by the UI via
 	// SetMyDomains. Atomic pointer keeps the read path lock-free.
 	myDomains atomic.Pointer[[]DomainEntry]
+	// myDomainHealth is the latest TCP-dial result per published name.
+	// healthCheckLoop writes it, MyDomains() merges it into output.
+	myDomainHealth   map[string]domainHealth
+	myDomainHealthMu sync.Mutex
 	// tunnelHTTPPort is the port other peers expose their /api/domains
 	// on (= our UI bind port, since both sides run f2f-mac). Wired by
 	// main via SetTunnelHTTPPort.
@@ -247,12 +258,19 @@ type TrustedPeerCA struct {
 	InstalledAt int64  `json:"installed_at"`
 }
 
+// domainHealth is the latest health-check result for one local service.
+type domainHealth struct {
+	Status    string // "ok" | "fail"
+	CheckedAt int64  // unix seconds
+}
+
 // New returns a fresh Engine. Start it to bring it up.
 func New() *Engine {
 	return &Engine{
 		intercepts:     map[string]*InterceptInfo{},
 		peers:          map[string]*peerState{},
 		trustedPeerCAs: map[string]TrustedPeerCA{},
+		myDomainHealth: map[string]domainHealth{},
 		tap:            newLogTap(),
 	}
 }
@@ -459,6 +477,8 @@ func (e *Engine) Start(cfg Config) error {
 	if e.cfg.Camp != nil {
 		e.workers.Add(1)
 		go e.domainPollLoop(ctx)
+		e.workers.Add(1)
+		go e.domainHealthLoop(ctx)
 	}
 	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
 	// — 5353 is contended on macOS by mDNSResponder and any running
@@ -810,6 +830,46 @@ func (e *Engine) CampPeers() []rendezvous.PeerInfo {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
+// domainHealthLoop TCP-dials each published domain on 127.0.0.1:<port>
+// every few seconds and stamps the result onto myDomainHealth. The
+// status flows out through MyDomains() — into /api/my-domains for the
+// UI, and into /api/domains so OTHER peers see whether our services
+// are actually up.
+func (e *Engine) domainHealthLoop(ctx context.Context) {
+	defer e.workers.Done()
+	const interval = 8 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		e.checkMyDomainsHealth(ctx)
+	}
+}
+
+func (e *Engine) checkMyDomainsHealth(ctx context.Context) {
+	domains := e.MyDomains()
+	now := time.Now().Unix()
+	for _, d := range domains {
+		if d.Port == 0 {
+			continue
+		}
+		status := "fail"
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.Port))
+		dialer := net.Dialer{Timeout: 2 * time.Second}
+		if conn, err := dialer.DialContext(ctx, "tcp", addr); err == nil {
+			_ = conn.Close()
+			status = "ok"
+		}
+		e.myDomainHealthMu.Lock()
+		e.myDomainHealth[d.Name] = domainHealth{Status: status, CheckedAt: now}
+		e.myDomainHealthMu.Unlock()
+	}
+}
+
 // domainPollLoop walks every online peer once per tick and pulls their
 // /api/domains list over HTTP-through-tunnel. The result is stashed on
 // each peerState so the local DNS server can answer queries. We poll
@@ -1173,6 +1233,8 @@ func (e *Engine) SetActivePeer(tunnelIP string) error {
 }
 
 // MyDomains returns a copy of the local-published domain list, never nil.
+// Each entry has its current health stamped on (own snapshot from
+// healthCheckLoop).
 func (e *Engine) MyDomains() []DomainEntry {
 	p := e.myDomains.Load()
 	if p == nil {
@@ -1180,15 +1242,36 @@ func (e *Engine) MyDomains() []DomainEntry {
 	}
 	out := make([]DomainEntry, len(*p))
 	copy(out, *p)
+	e.myDomainHealthMu.Lock()
+	defer e.myDomainHealthMu.Unlock()
+	for i := range out {
+		if h, ok := e.myDomainHealth[out[i].Name]; ok {
+			out[i].Health = h.Status
+			out[i].HealthCheckedAt = h.CheckedAt
+		}
+	}
 	return out
 }
 
-// SetMyDomains replaces the local-published list atomically. Other peers
-// pick up the change on their next /api/domains poll (~10s).
+// SetMyDomains replaces the local-published list atomically. Health
+// state for removed names is dropped so the UI doesn't show stale
+// "ok" indicators. Other peers pick up the change on their next
+// /api/domains poll (~10s).
 func (e *Engine) SetMyDomains(list []DomainEntry) {
 	dup := make([]DomainEntry, len(list))
 	copy(dup, list)
 	e.myDomains.Store(&dup)
+	keep := make(map[string]struct{}, len(dup))
+	for _, d := range dup {
+		keep[d.Name] = struct{}{}
+	}
+	e.myDomainHealthMu.Lock()
+	for name := range e.myDomainHealth {
+		if _, ok := keep[name]; !ok {
+			delete(e.myDomainHealth, name)
+		}
+	}
+	e.myDomainHealthMu.Unlock()
 }
 
 // PeerDomains returns a snapshot of every known peer's domains, indexed
