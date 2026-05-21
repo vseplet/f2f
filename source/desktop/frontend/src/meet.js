@@ -166,7 +166,13 @@ export function startMeet() {
     try { msg = JSON.parse(ev.body); }
     catch { logLine('non-JSON signal from ' + ev.from + ': ' + ev.body); return; }
     if (!msg || !msg.kind) return;
-    if (!callPartner || callPartner === ev.from) callPartner = ev.from;
+    if (!callPartner || callPartner === ev.from) {
+      callPartner = ev.from;
+      // Pane labels: look up the peer's nickname now that we know it.
+      if (typeof window.f2fPeerName === 'function' && typeof window.f2fSetPeerLabel === 'function') {
+        window.f2fSetPeerLabel(window.f2fPeerName(callPartner), callPartner);
+      }
+    }
     await handleSignal(msg);
   });
 
@@ -324,6 +330,9 @@ export function startMeet() {
     if (!to) { $callMeta.textContent = 'pick a peer'; return; }
     callPartner = to;
     $callMeta.textContent = '';
+    if (typeof window.f2fPeerName === 'function' && typeof window.f2fSetPeerLabel === 'function') {
+      window.f2fSetPeerLabel(window.f2fPeerName(to), to);
+    }
     try {
       setState('connecting');
       await ensureLocalStream();
@@ -514,7 +523,33 @@ export function startMeet() {
   }
 
   // ---- controls ----
+  // Browsers/WebKit gate audio playback on a recent user gesture. By
+  // the time ontrack fires, the original button-click gesture is stale
+  // and audio plays muted until the user does literally anything else
+  // (like dragging the volume slider — exactly what was reported).
+  // Priming a tiny AudioContext inside the click handler flips the
+  // page into "user-has-allowed-audio" mode for the rest of its life.
+  let audioPrimed = false;
+  function primeAudio() {
+    if (audioPrimed) return;
+    audioPrimed = true;
+    try {
+      const C = window.AudioContext || /** @type {any} */(window).webkitAudioContext;
+      const ctx = new C();
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch (_) { /* no audio support */ }
+  }
+  // Answerers never click the call button (incoming offers connect on
+  // their own) — also prime on the first pointerdown anywhere.
+  document.addEventListener('pointerdown', primeAudio, { once: true, capture: true });
+
   $callBtn.addEventListener('click', () => {
+    primeAudio();
     if (pc) hangup(); else call();
   });
   $micBtn.addEventListener('click', () => {
@@ -553,6 +588,20 @@ export function startMeet() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') exitAnyFs();
   });
+
+  // macOS mice without a trackpad don't translate wheel-vertical into
+  // horizontal scroll on overflow-x containers. Forward deltaY → scrollLeft
+  // when the user is hovering the panes row, unless shift is held.
+  const $panes = document.querySelector('#tab-meet .ax-panes');
+  if ($panes) {
+    $panes.addEventListener('wheel', (e) => {
+      if (e.shiftKey) return;
+      const dy = e.deltaY;
+      if (Math.abs(dy) <= Math.abs(e.deltaX)) return;
+      $panes.scrollLeft += dy;
+      e.preventDefault();
+    }, { passive: false });
+  }
 
   // ---- identity hooks (called from main.js refresh()) ----
   window.f2fSetIdentity = function (info) {

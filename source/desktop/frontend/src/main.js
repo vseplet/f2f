@@ -106,6 +106,15 @@ function dotClass(p) {
   return 'reachable';
 }
 
+// Lookup helper for meet.js — given a peer's tunnel_ip, return its
+// display name. Returns 'peer' as a fallback so the chat ui has
+// something readable.
+window.f2fPeerName = function (tunnelIP) {
+  const list = window.__livePeers || [];
+  const p = list.find((x) => !x.self && x.tunnel_ip === tunnelIP);
+  return p ? p.name : 'peer';
+};
+
 async function refresh() {
   let s;
   try { s = await Status(); } catch { return; }
@@ -115,6 +124,11 @@ async function refresh() {
     $('#camp-id').disabled = true;
     $('#camp-name').value = s.name || $('#camp-name').value;
     $('#camp-id').value = s.camp_id || $('#camp-id').value;
+    // Push current identity to meet so pane labels + chat use real
+    // names instead of the 'you' / 'peer' placeholders.
+    if (typeof window.f2fSetIdentity === 'function') {
+      window.f2fSetIdentity({ myName: s.name, myTunnelIP: s.tunnel_ip });
+    }
   } else {
     setEngineBtn('stopped', 'start', '');
     $('#camp-name').disabled = false;
@@ -165,7 +179,22 @@ async function refresh() {
     $sel.appendChild(opt);
   }
   $sel.value = prev;
+  window.__livePeers = peers;
+  // Mirror current selection / call-partner into meet's pane labels.
+  const targetIP = $sel.value;
+  if (targetIP && typeof window.f2fSetPeerLabel === 'function') {
+    window.f2fSetPeerLabel(window.f2fPeerName(targetIP), targetIP);
+  }
 }
+
+// Update peer pane label as soon as the user changes the dropdown,
+// without waiting for the next 2-sec refresh tick.
+$('#ax-call-peer').addEventListener('change', () => {
+  const ip = $('#ax-call-peer').value;
+  if (ip && typeof window.f2fSetPeerLabel === 'function') {
+    window.f2fSetPeerLabel(window.f2fPeerName(ip), ip);
+  }
+});
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
