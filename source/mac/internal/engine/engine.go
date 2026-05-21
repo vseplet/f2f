@@ -742,13 +742,15 @@ func (e *Engine) pruneLoop(c *internaltorrent.Client) {
 }
 
 func (e *Engine) pruneOnce(c *internaltorrent.Client) {
-	// Downloads: stat each one's primary file path; if missing,
-	// drop the torrent and update downloads.json.
+	// Downloads: only prune entries that WERE complete (file existed
+	// at the final path) and have since disappeared. We do NOT prune
+	// in-progress downloads — anacrolix writes to "<name>.part" until
+	// done and renames on completion, so the final path is absent
+	// mid-flight. Pruning then would kill active transfers.
 	removed := false
 	saved := loadSavedDownloads()
 	keep := saved[:0]
 	for _, s := range saved {
-		// Need the Download to compute path. Look it up.
 		var d *internaltorrent.Download
 		for _, x := range c.ListDownloads() {
 			if x.InfoHash == s.InfoHash {
@@ -756,9 +758,22 @@ func (e *Engine) pruneOnce(c *internaltorrent.Client) {
 				break
 			}
 		}
+		if d == nil || d.Torrent == nil || d.Torrent.Info() == nil {
+			// No info yet — keep, anacrolix is still bootstrapping.
+			keep = append(keep, s)
+			continue
+		}
+		// Treat "complete" as BytesCompleted >= total length (same
+		// criterion the HTTP layer uses). Only completed torrents
+		// have a stable final-path file to check for deletion.
+		total := d.Torrent.Info().TotalLength()
+		complete := total > 0 && d.Torrent.BytesCompleted() >= total
+		if !complete {
+			keep = append(keep, s)
+			continue
+		}
 		path := c.DownloadPath(d)
 		if path == "" {
-			// No info yet — keep, anacrolix is still bootstrapping.
 			keep = append(keep, s)
 			continue
 		}
@@ -775,7 +790,8 @@ func (e *Engine) pruneOnce(c *internaltorrent.Client) {
 			log.Printf("downloads: persist after prune: %v", err)
 		}
 	}
-	// Seeds (my shared files): same idea. SharedDir lookup.
+	// Seeds (my shared files): always complete by construction (we
+	// only AddSeed an existing file). Safe to prune on missing.
 	for _, h := range c.ListSeeds() {
 		if h.Path == "" {
 			continue
