@@ -305,7 +305,14 @@ export function startMeet() {
         logLine('remote ' + e.track.kind + ' track (screen)');
       } else if (e.track.kind === 'video') {
         $videoPeer.srcObject = stream;
-        $videoPeer.volume = 0; // cam-video element doesn't carry audio
+        // Don't muffle audio here even though we think "video element
+        // doesn't carry audio" — in same-stream multi-track, the same
+        // element ends up carrying both, and we set the real volume in
+        // the audio branch below. WebKit was treating volume=0 set
+        // here as authoritative and ignoring later writes until the
+        // user dragged the slider.
+        $videoPeer.muted = false;
+        $videoPeer.volume = volume / 100;
         $panePeer.classList.add('has-video');
         e.track.addEventListener('mute',   () => $panePeer.classList.remove('has-video'));
         e.track.addEventListener('unmute', () => $panePeer.classList.add('has-video'));
@@ -545,8 +552,19 @@ export function startMeet() {
     } catch (_) { /* no audio support */ }
   }
   // Answerers never click the call button (incoming offers connect on
-  // their own) — also prime on the first pointerdown anywhere.
-  document.addEventListener('pointerdown', primeAudio, { once: true, capture: true });
+  // their own) — prime on the first pointerdown anywhere AND on every
+  // subsequent gesture also nudge the actual video elements: WebKit
+  // autoplay gating remembers user intent per-element, not just
+  // page-wide, so .play() called from inside a user-gesture handler
+  // is what unmutes the stream. Without this the audio sat at 0.8 but
+  // played silently until the user wiggled the volume slider.
+  function unlockMedia() {
+    primeAudio();
+    if ($videoPeer.srcObject)       { $videoPeer.muted = false;       $videoPeer.play().catch(() => {}); }
+    if ($videoPeerScreen.srcObject) { $videoPeerScreen.muted = false; $videoPeerScreen.play().catch(() => {}); }
+  }
+  document.addEventListener('pointerdown', unlockMedia, { capture: true });
+  document.addEventListener('keydown', unlockMedia, { capture: true });
 
   $callBtn.addEventListener('click', () => {
     primeAudio();
@@ -590,18 +608,23 @@ export function startMeet() {
   });
 
   // macOS mice without a trackpad don't translate wheel-vertical into
-  // horizontal scroll on overflow-x containers. Forward deltaY → scrollLeft
-  // when the user is hovering the panes row, unless shift is held.
-  const $panes = document.querySelector('#tab-meet .ax-panes');
-  if ($panes) {
-    $panes.addEventListener('wheel', (e) => {
-      if (e.shiftKey) return;
-      const dy = e.deltaY;
-      if (Math.abs(dy) <= Math.abs(e.deltaX)) return;
-      $panes.scrollLeft += dy;
-      e.preventDefault();
-    }, { passive: false });
-  }
+  // horizontal scroll on overflow-x containers. We forward deltaY →
+  // scrollLeft when the user is hovering the panes row. Listener is
+  // attached at the document, capture-phase: otherwise the outer
+  // .ax-frame (overflow-y: auto for tab content) eats the wheel event
+  // before our inner .ax-panes handler fires.
+  document.addEventListener('wheel', (e) => {
+    if (e.shiftKey) return;
+    const panes = e.target?.closest?.('#tab-meet .ax-panes');
+    if (!panes) return;
+    const dy = e.deltaY;
+    // Trackpad sends both dx and dy; if dx already dominates, let the
+    // native handler do its thing.
+    if (Math.abs(dy) <= Math.abs(e.deltaX)) return;
+    panes.scrollLeft += dy;
+    e.preventDefault();
+    e.stopPropagation();
+  }, { passive: false, capture: true });
 
   // ---- identity hooks (called from main.js refresh()) ----
   window.f2fSetIdentity = function (info) {
