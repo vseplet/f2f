@@ -139,7 +139,9 @@ func buildRules(iface, tunnelIP string, allowed []PortRule) string {
 	// Default-deny ONLY for packets aimed at this peer's services.
 	// Anything else (peer-to-peer, egress forwarding) is implicit-
 	// pass since no rule below it matches.
-	fmt.Fprintf(&sb, "block in on %s from any to %s/32 all\n", iface, tunnelIP)
+	// NB: pf does not accept `all` together with `from/to` — they're
+	// mutually exclusive forms.
+	fmt.Fprintf(&sb, "block in on %s from any to %s/32\n", iface, tunnelIP)
 	// ICMP to us — diagnostics; surface is essentially zero.
 	fmt.Fprintf(&sb, "pass in on %s proto icmp from any to %s/32 keep state\n", iface, tunnelIP)
 	// Group allow rules by protocol for braced port lists.
@@ -257,7 +259,10 @@ func pfLoadAnchor(anchor, rules string) error {
 	cmd.Stdin = strings.NewReader(rules)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("pfctl -a %s -f -: %w: %s", anchor, err, out)
+		// Include the ruleset we attempted to load — pfctl's "syntax
+		// error" messages reference a line number, useless without
+		// the source.
+		return fmt.Errorf("pfctl -a %s -f -: %w: %s\nruleset:\n%s", anchor, err, out, rules)
 	}
 	return nil
 }
