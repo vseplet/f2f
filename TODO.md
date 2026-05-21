@@ -193,3 +193,62 @@ ever one default route at a time).
 
 Scope: small once decided on polling vs PF_ROUTE — ~50 lines either
 way, all in `internal/engine/`.
+
+## Drop / file sharing — Stage 4: per-file ACL with peer allowlist
+
+Goal: each shared file can be restricted to a specific list of peers.
+Anyone outside the allowlist neither sees the file in `/api/files`,
+nor can connect to download it.
+
+Current state (Stages 1-3 done): any peer in the camp can see any
+file via `/api/files` polling, and can download it via BT once they
+have the magnet. For friends-circle this is fine; for larger camps
+or sensitive content, missing.
+
+Design — two enforcement layers, both required:
+
+1. **Discovery filter.** `/api/files` already runs on the tunnel
+   listener, so `r.RemoteAddr` gives us the caller's tunnel_ip. We
+   resolve that to a peer name via `engine.peers` and skip entries
+   whose `allowed_peers` list doesn't include the caller (empty list
+   = public to the whole camp, current behavior). This is the soft
+   barrier — info_hash never leaks to unauthorised peers.
+
+2. **BT-level enforcement.** anacrolix exposes a `Torrent`-level
+   connection filter (or we wrap the listener with a custom
+   `net.Conn` accept hook). Reject incoming TCP from any IP not in
+   the file's allowlist. This is the hard barrier — even if a peer
+   somehow guesses or shares the info_hash, they can't actually
+   connect.
+
+Data model addition:
+
+```go
+type SeedHandle struct {
+    ...existing...
+    AllowedPeers []string // peer names; empty = camp-public
+}
+```
+
+Persistence — keep allowlist next to the file:
+`~/Library/Application Support/f2f/shared/.f2f-meta/<info_hash>.json`
+with `{allowed_peers: [...]}`. On engine start, reload.
+
+UI additions in the drop tab:
+
+- Each "my shared files" row gains an "audience" pill: "everyone" or
+  "alice, bob". Click → open a small modal with checkboxes for camp
+  peers. Save → PUT `/api/files/mine/<hash>/audience`.
+- The "camp library" view stays the same — peers only see files they
+  can actually access (filtered server-side).
+
+API additions:
+
+- `PUT /api/files/mine/<info_hash>/audience` body `{allowed_peers: []}`.
+- `GET /api/files` (tunnel) and `GET /api/files/mine` already exist —
+  former gets ACL filter, latter unchanged.
+
+Scope: ~200 lines (engine ACL filter + persistence + connection
+reject + UI modal). Probably one PR. Depends on figuring out the
+right anacrolix hook for connection-level rejection (the
+discovery-layer block is straightforward).
