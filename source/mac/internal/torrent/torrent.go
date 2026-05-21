@@ -307,6 +307,26 @@ func (c *Client) DownloadPath(d *Download) string {
 	return filepath.Join(c.opts.DownloadsDir, files[0].Path())
 }
 
+// RemoveDownload drops a torrent we were downloading/seeding and
+// forgets it. Used by the engine's prune loop when the user has
+// deleted the file from disk — keeps the in-memory and UI state in
+// sync with reality. Returns true if an entry was actually removed.
+func (c *Client) RemoveDownload(infoHashHex string) bool {
+	c.mu.Lock()
+	d, ok := c.loading[infoHashHex]
+	if ok {
+		delete(c.loading, infoHashHex)
+	}
+	c.mu.Unlock()
+	if !ok {
+		return false
+	}
+	if d.Torrent != nil {
+		d.Torrent.Drop()
+	}
+	return true
+}
+
 // SharedDir returns the directory where seeded files live. UI uploads
 // drop files here.
 func (c *Client) SharedDir() string { return c.opts.SharedDir }

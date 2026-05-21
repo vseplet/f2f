@@ -884,14 +884,22 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 			"started_at": d.StartedAt.Unix(),
 		}
 		if d.Torrent != nil && d.Torrent.Info() != nil {
+			info := d.Torrent.Info()
+			total := info.TotalLength()
 			done := d.Torrent.BytesCompleted()
 			row["bytes_completed"] = done
-			row["bytes_missing"] = d.Torrent.BytesMissing()
-			complete := d.Torrent.BytesMissing() == 0
+			row["bytes_missing"] = total - done
+			// Compare BytesCompleted to total length — robust check
+			// that doesn't depend on BytesMissing's internal piece
+			// bitmap state (which can briefly mis-report when a new
+			// torrent is being added in parallel).
+			complete := total > 0 && done >= total
+			// t.Seeding() is anacrolix's own authority on "is this
+			// torrent currently uploading without wanting anything".
+			// Use it for the seeding flag rather than re-deriving.
+			seeding := d.Torrent.Seeding() && complete
 			row["complete"] = complete
-			// With cfg.Seed=true the same Torrent keeps uploading
-			// once it has all pieces — that's our "seeding" state.
-			row["seeding"] = complete
+			row["seeding"] = seeding
 			if complete {
 				row["path"] = t.DownloadPath(d)
 			}

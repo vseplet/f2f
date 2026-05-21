@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -657,6 +658,35 @@ func userHome() string {
 	return "/tmp"
 }
 
+// chownToUser switches ownership of the path (recursively if it's a
+// directory) to SUDO_USER. Engine runs as root via sudo, so anything
+// anacrolix or our handlers create lands root-owned and the user
+// can't delete/move it from Finder without re-elevating. Best-effort
+// — failures are logged but not fatal.
+func chownToUser(path string) {
+	su := os.Getenv("SUDO_USER")
+	if su == "" {
+		return // not running under sudo, nothing to do
+	}
+	u, err := user.Lookup(su)
+	if err != nil {
+		log.Printf("chown: lookup %s: %v", su, err)
+		return
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	// Walk and chown anything we own as root.
+	_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable, continue
+		}
+		if cerr := os.Lchown(p, uid, gid); cerr != nil {
+			log.Printf("chown: %s: %v", p, cerr)
+		}
+		return nil
+	})
+}
+
 func (e *Engine) startTorrent() error {
 	opts := internaltorrent.Options{
 		ListenAddr:   net.JoinHostPort(e.cfg.LocalIP, fmt.Sprint(internaltorrent.DefaultPort)),
@@ -674,6 +704,11 @@ func (e *Engine) startTorrent() error {
 	e.mu.Unlock()
 	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
 		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
+	// One-shot chown on the catalogs themselves so the user (not
+	// root) can manage them from Finder. Future files anacrolix
+	// creates are owned root — covered by chownLoop below.
+	chownToUser(opts.SharedDir)
+	chownToUser(opts.DownloadsDir)
 	// Re-seed everything already in the shared dir from a previous
 	// run. Without this, files survive on disk but anacrolix has no
 	// knowledge of them — UI shows an empty "my shared files" list
@@ -683,7 +718,94 @@ func (e *Engine) startTorrent() error {
 	// magnets so anacrolix re-checks them on disk and resumes
 	// seeding; UI's downloads section comes back populated.
 	go e.restoreDownloads(c)
+	// Periodic chown — anacrolix writes pieces to disk as root
+	// because the engine runs under sudo; without this, completed
+	// downloads in ~/Downloads/f2f-drops/ would need admin rights to
+	// delete or move from Finder.
+	go e.chownLoop(opts.SharedDir, opts.DownloadsDir)
+	// Prune torrents whose backing files have been deleted (user
+	// trashed them from Finder). Without this they keep appearing
+	// in UI as "seeding" forever.
+	go e.pruneLoop(c)
 	return nil
+}
+
+// pruneLoop drops Download/Seed entries whose on-disk file is gone.
+// Runs every 30s — cheap, and most users delete only occasionally.
+func (e *Engine) pruneLoop(c *internaltorrent.Client) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	e.pruneOnce(c) // immediate pass on start
+	for range ticker.C {
+		e.pruneOnce(c)
+	}
+}
+
+func (e *Engine) pruneOnce(c *internaltorrent.Client) {
+	// Downloads: stat each one's primary file path; if missing,
+	// drop the torrent and update downloads.json.
+	removed := false
+	saved := loadSavedDownloads()
+	keep := saved[:0]
+	for _, s := range saved {
+		// Need the Download to compute path. Look it up.
+		var d *internaltorrent.Download
+		for _, x := range c.ListDownloads() {
+			if x.InfoHash == s.InfoHash {
+				d = x
+				break
+			}
+		}
+		path := c.DownloadPath(d)
+		if path == "" {
+			// No info yet — keep, anacrolix is still bootstrapping.
+			keep = append(keep, s)
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			log.Printf("downloads: file gone, dropping %s (%s)", s.InfoHash, path)
+			c.RemoveDownload(s.InfoHash)
+			removed = true
+			continue
+		}
+		keep = append(keep, s)
+	}
+	if removed {
+		if err := saveDownloads(keep); err != nil {
+			log.Printf("downloads: persist after prune: %v", err)
+		}
+	}
+	// Seeds (my shared files): same idea. SharedDir lookup.
+	for _, h := range c.ListSeeds() {
+		if h.Path == "" {
+			continue
+		}
+		if _, err := os.Stat(h.Path); err != nil {
+			log.Printf("seeds: file gone, dropping %s (%s)", h.InfoHash, h.Path)
+			_ = c.RemoveSeed(h.InfoHash)
+		}
+	}
+}
+
+// chownLoop walks shared and downloads dirs every few seconds and
+// re-chowns anything still owned by root to SUDO_USER. Cheap on a
+// small catalog; if it ever becomes expensive, we can move to
+// "chown on torrent-complete" but periodic sweep is bullet-proof
+// against any code path we forget.
+func (e *Engine) chownLoop(dirs ...string) {
+	for _, d := range dirs {
+		chownToUser(d)
+	}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			for _, d := range dirs {
+				chownToUser(d)
+			}
+		}
+	}
 }
 
 // rescanSharedDir walks SharedDir (one level deep, files only) and
