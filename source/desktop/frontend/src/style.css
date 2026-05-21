@@ -30,6 +30,21 @@ html, body {
 
 .hidden { display: none !important; }
 
+/* Pane "fullscreen" — pinned to fill the whole document, on top of
+   everything. Triggered via JS toggling .fs on the .ax-pane element.
+   We use this instead of the browser Fullscreen API because WKWebView
+   inside Wails is inconsistent about HTML5 fullscreen permissions. */
+.ax-pane.fs {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9999 !important;
+  aspect-ratio: auto !important;
+  flex: none !important;
+  border-radius: 0 !important;
+}
+.ax-pane.fs video { object-fit: contain !important; background: #000; }
+body.fs-active { overflow: hidden; }
+
 /* Audio tab — terminal aesthetic. Self-contained: scoped under .ax-frame
    so it doesn't bleed into the tunnel tab's tailwind layout. */
 
