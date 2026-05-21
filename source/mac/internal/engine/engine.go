@@ -30,6 +30,7 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/ca"
 	internaldns "github.com/vseplet/f2f/source/mac/internal/dns"
 	"github.com/vseplet/f2f/source/mac/internal/egress"
+	"github.com/vseplet/f2f/source/mac/internal/firewall"
 	"github.com/vseplet/f2f/source/mac/internal/keychain"
 	internaltorrent "github.com/vseplet/f2f/source/mac/internal/torrent"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
@@ -184,6 +185,7 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	egr      *egress.Egress
+	fw       *firewall.Firewall      // default-deny on utun + user-allowed ports
 	dnsSrv   *internaldns.Server     // local DNS for <camp_id>.f2f
 	ca       *ca.CA                  // local CA for the current camp_id
 	torrent  *internaltorrent.Client // BT client for camp file sharing
@@ -236,6 +238,12 @@ type Engine struct {
 	// password prompt). Key is fingerprint (hex), value is metadata.
 	trustedPeerCAs   map[string]TrustedPeerCA
 	trustedPeerCAsMu sync.Mutex
+
+	// userFirewall holds user-configured allow rules for the inbound
+	// utun filter. Persisted; combined with builtinFirewallPorts when
+	// applying the pf anchor. Mutated through SetUserFirewallPorts so
+	// the anchor is kept in sync.
+	userFirewall []FirewallPort
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -441,6 +449,19 @@ func (e *Engine) Start(cfg Config) error {
 	}
 	if e.udp != nil {
 		log.Printf("UDP listening on %s", e.udp.LocalAddr())
+	}
+
+	// Firewall: default-deny inbound on the utun interface, allow
+	// only f2f-internal ports + user-configured ones. Failure here
+	// is non-fatal — tunnel still works, just without input filtering.
+	e.userFirewall = loadUserFirewall()
+	fw, err := firewall.Open(tun.Name(), mergeFirewallRules(e.userFirewall))
+	if err != nil {
+		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
+	} else {
+		e.fw = fw
+		log.Printf("firewall: pf anchor %q on %s, %d built-in + %d user rule(s)",
+			fw.Anchor(), tun.Name(), len(builtinFirewallPorts), countEnabled(e.userFirewall))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
@@ -654,6 +675,168 @@ func (e *Engine) Torrent() *internaltorrent.Client {
 // trustedPeersDir is where we cache peer CA certs (one file per peer)
 // to recognise them across engine restarts without re-prompting.
 const trustedPeersDir = "/var/lib/f2f/trusted-peers"
+
+// builtinFirewallPorts are the ports f2f's own engine listens on over
+// the tunnel — always allowed, regardless of user settings. Keep in
+// sync with web.Server (HTTP API + reverse proxy ports) and the
+// torrent client.
+var builtinFirewallPorts = []firewall.PortRule{
+	{Port: 2202, Protocol: "tcp"}, // HTTP API on tunnel listener
+	{Port: 80, Protocol: "tcp"},   // HTTP reverse proxy
+	{Port: 443, Protocol: "tcp"},  // HTTPS reverse proxy
+	{Port: 6881, Protocol: "tcp"}, // BitTorrent peer wire
+	{Port: 6881, Protocol: "udp"}, // BitTorrent (uTP)
+}
+
+// FirewallPort is the API shape — a user-configured allow rule with
+// description and enabled flag (so users can toggle without losing
+// the row).
+type FirewallPort struct {
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	Description string `json:"description,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// firewallStatePath persists user-configured port rules across runs.
+func firewallStatePath() string {
+	return filepath.Join(userHome(), "Library", "Application Support", "f2f", "firewall.json")
+}
+
+// BuiltinFirewallPorts returns the always-on f2f-internal allow list
+// (read-only from the UI's perspective).
+func (e *Engine) BuiltinFirewallPorts() []FirewallPort {
+	out := make([]FirewallPort, len(builtinFirewallPorts))
+	for i, r := range builtinFirewallPorts {
+		out[i] = FirewallPort{
+			Port:        r.Port,
+			Protocol:    r.Protocol,
+			Description: builtinPortLabel(r.Port, r.Protocol),
+			Enabled:     true,
+		}
+	}
+	return out
+}
+
+func builtinPortLabel(port int, proto string) string {
+	switch {
+	case port == 2202 && proto == "tcp":
+		return "f2f HTTP API"
+	case port == 80 && proto == "tcp":
+		return "f2f HTTP proxy"
+	case port == 443 && proto == "tcp":
+		return "f2f HTTPS proxy"
+	case port == 6881:
+		return "f2f BitTorrent"
+	}
+	return ""
+}
+
+// UserFirewallPorts returns the user-configured allow list (a copy).
+func (e *Engine) UserFirewallPorts() []FirewallPort {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]FirewallPort, len(e.userFirewall))
+	copy(out, e.userFirewall)
+	return out
+}
+
+// SetUserFirewallPorts replaces the user allow list, persists it,
+// and re-applies the pf anchor with built-in + enabled user rules.
+// Idempotent — safe to call on every UI save.
+func (e *Engine) SetUserFirewallPorts(list []FirewallPort) error {
+	cleaned := cleanUserFirewall(list)
+	e.mu.Lock()
+	e.userFirewall = cleaned
+	fw := e.fw
+	e.mu.Unlock()
+	if err := saveUserFirewall(cleaned); err != nil {
+		log.Printf("firewall: persist: %v", err)
+	}
+	if fw == nil {
+		return nil // engine not running; will be applied on next Start
+	}
+	rules := mergeFirewallRules(cleaned)
+	if err := fw.Apply(rules); err != nil {
+		return fmt.Errorf("firewall: apply: %w", err)
+	}
+	return nil
+}
+
+// mergeFirewallRules combines built-in + enabled user entries into
+// the kernel-level rule list passed to pf.
+func mergeFirewallRules(user []FirewallPort) []firewall.PortRule {
+	out := make([]firewall.PortRule, 0, len(builtinFirewallPorts)+len(user))
+	out = append(out, builtinFirewallPorts...)
+	for _, p := range user {
+		if !p.Enabled {
+			continue
+		}
+		out = append(out, firewall.PortRule{Port: p.Port, Protocol: p.Protocol})
+	}
+	return out
+}
+
+func cleanUserFirewall(in []FirewallPort) []FirewallPort {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]FirewallPort, 0, len(in))
+	for _, p := range in {
+		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
+		if proto != "tcp" && proto != "udp" {
+			continue
+		}
+		if p.Port <= 0 || p.Port > 65535 {
+			continue
+		}
+		key := fmt.Sprintf("%d/%s", p.Port, proto)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, FirewallPort{
+			Port:        p.Port,
+			Protocol:    proto,
+			Description: strings.TrimSpace(p.Description),
+			Enabled:     p.Enabled,
+		})
+	}
+	return out
+}
+
+func loadUserFirewall() []FirewallPort {
+	data, err := os.ReadFile(firewallStatePath())
+	if err != nil {
+		return nil
+	}
+	var out []FirewallPort
+	if err := json.Unmarshal(data, &out); err != nil {
+		log.Printf("firewall: parse %s: %v", firewallStatePath(), err)
+		return nil
+	}
+	return cleanUserFirewall(out)
+}
+
+func saveUserFirewall(list []FirewallPort) error {
+	path := firewallStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func countEnabled(list []FirewallPort) int {
+	n := 0
+	for _, p := range list {
+		if p.Enabled {
+			n++
+		}
+	}
+	return n
+}
 
 // loadTrustedPeerCAs reads the on-disk record of which peer CAs were
 // already installed (so we don't keychain-install them again on every
@@ -1205,6 +1388,7 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
+	fw := e.fw
 	dnsSrv := e.dnsSrv
 	var dnsCampID string
 	if e.cfg.Camp != nil {
@@ -1250,6 +1434,11 @@ func (e *Engine) Stop() error {
 	}
 	e.workers.Wait()
 
+	if fw != nil {
+		if err := fw.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("firewall: %w", err))
+		}
+	}
 	if egr != nil {
 		if err := egr.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("egress: %w", err))
@@ -1265,6 +1454,7 @@ func (e *Engine) Stop() error {
 	e.udp = nil
 	e.routes = nil
 	e.egr = nil
+	e.fw = nil
 	e.dnsSrv = nil
 	e.ca = nil
 	e.torrent = nil
@@ -1930,6 +2120,10 @@ func (e *Engine) rollbackPartial() {
 	if e.routes != nil {
 		_ = e.routes.Cleanup()
 		e.routes = nil
+	}
+	if e.fw != nil {
+		_ = e.fw.Close()
+		e.fw = nil
 	}
 	if e.egr != nil {
 		_ = e.egr.Close()

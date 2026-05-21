@@ -324,6 +324,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 
+	// Firewall: default-deny inbound on utun + user-configurable
+	// allow list (in addition to f2f's own ports). Loopback-only,
+	// settings for *this* peer.
+	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
+	mux.HandleFunc("PUT /api/firewall", s.handleSetFirewall)
+
 	// File sharing via BitTorrent (camp-only, no DHT/public trackers).
 	// /api/files/mine — UI-facing CRUD for what we publish.
 	// /api/files — read-only listing exposed on the tunnel listener
@@ -680,6 +686,36 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 // installed locally — fingerprint, common name, install timestamp.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+}
+
+// handleListFirewall returns the inbound-utun allow list: built-in
+// f2f ports (read-only) + user-configured ports.
+func (s *Server) handleListFirewall(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"builtin": s.engine.BuiltinFirewallPorts(),
+		"user":    s.engine.UserFirewallPorts(),
+	})
+}
+
+// handleSetFirewall replaces the user-configured allow list. Built-in
+// rules cannot be modified. Body shape: {"user": [{port, protocol,
+// description, enabled}, ...]}.
+func (s *Server) handleSetFirewall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		User []engine.FirewallPort `json:"user"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.SetUserFirewallPorts(body.User); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"builtin": s.engine.BuiltinFirewallPorts(),
+		"user":    s.engine.UserFirewallPorts(),
+	})
 }
 
 // fileEntry is the JSON shape returned by /api/files and friends.

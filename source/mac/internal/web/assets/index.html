@@ -90,6 +90,27 @@
         </div>
 
         <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— open ports</span>
+            <span class="ax-meta" id="firewall-meta">0</span>
+          </div>
+          <div class="ax-section-status muted">
+            default-deny on the tunnel interface · f2f's own ports are always open · user-defined ports below can be toggled on/off
+          </div>
+          <div id="firewall-builtin-list" class="ax-list" style="margin-top:8px"></div>
+          <div id="firewall-user-list" class="ax-list" style="margin-top:8px"></div>
+          <div class="ax-add-row" style="margin-top:8px">
+            <input id="firewall-port-input" type="number" min="1" max="65535" class="ax-input" placeholder="port" style="max-width:120px">
+            <select id="firewall-proto-input" class="ax-select" style="max-width:90px">
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+            </select>
+            <input id="firewall-desc-input" type="text" class="ax-input" placeholder="description (optional)">
+            <button id="btn-add-firewall" class="ax-btn ax-btn-primary">+ open</button>
+          </div>
+        </div>
+
+        <div class="ax-section">
           <div class="ax-counters">
             <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
             <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>

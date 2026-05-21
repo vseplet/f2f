@@ -724,6 +724,99 @@ $(function () {
     });
   }
 
+  // ---- firewall (tunnel tab: open ports) ----
+  // Built-in entries are read-only — f2f's own ports must stay open
+  // or the engine breaks. User entries support toggle on/off (without
+  // losing the row) and delete.
+  let firewallUser = [];
+  function refreshFirewall() {
+    $.getJSON('/api/firewall', (data) => {
+      const builtin = (data && Array.isArray(data.builtin)) ? data.builtin : [];
+      const user = (data && Array.isArray(data.user)) ? data.user : [];
+      firewallUser = user;
+      renderFirewall(builtin, user);
+    }).fail(() => {
+      $('#firewall-meta').text('?');
+    });
+  }
+  function renderFirewall(builtin, user) {
+    const $b = $('#firewall-builtin-list');
+    const $u = $('#firewall-user-list');
+    $b.empty(); $u.empty();
+    const enabledUser = user.filter((p) => p.enabled).length;
+    $('#firewall-meta').text((builtin.length + enabledUser) + ' open');
+    builtin.forEach((p) => $b.append(renderFirewallRow(p, true)));
+    if (user.length === 0) {
+      $u.append('<div class="ax-list-empty">no user-defined ports · default-deny on everything else.</div>');
+    } else {
+      user.forEach((p, idx) => $u.append(renderFirewallRow(p, false, idx)));
+    }
+  }
+  function renderFirewallRow(p, builtin, idx) {
+    const $row = $('<div class="ax-intercept">');
+    const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+    $head.append($('<span class="ax-intercept-caret">').text(' '));
+    // Checkbox: built-in always checked + disabled; user entries toggleable.
+    const $cb = $('<input type="checkbox" style="margin-right:6px">')
+      .prop('checked', !!p.enabled)
+      .prop('disabled', builtin);
+    if (!builtin) {
+      $cb.on('change', () => {
+        firewallUser[idx].enabled = $cb.is(':checked');
+        saveFirewall();
+      });
+    }
+    $head.append($cb);
+    $head.append($('<span class="ax-intercept-spec">').text(p.port + '/' + p.protocol));
+    if (p.description) {
+      $head.append($('<span class="ax-pill ax-pill-peer">').text(p.description));
+    }
+    if (builtin) {
+      $head.append($('<span class="ax-pill ax-pill-active">').text('built-in'));
+    }
+    $head.append($('<span class="ax-intercept-meta">'));
+    if (!builtin) {
+      const $rm = $('<button class="ax-list-remove">remove</button>');
+      $rm.on('click', (e) => {
+        e.stopPropagation();
+        firewallUser.splice(idx, 1);
+        saveFirewall();
+      });
+      $head.append($rm);
+    }
+    $row.append($head);
+    return $row;
+  }
+  function saveFirewall() {
+    $.ajax({
+      url: '/api/firewall',
+      method: 'PUT',
+      contentType: 'application/json',
+      data: JSON.stringify({ user: firewallUser }),
+    })
+      .done(() => refreshFirewall())
+      .fail((xhr) => alert('Firewall save failed: ' + errorOf(xhr)));
+  }
+  $('#btn-add-firewall').on('click', () => {
+    const port = parseInt($('#firewall-port-input').val(), 10);
+    const protocol = $('#firewall-proto-input').val();
+    const description = ($('#firewall-desc-input').val() || '').trim();
+    if (!(port > 0 && port < 65536)) {
+      alert('Port must be 1-65535.');
+      return;
+    }
+    if (protocol !== 'tcp' && protocol !== 'udp') return;
+    // Reject duplicates (same port+proto).
+    if (firewallUser.some((p) => p.port === port && p.protocol === protocol)) {
+      alert(port + '/' + protocol + ' is already in the list.');
+      return;
+    }
+    firewallUser.push({ port, protocol, description, enabled: true });
+    saveFirewall();
+    $('#firewall-port-input').val('');
+    $('#firewall-desc-input').val('');
+  });
+
   // ---- trusted peer CAs (DNS tab, bottom section) ----
   function refreshTrustedPeers() {
     $.getJSON('/api/trusted-peers', (list) => {
@@ -914,6 +1007,7 @@ $(function () {
   refreshTrustedPeers();
   refreshMyFiles();
   refreshDownloads();
+  refreshFirewall();
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
@@ -921,6 +1015,7 @@ $(function () {
   setInterval(refreshMyFiles, 5000);
   setInterval(refreshDownloads, 2000);
   setInterval(refreshLibrary, 5000);
+  setInterval(refreshFirewall, 5000);
   // Known-domains panel reads from livePeers, which is updated in
   // applyStatus. Trigger a render on each status refresh.
   setInterval(renderKnownDomains, 3000);
