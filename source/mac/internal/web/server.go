@@ -249,7 +249,9 @@ func (s *Server) UnbindProxies() error {
 
 // handleProxy is the single reverse-proxy handler shared between both
 // proxy listeners. Looks up the Host header's label in the local
-// published-domains list and forwards to 127.0.0.1:<port>. Anything
+// published-domains list and forwards to <host>:<port> where host
+// defaults to 127.0.0.1 but the user can override per-domain (e.g.
+// "localhost" for IPv6-only dev servers, or a LAN IP). Anything
 // outside our zone or with no matching label returns 404.
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
@@ -275,10 +277,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var port int
+	var (
+		port    int
+		upHost  string
+	)
 	for _, d := range s.engine.MyDomains() {
 		if strings.EqualFold(d.Name, label) {
 			port = d.Port
+			upHost = d.Host
+			if upHost == "" {
+				upHost = "127.0.0.1"
+			}
 			break
 		}
 	}
@@ -287,7 +296,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
+	target, _ := url.Parse("http://" + net.JoinHostPort(upHost, strconv.Itoa(port)))
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	// httputil's default ErrorHandler logs to stderr; replace with a
 	// 502 so the client gets a meaningful response instead of a half-open
@@ -642,6 +651,9 @@ func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.Proto != "" {
 			entry.Proto = e.Proto
+		}
+		if h := strings.TrimSpace(e.Host); h != "" {
+			entry.Host = h
 		}
 		cleaned = append(cleaned, entry)
 	}

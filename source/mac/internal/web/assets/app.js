@@ -647,7 +647,10 @@ $(function () {
         .attr('href', 'https://' + fqdn + '/')
         .text(fqdn);
       $head.append($link);
-      if (d.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + d.port));
+      const target = (d.host || '127.0.0.1') + (d.port ? ':' + d.port : '');
+      if (d.port) {
+        $head.append($('<span class="ax-pill ax-pill-peer">').text('→ ' + target));
+      }
       const $rm = $('<button class="ax-list-remove">remove</button>');
       $rm.on('click', (e) => {
         e.stopPropagation();
@@ -680,11 +683,14 @@ $(function () {
       return;
     }
     const port = parseInt($('#my-domain-port').val(), 10);
+    const host = ($('#my-domain-host').val() || '').trim();
     const entry = { name };
     if (port > 0 && port < 65536) entry.port = port;
+    if (host) entry.host = host;
     const next = myDomains.filter((e) => e.name !== name).concat(entry);
     putMyDomains(next);
     $('#my-domain-name').val('');
+    $('#my-domain-host').val('');
     $('#my-domain-port').val('');
   });
 

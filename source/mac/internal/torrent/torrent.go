@@ -80,13 +80,19 @@ type SeedHandle struct {
 // periodically while the torrent isn't complete — anacrolix sometimes
 // fails the initial dial (peer busy with another torrent) and won't
 // retry on its own without DHT/PEX/trackers, which we've disabled.
+// Magnet keeps the original URI so the engine can drop+re-add the
+// torrent to recover from a stall (peer restarted mid-download,
+// anacrolix won't aggressively re-dial without trackers).
 type Download struct {
-	InfoHash  string
-	Name      string
-	Size      int64
-	Torrent   *atorrent.Torrent
-	StartedAt time.Time
-	Peers     []string
+	InfoHash       string
+	Name           string
+	Size           int64
+	Torrent        *atorrent.Torrent
+	StartedAt      time.Time
+	Peers          []string
+	Magnet         string
+	LastProgressAt time.Time
+	LastBytes      int64
 }
 
 // New brings up a fresh BT client on the configured ListenAddr.
@@ -254,11 +260,14 @@ func (c *Client) AddDownload(magnetOrHash string, peerAddrs []string) (*Download
 		return nil, fmt.Errorf("torrent: add magnet: %w", err)
 	}
 	feedPeers(t, peerAddrs)
+	now := time.Now()
 	d := &Download{
-		InfoHash:  t.InfoHash().HexString(),
-		Torrent:   t,
-		StartedAt: time.Now(),
-		Peers:     append([]string(nil), peerAddrs...),
+		InfoHash:       t.InfoHash().HexString(),
+		Torrent:        t,
+		StartedAt:      now,
+		Peers:          append([]string(nil), peerAddrs...),
+		Magnet:         magnetOrHash,
+		LastProgressAt: now,
 	}
 	c.mu.Lock()
 	c.loading[d.InfoHash] = d

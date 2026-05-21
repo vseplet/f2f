@@ -139,11 +139,27 @@ type InterceptInfo struct {
 // another peer's machine (via /api/domains poll) the health is the
 // owning peer's self-reported view of its own service.
 type DomainEntry struct {
-	Name            string `json:"name"`
+	Name string `json:"name"`
+	// Host is the upstream the reverse-proxy dials. Blank means
+	// 127.0.0.1 (the common case). Use this when the upstream binds
+	// to localhost-IPv6-only (Node 17+ defaults), a non-default
+	// loopback address, or a LAN host you want to publish through
+	// this peer's camp domain.
+	Host            string `json:"host,omitempty"`
 	Port            int    `json:"port,omitempty"`
 	Proto           string `json:"proto,omitempty"`
 	Health          string `json:"health,omitempty"`            // "ok" | "fail" | "" (unknown)
 	HealthCheckedAt int64  `json:"health_checked_at,omitempty"` // unix seconds
+}
+
+// upstreamHost returns the effective host the reverse-proxy and
+// health-check should dial. Empty Host → 127.0.0.1 fallback so old
+// records (created before this field existed) keep working.
+func (d DomainEntry) upstreamHost() string {
+	if d.Host == "" {
+		return "127.0.0.1"
+	}
+	return d.Host
 }
 
 // peerState is our per-peer view: identity from camp + when we last
@@ -747,6 +763,8 @@ func (e *Engine) pruneLoop(c *internaltorrent.Client) {
 }
 
 func (e *Engine) refeedActiveDownloads(c *internaltorrent.Client) {
+	const stallAfter = 90 * time.Second
+	now := time.Now()
 	for _, d := range c.ListDownloads() {
 		if d.Torrent == nil || d.Torrent.Info() == nil {
 			// Still waiting for metadata — re-feed too, that's
@@ -755,8 +773,32 @@ func (e *Engine) refeedActiveDownloads(c *internaltorrent.Client) {
 			continue
 		}
 		total := d.Torrent.Info().TotalLength()
-		if total > 0 && d.Torrent.BytesCompleted() >= total {
-			continue // complete, no need
+		done := d.Torrent.BytesCompleted()
+		if total > 0 && done >= total {
+			continue // complete
+		}
+		// Progress tracking: if BytesCompleted advanced since last
+		// check, reset the stall clock. If it hasn't advanced and
+		// enough time has passed, the peer is probably gone — drop
+		// and re-add the magnet so anacrolix starts a fresh dial
+		// cycle. This recovers from the "source peer restarted" case
+		// that just re-feeding doesn't fix (anacrolix backs off
+		// recently-disconnected peers).
+		if done > d.LastBytes {
+			d.LastBytes = done
+			d.LastProgressAt = now
+		}
+		stalled := now.Sub(d.LastProgressAt) > stallAfter
+		if stalled && d.Magnet != "" {
+			log.Printf("downloads: %s stalled (%s with no progress) — drop+re-add",
+				d.InfoHash, now.Sub(d.LastProgressAt).Round(time.Second))
+			peers := append([]string(nil), d.Peers...)
+			magnet := d.Magnet
+			c.RemoveDownload(d.InfoHash)
+			if _, err := c.AddDownload(magnet, peers); err != nil {
+				log.Printf("downloads: stall recovery re-add %s: %v", d.InfoHash, err)
+			}
+			continue
 		}
 		c.FeedPeers(d)
 	}
@@ -1561,7 +1603,7 @@ func (e *Engine) checkMyDomainsHealth(ctx context.Context) {
 			continue
 		}
 		status := "fail"
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.Port))
+		addr := net.JoinHostPort(d.upstreamHost(), strconv.Itoa(d.Port))
 		dialer := net.Dialer{Timeout: 2 * time.Second}
 		if conn, err := dialer.DialContext(ctx, "tcp", addr); err == nil {
 			_ = conn.Close()
