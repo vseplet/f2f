@@ -666,7 +666,45 @@ func (e *Engine) startTorrent() error {
 	e.mu.Unlock()
 	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
 		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
+	// Re-seed everything already in the shared dir from a previous
+	// run. Without this, files survive on disk but anacrolix has no
+	// knowledge of them — UI shows an empty "my shared files" list
+	// after restart.
+	go e.rescanSharedDir(c, opts.SharedDir)
 	return nil
+}
+
+// rescanSharedDir walks SharedDir (one level deep, files only) and
+// AddSeeds each. Errors per-file are logged and skipped — one bad
+// file shouldn't drop the rest. Runs in a goroutine so a large
+// catalog doesn't block engine.Start.
+func (e *Engine) rescanSharedDir(c *internaltorrent.Client, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("torrent: rescan %s: %v", dir, err)
+		return
+	}
+	added := 0
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		h, err := c.AddSeed(path)
+		if err != nil {
+			log.Printf("torrent: rescan %s: %v", name, err)
+			continue
+		}
+		added++
+		log.Printf("torrent: rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
+	}
+	if added > 0 {
+		log.Printf("torrent: rescan re-seeded %d file(s) from %s", added, dir)
+	}
 }
 
 // Torrent returns the live BT client (nil if not running).

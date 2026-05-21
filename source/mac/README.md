@@ -335,5 +335,3 @@ go test ./...
 - Per-peer firewall ACL — сейчас открытый порт открыт для всего camp'а
   одинаково; ограничение типа «SSH только Bob'у» требует identity-layer'а
   (см. TODO.md, Identity Phase 1).
-- Persistence seed'ов после рестарта engine'а — сейчас shared/-папка
-  не сканируется автоматически, надо повторно drag-and-drop.
