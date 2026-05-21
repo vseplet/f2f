@@ -1,3 +1,6 @@
 go 1.26.3
 
-use ./source/mac
+use (
+	./source/mac
+	./source/desktop
+)

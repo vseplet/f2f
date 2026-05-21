@@ -1,0 +1,11 @@
+build/bin
+node_modules
+frontend/dist
+
+# wails-generated bindings (re-created by `wails generate module` /
+# any wails build); don't track to avoid churn on every Go method add.
+frontend/wailsjs
+
+# macOS dirt
+.DS_Store
+**/.DS_Store

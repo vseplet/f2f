@@ -1,13 +1,22 @@
-.PHONY: run build kill camp-run camp-deploy camp-logs help
+.PHONY: run build kill camp-run camp-deploy camp-logs \
+        desktop-dev desktop-build desktop-open desktop-install-wails help
+
+# wails CLI lives under $GOPATH/bin — use it directly so a stale PATH
+# doesn't make `wails` "not found" while it's actually installed.
+WAILS ?= $(shell go env GOPATH)/bin/wails
 
 help:
 	@echo "f2f targets:"
-	@echo "  make run          run mac client (sudo, web UI on 127.0.0.1:2202)"
-	@echo "  make build        build release binary at ./f2f-mac"
-	@echo "  make kill         kill any running f2f-mac process"
-	@echo "  make camp-run     run camp server locally with bun"
-	@echo "  make camp-deploy  deploy camp to fly.io"
-	@echo "  make camp-logs    tail fly.io logs for camp"
+	@echo "  make run                  run mac client (sudo, web UI on 127.0.0.1:2202)"
+	@echo "  make build                build release binary at ./f2f-mac"
+	@echo "  make kill                 kill any running f2f-mac process"
+	@echo "  make camp-run             run camp server locally with bun"
+	@echo "  make camp-deploy          deploy camp to fly.io"
+	@echo "  make camp-logs            tail fly.io logs for camp"
+	@echo "  make desktop-dev          run f2f-desktop with hot-reload"
+	@echo "  make desktop-build        build f2f-desktop.app to source/desktop/build/bin"
+	@echo "  make desktop-open         build + open f2f-desktop.app"
+	@echo "  make desktop-install-wails  go install wails CLI (one-time)"
 
 run:
 	-sudo go run ./source/mac
@@ -27,3 +36,15 @@ camp-deploy:
 
 camp-logs:
 	cd source/camp && flyctl logs
+
+desktop-install-wails:
+	go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+desktop-dev:
+	cd source/desktop && $(WAILS) dev
+
+desktop-build:
+	cd source/desktop && $(WAILS) build
+
+desktop-open: desktop-build
+	open source/desktop/build/bin/f2f-desktop.app

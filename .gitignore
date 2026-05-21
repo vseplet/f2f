@@ -1,1 +1,5 @@
 /f2f-mac
+
+# macOS dirt — drop everywhere in the tree.
+.DS_Store
+**/.DS_Store
