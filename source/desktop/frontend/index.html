@@ -15,6 +15,8 @@
           <button type="button" data-tab="camp" class="ax-tab ax-tab-active">camp</button>
           <span class="ax-sep">·</span>
           <button type="button" data-tab="meet" class="ax-tab">meet</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="drop" class="ax-tab">drop</button>
         </div>
         <button id="btn-engine" type="button" class="ax-engine-btn state-loading">
           <span class="ax-engine-state">⋯</span>
@@ -177,6 +179,41 @@
 
       </div>
     </div><!-- /#tab-meet -->
+
+    <div id="tab-drop" class="tab-panel hidden">
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— my shared files</span>
+            <span class="ax-meta" id="drop-my-meta">0</span>
+          </div>
+          <div class="ax-section-status muted">
+            files in your shared catalog are seeded via BitTorrent over UDP (no DHT, no public trackers) to anyone in this camp. drop a file here to add it.
+          </div>
+          <div id="drop-dropzone" class="ax-dropzone">
+            <span>drop a file here · or click to choose</span>
+            <input type="file" id="drop-fileinput" style="display:none">
+          </div>
+          <div id="drop-my-list" class="ax-list"></div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— camp library</span>
+            <span class="ax-meta" id="drop-lib-meta">0</span>
+          </div>
+          <div id="drop-lib-list" class="ax-list"></div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— active downloads</span>
+            <span class="ax-meta" id="drop-dl-meta">0</span>
+          </div>
+          <div id="drop-dl-list" class="ax-list"></div>
+        </div>
+      </div>
+    </div><!-- /#tab-drop -->
 
   </div>
   <script src="./src/main.js" type="module"></script>

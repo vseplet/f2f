@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/desktop/internal/rendezvous"
+	internaltorrent "github.com/vseplet/f2f/source/desktop/internal/torrent"
 )
 
 // Config is what the UI passes when joining a camp.
@@ -55,6 +56,10 @@ type peer struct {
 	info       rendezvous.PeerInfo
 	udpAddr    *net.UDPAddr
 	lastSeenMs atomic.Int64
+	// files mirrors what this peer last broadcast in their 0xF3
+	// state envelope — populated by handleStatePacket, drained by
+	// Library() for the drop-tab UI.
+	files []PeerFile
 }
 
 // signalPrefix marks a UDP packet as "this is a signal-frame, not
@@ -88,6 +93,10 @@ type Client struct {
 	// prefix (we don't interpret them — that's the UI layer's job:
 	// WebRTC SDP, ICE candidates, ad-hoc pings, whatever). nil-safe.
 	OnSignal func(fromTunnelIP string, body []byte)
+
+	// torrent is the BT client; nil while file sharing isn't up.
+	// Mutated under c.mu.
+	torrent *internaltorrent.Client
 }
 
 func New() *Client {
@@ -175,6 +184,16 @@ func (c *Client) Start(cfg Config) error {
 	// Hole-punch sender — 1Hz burst until each peer answers, then 25s keepalive.
 	c.workers.Add(1)
 	go c.holePunchLoop(ctx)
+	// BT client comes up in its own goroutine — anacrolix init is
+	// slow, we don't block engine.Start on it. Failure is logged but
+	// non-fatal (everything else still works without file sharing).
+	go c.startTorrent()
+	// Periodic state broadcast (0xF3 packets carrying my files list).
+	c.workers.Add(1)
+	go c.stateBroadcastLoop(ctx)
+	// Drop torrents whose files are gone + re-feed peers on stalls.
+	c.workers.Add(1)
+	go c.pruneLoop(ctx)
 
 	return nil
 }
@@ -191,6 +210,7 @@ func (c *Client) Stop() error {
 		_ = c.udp.Close()
 	}
 	c.workers.Wait()
+	c.stopTorrent()
 	c.mu.Lock()
 	c.peers = map[string]*peer{}
 	c.mu.Unlock()
@@ -335,11 +355,19 @@ func (c *Client) recvLoop(ctx context.Context) {
 		c.mu.Unlock()
 		// Signal-frame dispatch happens outside the lock so a slow
 		// OnSignal handler doesn't block other peers' updates.
-		if fromPeer != nil && n >= 1 && pkt[0] == signalPrefix {
-			if cb := c.OnSignal; cb != nil {
+		if fromPeer != nil && n >= 1 {
+			switch pkt[0] {
+			case signalPrefix:
+				if cb := c.OnSignal; cb != nil {
+					body := make([]byte, n-1)
+					copy(body, pkt[1:])
+					cb(fromPeer.info.TunnelIP, body)
+				}
+			case statePrefix:
+				// State envelope (peer's files catalog etc).
 				body := make([]byte, n-1)
 				copy(body, pkt[1:])
-				cb(fromPeer.info.TunnelIP, body)
+				c.handleStatePacket(fromPeer, body)
 			}
 		}
 	}

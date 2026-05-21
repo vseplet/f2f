@@ -2,6 +2,7 @@ import './style.css';
 
 import { Start, Stop, Status } from '../wailsjs/go/main/App';
 import { startMeet } from './meet.js';
+import { startDrop } from './drop.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -206,3 +207,5 @@ setInterval(refresh, 2000);
 // Hand the meet tab over to its module — owns all of #ax-* DOM and the
 // 'signal' event subscription.
 startMeet();
+// Drop tab — torrent UI, polling MyFiles/Library/Downloads on a tick.
+startDrop();
