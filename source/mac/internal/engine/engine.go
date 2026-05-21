@@ -451,17 +451,19 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("UDP listening on %s", e.udp.LocalAddr())
 	}
 
-	// Firewall: default-deny inbound on the utun interface, allow
-	// only f2f-internal ports + user-configured ones. Failure here
-	// is non-fatal — tunnel still works, just without input filtering.
+	// Firewall: default-deny inbound on the utun interface for
+	// packets directed at OUR tunnel_ip (other peers' addresses and
+	// egress-forwarded packets are unaffected). Allow only f2f-
+	// internal ports + user-configured ones. Failure here is non-
+	// fatal — tunnel still works, just without input filtering.
 	e.userFirewall = loadUserFirewall()
-	fw, err := firewall.Open(tun.Name(), mergeFirewallRules(e.userFirewall))
+	fw, err := firewall.Open(tun.Name(), localIP, mergeFirewallRules(e.userFirewall))
 	if err != nil {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
 	} else {
 		e.fw = fw
-		log.Printf("firewall: pf anchor %q on %s, %d built-in + %d user rule(s)",
-			fw.Anchor(), tun.Name(), len(builtinFirewallPorts), countEnabled(e.userFirewall))
+		log.Printf("firewall: pf anchor %q on %s scoped to %s/32, %d built-in + %d user rule(s)",
+			fw.Anchor(), tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
