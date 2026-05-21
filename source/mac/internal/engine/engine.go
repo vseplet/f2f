@@ -705,6 +705,17 @@ func firewallStatePath() string {
 	return filepath.Join(userHome(), "Library", "Application Support", "f2f", "firewall.json")
 }
 
+// FirewallActive reports whether the pf anchor for the inbound utun
+// filter is currently loaded — true means user-toggled rules are
+// actually enforced by the kernel, false means the engine isn't
+// running (or pf-load failed at startup and we fell back to no
+// filtering).
+func (e *Engine) FirewallActive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fw != nil
+}
+
 // BuiltinFirewallPorts returns the always-on f2f-internal allow list
 // (read-only from the UI's perspective).
 func (e *Engine) BuiltinFirewallPorts() []FirewallPort {

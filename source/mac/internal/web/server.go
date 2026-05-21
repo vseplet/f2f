@@ -689,9 +689,12 @@ func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListFirewall returns the inbound-utun allow list: built-in
-// f2f ports (read-only) + user-configured ports.
+// f2f ports (read-only) + user-configured ports. `active` reflects
+// whether the pf anchor is loaded — false = engine stopped or pf
+// load failed, in which case ports show as inactive in UI.
 func (s *Server) handleListFirewall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  s.engine.FirewallActive(),
 		"builtin": s.engine.BuiltinFirewallPorts(),
 		"user":    s.engine.UserFirewallPorts(),
 	})
@@ -713,6 +716,7 @@ func (s *Server) handleSetFirewall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  s.engine.FirewallActive(),
 		"builtin": s.engine.BuiltinFirewallPorts(),
 		"user":    s.engine.UserFirewallPorts(),
 	})

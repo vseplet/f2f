@@ -729,10 +729,12 @@ $(function () {
   // or the engine breaks. User entries support toggle on/off (without
   // losing the row) and delete.
   let firewallUser = [];
+  let firewallActive = false;
   function refreshFirewall() {
     $.getJSON('/api/firewall', (data) => {
       const builtin = (data && Array.isArray(data.builtin)) ? data.builtin : [];
       const user = (data && Array.isArray(data.user)) ? data.user : [];
+      firewallActive = !!(data && data.active);
       firewallUser = user;
       renderFirewall(builtin, user);
     }).fail(() => {
@@ -744,7 +746,8 @@ $(function () {
     const $u = $('#firewall-user-list');
     $b.empty(); $u.empty();
     const enabledUser = user.filter((p) => p.enabled).length;
-    $('#firewall-meta').text((builtin.length + enabledUser) + ' open');
+    const totalOpen = builtin.length + enabledUser;
+    $('#firewall-meta').text(firewallActive ? (totalOpen + ' open') : 'inactive');
     builtin.forEach((p) => $b.append(renderFirewallRow(p, true)));
     if (user.length === 0) {
       $u.append('<div class="ax-list-empty">no user-defined ports · default-deny on everything else.</div>');
@@ -752,10 +755,26 @@ $(function () {
       user.forEach((p, idx) => $u.append(renderFirewallRow(p, false, idx)));
     }
   }
+  // makeFirewallDot renders the same kind of indicator used for
+  // domain health. Color reflects what's *actually* enforced in pf:
+  // - green: engine running, firewall loaded, rule enabled.
+  // - red: engine running, firewall failed to load (pf error).
+  // - grey: rule disabled by user, OR engine stopped.
+  function makeFirewallDot(enabled) {
+    let cls, title;
+    if (!enabled) { cls = 'offline'; title = 'rule disabled'; }
+    else if (!firewallActive) { cls = 'unreachable'; title = 'firewall not active (engine stopped or pf failed)'; }
+    else { cls = 'reachable'; title = 'rule active in pf'; }
+    return $('<span class="ax-dot">').addClass(cls).attr('title', title).css({
+      'display': 'inline-block', 'width': '8px', 'height': '8px', 'border-radius': '50%',
+      'margin-right': '8px',
+    });
+  }
   function renderFirewallRow(p, builtin, idx) {
     const $row = $('<div class="ax-intercept">');
     const $head = $('<div class="ax-intercept-head" style="cursor:default">');
     $head.append($('<span class="ax-intercept-caret">').text(' '));
+    $head.append(makeFirewallDot(!!p.enabled));
     // Checkbox: built-in always checked + disabled; user entries toggleable.
     const $cb = $('<input type="checkbox" style="margin-right:6px">')
       .prop('checked', !!p.enabled)
