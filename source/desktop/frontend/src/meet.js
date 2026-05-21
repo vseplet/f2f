@@ -114,21 +114,44 @@ export function startMeet() {
   });
 
   // ---- local media ----
+  // Fault-tolerant: try audio+video → audio-only → video-only → no
+  // local stream. A peer without devices can still RECEIVE remote
+  // audio/video — they just can't send anything. Returning null from
+  // here is normal in that case; callers must guard against it.
   async function ensureLocalStream() {
     if (localStream) return localStream;
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    } catch (err) {
-      logLine('getUserMedia failed: ' + err.message);
-      throw err;
+    const attempts = [
+      { audio: true, video: true },
+      { audio: true, video: false },
+      { audio: false, video: true },
+    ];
+    let lastErr = null;
+    for (const constraints of attempts) {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Common errors: NotFoundError (no device), NotAllowedError (user
+        // denied), OverconstrainedError (impossible combo). Try the next
+        // fallback rather than giving up.
+      }
     }
-    // Start with mic+cam ON (matches user expectation when they click call).
-    micEnabled = true; camEnabled = true;
+    if (!localStream) {
+      logLine('no local media: ' + (lastErr ? lastErr.message : 'unknown') + ' — receive-only call');
+      $micBtn.disabled = true; $camBtn.disabled = true;
+      micEnabled = false; camEnabled = false;
+      updateMicCamUI();
+      return null;
+    }
+    micEnabled = localStream.getAudioTracks().length > 0;
+    camEnabled = localStream.getVideoTracks().length > 0;
     localStream.getAudioTracks().forEach((t) => (t.enabled = micEnabled));
     localStream.getVideoTracks().forEach((t) => (t.enabled = camEnabled));
     $videoYou.srcObject = localStream;
     try { await $videoYou.play(); } catch (_) {}
-    $micBtn.disabled = false; $camBtn.disabled = false;
+    $micBtn.disabled = !micEnabled;
+    $camBtn.disabled = !camEnabled;
     updateMicCamUI();
     const v = localStream.getVideoTracks()[0];
     if (v && v.getSettings) {
@@ -180,10 +203,17 @@ export function startMeet() {
     $callMeta.textContent = '';
     try {
       setState('connecting');
-      await ensureLocalStream();
+      await ensureLocalStream(); // may be null if no devices — fine
       pc = newPC();
-      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
-      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+      if (localStream) {
+        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+      } else {
+        // No outgoing tracks — explicitly add recv-only transceivers so
+        // the SDP includes m-lines for the remote side to send into.
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addTransceiver('video', { direction: 'recvonly' });
+      }
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await sendSignal({ kind: 'offer', sdp: offer.sdp });
       logLine('sent offer → ' + to);
@@ -234,16 +264,25 @@ export function startMeet() {
       }
       logLine('received offer from ' + callPartner);
       setState('connecting');
-      await ensureLocalStream();
-      pc = newPC();
-        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
-      await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-      for (const c of pendingCandidates) { try { await pc.addIceCandidate(c); } catch (_) {} }
-      pendingCandidates = [];
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await sendSignal({ kind: 'answer', sdp: answer.sdp });
-      logLine('sent answer');
+      try {
+        await ensureLocalStream(); // tolerates no devices
+        pc = newPC();
+        if (localStream) {
+          localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+        }
+        // setRemoteDescription creates transceivers based on the offer;
+        // no need to addTransceiver manually here.
+        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        for (const c of pendingCandidates) { try { await pc.addIceCandidate(c); } catch (_) {} }
+        pendingCandidates = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await sendSignal({ kind: 'answer', sdp: answer.sdp });
+        logLine('sent answer');
+      } catch (err) {
+        logLine('answer flow failed: ' + err.message);
+        teardown();
+      }
     } else if (msg.kind === 'answer') {
       logLine('received answer');
       if (!pc) return;

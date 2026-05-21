@@ -31,6 +31,32 @@ function setEngineBtn(state, label, meta) {
 }
 
 let pendingOp = false;
+// Persist identity across launches — the user shouldn't have to re-type
+// their nickname / camp id every time they open the app.
+const IDENTITY_KEY = 'f2f:desktop-identity';
+function loadIdentity() {
+  try {
+    const raw = localStorage.getItem(IDENTITY_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (v && typeof v.name === 'string' && typeof v.id === 'string') return v;
+  } catch (_) {}
+  return null;
+}
+function saveIdentity(name, id) {
+  try { localStorage.setItem(IDENTITY_KEY, JSON.stringify({ name, id })); } catch (_) {}
+}
+(function restoreIdentity() {
+  const v = loadIdentity();
+  if (!v) return;
+  if (!$('#camp-name').value) $('#camp-name').value = v.name;
+  if (!$('#camp-id').value) $('#camp-id').value = v.id;
+})();
+// Save every keystroke so even if the user quits without starting we
+// don't lose what they typed.
+$('#camp-name').addEventListener('input', () => saveIdentity($('#camp-name').value.trim(), $('#camp-id').value.trim()));
+$('#camp-id').addEventListener('input', () => saveIdentity($('#camp-name').value.trim(), $('#camp-id').value.trim()));
+
 $engineBtn.addEventListener('click', async () => {
   if (pendingOp) return;
   const s = await Status().catch(() => null);
@@ -50,6 +76,7 @@ $engineBtn.addEventListener('click', async () => {
   const name = $('#camp-name').value.trim();
   const id = $('#camp-id').value.trim();
   if (!name || !id) { alert('name and camp id required'); return; }
+  saveIdentity(name, id);
   pendingOp = true;
   setEngineBtn('loading', 'starting…', '');
   try {
