@@ -20,6 +20,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -340,6 +341,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/files/mine/{hash}", s.handleRemoveMyFile)
 	mux.HandleFunc("POST /api/files/download", s.handleAddDownload)
 	mux.HandleFunc("GET /api/files/downloads", s.handleListDownloads)
+	mux.HandleFunc("POST /api/files/reveal", s.handleRevealFile)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
@@ -857,12 +859,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	t := s.engine.Torrent()
-	if t == nil {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
-		return
-	}
-	d, err := t.AddDownload(req.Magnet, req.Peers)
+	d, err := s.engine.AddDownload(req.Magnet, req.Peers)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -887,12 +884,71 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 			"started_at": d.StartedAt.Unix(),
 		}
 		if d.Torrent != nil && d.Torrent.Info() != nil {
-			row["bytes_completed"] = d.Torrent.BytesCompleted()
+			done := d.Torrent.BytesCompleted()
+			row["bytes_completed"] = done
 			row["bytes_missing"] = d.Torrent.BytesMissing()
+			complete := d.Torrent.BytesMissing() == 0
+			row["complete"] = complete
+			// With cfg.Seed=true the same Torrent keeps uploading
+			// once it has all pieces — that's our "seeding" state.
+			row["seeding"] = complete
+			if complete {
+				row["path"] = t.DownloadPath(d)
+			}
 		}
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRevealFile runs `open -R <path>` so macOS selects the file in
+// Finder. Restricted to paths under SharedDir or DownloadsDir — we
+// don't want this endpoint to double as a generic "open anything on
+// the filesystem" backdoor.
+func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	abs, err := filepath.Abs(body.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	shared, _ := filepath.Abs(t.SharedDir())
+	downloads, _ := filepath.Abs(s.engine.DownloadsDir())
+	if !strings.HasPrefix(abs, shared+string(filepath.Separator)) &&
+		!strings.HasPrefix(abs, downloads+string(filepath.Separator)) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("path outside f2f-managed dirs"))
+		return
+	}
+	if _, err := os.Stat(abs); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	// Engine runs as root via sudo — `open` itself only works in a
+	// user GUI session, so drop privileges to the invoking user.
+	// SUDO_USER is always set when launched through sudo; fall
+	// through to a raw `open` if we weren't sudo'd (unusual).
+	var cmd *exec.Cmd
+	if su := os.Getenv("SUDO_USER"); su != "" {
+		cmd = exec.Command("/usr/bin/sudo", "-u", su, "/usr/bin/open", "-R", abs)
+	} else {
+		cmd = exec.Command("/usr/bin/open", "-R", abs)
+	}
+	if err := cmd.Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func isLoopback(remoteAddr string) bool {

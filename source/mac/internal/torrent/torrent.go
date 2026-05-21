@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -218,7 +219,8 @@ func (c *Client) RemoveSeed(infoHashHex string) error {
 	return nil
 }
 
-// ListSeeds returns a copy of the active seed list.
+// ListSeeds returns a copy of the active seed list, sorted by name
+// (then info_hash) so callers get stable ordering across calls.
 func (c *Client) ListSeeds() []*SeedHandle {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,6 +228,12 @@ func (c *Client) ListSeeds() []*SeedHandle {
 	for _, h := range c.seeding {
 		out = append(out, h)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].InfoHash < out[j].InfoHash
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
 }
 
@@ -267,7 +275,8 @@ func (c *Client) AddDownload(magnetOrHash string, peerAddrs []string) (*Download
 	return d, nil
 }
 
-// ListDownloads returns a copy of all known downloads (in progress + done).
+// ListDownloads returns a copy of all known downloads (in progress +
+// done), sorted by start time so newest stays at the bottom.
 func (c *Client) ListDownloads() []*Download {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -275,7 +284,27 @@ func (c *Client) ListDownloads() []*Download {
 	for _, d := range c.loading {
 		out = append(out, d)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].StartedAt.Equal(out[j].StartedAt) {
+			return out[i].InfoHash < out[j].InfoHash
+		}
+		return out[i].StartedAt.Before(out[j].StartedAt)
+	})
 	return out
+}
+
+// DownloadPath returns the absolute on-disk path of a completed
+// download's primary file. Empty string if the torrent has no info
+// yet (metadata-fetch still in flight) or no files.
+func (c *Client) DownloadPath(d *Download) string {
+	if d == nil || d.Torrent == nil || d.Torrent.Info() == nil {
+		return ""
+	}
+	files := d.Torrent.Files()
+	if len(files) == 0 {
+		return ""
+	}
+	return filepath.Join(c.opts.DownloadsDir, files[0].Path())
 }
 
 // SharedDir returns the directory where seeded files live. UI uploads

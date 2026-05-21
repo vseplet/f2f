@@ -873,6 +873,30 @@ $(function () {
         else renderMyFiles([]);
       });
   }
+  // revealInFinder asks the backend to run `open -R <path>` so macOS
+  // pops the file open and selects it in Finder. Use the same helper
+  // for every clickable file name across my-files, library (no-op
+  // when not downloaded yet), and downloads.
+  function revealInFinder(path) {
+    if (!path) return;
+    $.ajax({
+      url: '/api/files/reveal',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ path }),
+    }).fail((xhr) => alert('Open in Finder failed: ' + errorOf(xhr)));
+  }
+  // makeFileLink builds an anchor that triggers revealInFinder on
+  // click. If path is empty (e.g. peer-side library entry we haven't
+  // downloaded yet) renders plain text — no link.
+  function makeFileLink(name, path) {
+    if (!path) {
+      return $('<span class="ax-intercept-spec">').text(name);
+    }
+    return $('<a class="ax-intercept-spec ax-domain-link" href="#">').text(name)
+      .on('click', (e) => { e.preventDefault(); revealInFinder(path); });
+  }
+
   function renderMyFiles(list, errMsg) {
       const arr = Array.isArray(list) ? list : [];
       $('#drop-my-meta').text(arr.length);
@@ -890,7 +914,7 @@ $(function () {
         const $row = $('<div class="ax-intercept">');
         const $head = $('<div class="ax-intercept-head" style="cursor:default">');
         $head.append($('<span class="ax-intercept-caret">').text(' '));
-        $head.append($('<span class="ax-intercept-spec">').text(f.name));
+        $head.append(makeFileLink(f.name, f.path));
         $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(f.size)));
         $head.append($('<span class="ax-pill ax-pill-peer">').text(f.info_hash.slice(0, 12)));
         const $rm = $('<button class="ax-list-remove">remove</button>');
@@ -905,6 +929,12 @@ $(function () {
         $list.append($row);
       });
   }
+
+  // localDownloads is the latest /api/files/downloads payload, indexed
+  // by info_hash. Library uses it to know whether a peer's file is
+  // already on our disk (so we render an open-link instead of a
+  // download button).
+  let localDownloads = {};
 
   function refreshLibrary() {
     const others = livePeers.filter((p) => !p.self);
@@ -921,27 +951,43 @@ $(function () {
       return;
     }
     rows.forEach((r) => {
+      const local = localDownloads[r.info_hash];
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append($('<span class="ax-intercept-spec">').text(r.name));
+      // Already downloaded — name clickable to Finder, no download
+      // button. Otherwise — plain name + download button as before.
+      if (local && local.complete && local.path) {
+        $head.append(makeFileLink(r.name, local.path));
+      } else {
+        $head.append($('<span class="ax-intercept-spec">').text(r.name));
+      }
       $head.append($('<span class="ax-pill ax-pill-peer">').text('from ' + r.peer));
       $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(r.size)));
-      const $dl = $('<button class="ax-list-remove" style="color:#86b86b">download</button>');
-      $dl.on('click', () => {
-        // peer addr: <peer_tunnel_ip>:6881 — BT client listens there.
-        const peerAddr = r.peerTunnel + ':6881';
-        $.ajax({
-          url: '/api/files/download',
-          method: 'POST',
-          contentType: 'application/json',
-          data: JSON.stringify({ magnet: r.magnet, peers: [peerAddr] }),
-        })
-          .done(refreshDownloads)
-          .fail((xhr) => alert('Download failed: ' + errorOf(xhr)));
-      });
       $head.append($('<span class="ax-intercept-meta">'));
-      $head.append($dl);
+      if (local && local.complete) {
+        const label = local.seeding ? 'seeding' : 'downloaded';
+        $head.append($('<span class="ax-pill ax-pill-active" style="background:#86b86b;color:#000">').text(label));
+      } else if (local && !local.complete) {
+        // In progress — show percent inline, no extra download button.
+        const pct = local.size ? Math.floor(((local.bytes_completed || 0) / local.size) * 100) : 0;
+        $head.append($('<span class="ax-pill ax-pill-active">').text(pct + '%'));
+      } else {
+        const $dl = $('<button class="ax-list-remove" style="color:#86b86b">download</button>');
+        $dl.on('click', () => {
+          // peer addr: <peer_tunnel_ip>:6881 — BT client listens there.
+          const peerAddr = r.peerTunnel + ':6881';
+          $.ajax({
+            url: '/api/files/download',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ magnet: r.magnet, peers: [peerAddr] }),
+          })
+            .done(refreshDownloads)
+            .fail((xhr) => alert('Download failed: ' + errorOf(xhr)));
+        });
+        $head.append($dl);
+      }
       $row.append($head);
       $list.append($row);
     });
@@ -949,14 +995,25 @@ $(function () {
 
   function refreshDownloads() {
     $.ajax({ url: '/api/files/downloads', dataType: 'json' })
-      .done((list) => renderDownloads(list))
+      .done((list) => {
+        // Update lookup table for library — every entry is what we
+        // have locally (in-progress or completed).
+        localDownloads = {};
+        (Array.isArray(list) ? list : []).forEach((d) => { localDownloads[d.info_hash] = d; });
+        renderDownloads(list);
+        // Refresh library too — its status pills depend on this.
+        refreshLibrary();
+      })
       .fail((xhr) => {
         if (xhr.status === 503) renderDownloads([], 'torrent client not running');
         else renderDownloads([]);
       });
   }
   function renderDownloads(list, errMsg) {
-    const arr = Array.isArray(list) ? list : [];
+    // Active downloads = in-progress only; completed entries appear
+    // back in the library section with a "downloaded"/"seeding" pill.
+    const all = Array.isArray(list) ? list : [];
+    const arr = all.filter((d) => !d.complete);
     $('#drop-dl-meta').text(arr.length);
     const $list = $('#drop-dl-list');
     $list.empty();
@@ -972,7 +1029,8 @@ $(function () {
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append($('<span class="ax-intercept-spec">').text(d.name || d.info_hash.slice(0, 12)));
+      const displayName = d.name || d.info_hash.slice(0, 12);
+      $head.append($('<span class="ax-intercept-spec">').text(displayName));
       if (d.size) {
         const total = d.size;
         const done = d.bytes_completed || 0;

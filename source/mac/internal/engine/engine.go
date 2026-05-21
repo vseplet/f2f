@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,7 +297,8 @@ func New() *Engine {
 	}
 }
 
-// TrustedPeerCAs returns a snapshot for the UI panel.
+// TrustedPeerCAs returns a snapshot for the UI panel, sorted by peer
+// name so the list doesn't shuffle between polls.
 func (e *Engine) TrustedPeerCAs() []TrustedPeerCA {
 	e.trustedPeerCAsMu.Lock()
 	defer e.trustedPeerCAsMu.Unlock()
@@ -304,6 +306,12 @@ func (e *Engine) TrustedPeerCAs() []TrustedPeerCA {
 	for _, t := range e.trustedPeerCAs {
 		out = append(out, t)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PeerName == out[j].PeerName {
+			return out[i].Fingerprint < out[j].Fingerprint
+		}
+		return out[i].PeerName < out[j].PeerName
+	})
 	return out
 }
 
@@ -671,6 +679,10 @@ func (e *Engine) startTorrent() error {
 	// knowledge of them — UI shows an empty "my shared files" list
 	// after restart.
 	go e.rescanSharedDir(c, opts.SharedDir)
+	// Same idea for previously-downloaded files: replay the saved
+	// magnets so anacrolix re-checks them on disk and resumes
+	// seeding; UI's downloads section comes back populated.
+	go e.restoreDownloads(c)
 	return nil
 }
 
@@ -710,6 +722,126 @@ func (e *Engine) rescanSharedDir(c *internaltorrent.Client, dir string) {
 // Torrent returns the live BT client (nil if not running).
 func (e *Engine) Torrent() *internaltorrent.Client {
 	return e.torrent
+}
+
+// DownloadsDir exposes the on-disk path where incoming BT downloads
+// land. Web layer uses it to scope the reveal-in-Finder endpoint.
+func (e *Engine) DownloadsDir() string {
+	return e.torrentDownloadsDir()
+}
+
+// savedDownload is one entry in downloads.json — enough info to
+// re-register the torrent with anacrolix on next startup. Anacrolix
+// re-hashes on-disk files and immediately seeds whatever is already
+// there, so the user sees the download return.
+type savedDownload struct {
+	Magnet   string   `json:"magnet"`
+	InfoHash string   `json:"info_hash"`
+	Peers    []string `json:"peers,omitempty"`
+}
+
+func downloadsStatePath() string {
+	return filepath.Join(userHome(), "Library", "Application Support", "f2f", "downloads.json")
+}
+
+func loadSavedDownloads() []savedDownload {
+	data, err := os.ReadFile(downloadsStatePath())
+	if err != nil {
+		return nil
+	}
+	var out []savedDownload
+	if err := json.Unmarshal(data, &out); err != nil {
+		log.Printf("downloads: parse %s: %v", downloadsStatePath(), err)
+		return nil
+	}
+	return out
+}
+
+func saveDownloads(list []savedDownload) error {
+	path := downloadsStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// AddDownload wraps Torrent.AddDownload and persists the entry so it
+// survives engine restart. Idempotent — re-adding the same info_hash
+// (e.g. user re-clicks library row after restart) is a no-op from
+// anacrolix's perspective and we dedupe the saved list by info_hash.
+func (e *Engine) AddDownload(magnet string, peers []string) (*internaltorrent.Download, error) {
+	t := e.torrent
+	if t == nil {
+		return nil, fmt.Errorf("torrent client not running")
+	}
+	d, err := t.AddDownload(magnet, peers)
+	if err != nil {
+		return nil, err
+	}
+	saved := loadSavedDownloads()
+	for _, s := range saved {
+		if s.InfoHash == d.InfoHash {
+			return d, nil // already remembered
+		}
+	}
+	saved = append(saved, savedDownload{
+		Magnet: magnet, InfoHash: d.InfoHash, Peers: peers,
+	})
+	if err := saveDownloads(saved); err != nil {
+		log.Printf("downloads: persist: %v", err)
+	}
+	return d, nil
+}
+
+// restoreDownloads re-registers every persisted download with the
+// torrent client. Anacrolix re-checks on-disk pieces; complete files
+// become available for seeding immediately and appear in /api/files/
+// downloads with `complete=true` so the UI shows them.
+func (e *Engine) restoreDownloads(c *internaltorrent.Client) {
+	saved := loadSavedDownloads()
+	if len(saved) == 0 {
+		return
+	}
+	added := 0
+	for _, s := range saved {
+		if _, err := c.AddDownload(s.Magnet, s.Peers); err != nil {
+			log.Printf("downloads: restore %s: %v", s.InfoHash, err)
+			continue
+		}
+		added++
+	}
+	if added > 0 {
+		log.Printf("downloads: restored %d previously-downloaded torrent(s)", added)
+	}
+}
+
+// currentReflex returns our latest camp-observed external endpoint —
+// the value the camp server most recently told us about ourselves on
+// an announce reply. announce.HandlePacket keeps this fresh on every
+// reply, so this reflects the live NAT mapping (matters after Wi-Fi
+// switches, network changes etc.) instead of the boot-time value.
+// Returns "" when announce is not running or no reply has arrived
+// yet. e.campReflex is kept as a fallback for the bootstrap window
+// before the first reply.
+func (e *Engine) currentReflex() string {
+	if e.announce != nil {
+		if self := e.announce.Self(); self != nil {
+			if self.UDPEndpoint != "" {
+				return self.UDPEndpoint
+			}
+			if self.PublicIP != "" {
+				return self.PublicIP
+			}
+		}
+	}
+	if r := e.campReflex.Load(); r != nil {
+		return *r
+	}
+	return ""
 }
 
 // trustedPeersDir is where we cache peer CA certs (one file per peer)
@@ -1565,9 +1697,7 @@ func (e *Engine) Status() Status {
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
 			st.CampID = e.cfg.Camp.ID
-			if r := e.campReflex.Load(); r != nil {
-				st.CampReflex = *r
-			}
+			st.CampReflex = e.currentReflex()
 			if active := e.activeTunnelIP.Load(); active != nil {
 				st.ActivePeerTunnelIP = *active
 				if p, ok := e.peers[*active]; ok {
@@ -1601,10 +1731,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	}
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
-		selfEndpoint := ""
-		if r := e.campReflex.Load(); r != nil {
-			selfEndpoint = *r
-		}
+		selfEndpoint := e.currentReflex()
 		out = append(out, PeerStatusInfo{
 			Name:        e.cfg.Camp.Name,
 			TunnelIP:    e.cfg.LocalIP,
@@ -1616,7 +1743,16 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Domains:     e.MyDomains(),
 		})
 	}
-	for _, p := range e.peers {
+	// Sort peer-keys so the UI list is stable across refreshes —
+	// Go map iteration is randomised and the camp peer-table would
+	// otherwise shuffle every poll.
+	keys := make([]string, 0, len(e.peers))
+	for k := range e.peers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
@@ -1629,10 +1765,27 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Online:      p.Online,
 			Reachable:   p.Online && seen != 0 && now-seen < reachableWindowMs,
 			Active:      p.TunnelIP == active,
-			Domains:     append([]DomainEntry(nil), p.Domains...),
-			Files:       append([]PeerFile(nil), p.Files...),
+			Domains:     sortedDomains(p.Domains),
+			Files:       sortedFiles(p.Files),
 		})
 	}
+	return out
+}
+
+func sortedDomains(in []DomainEntry) []DomainEntry {
+	out := append([]DomainEntry(nil), in...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func sortedFiles(in []PeerFile) []PeerFile {
+	out := append([]PeerFile(nil), in...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].InfoHash < out[j].InfoHash
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
 }
 
