@@ -264,9 +264,33 @@
       <div class="ax-frame">
         <div class="ax-section">
           <div class="ax-section-title">
-            <span>— drop</span>
+            <span>— my shared files</span>
+            <span class="ax-meta" id="drop-my-meta">0</span>
           </div>
-          <div class="ax-section-status">empty</div>
+          <div class="ax-section-status muted">
+            files in your shared catalog are seeded via BitTorrent (no DHT, no public trackers) to anyone in this camp who pulls them. drop a file here to add it.
+          </div>
+          <div id="drop-dropzone" class="ax-dropzone">
+            <span>drop a file here · or click to choose</span>
+            <input type="file" id="drop-fileinput" style="display:none">
+          </div>
+          <div id="drop-my-list" class="ax-list"></div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— camp library</span>
+            <span class="ax-meta" id="drop-lib-meta">0</span>
+          </div>
+          <div id="drop-lib-list" class="ax-list"></div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— active downloads</span>
+            <span class="ax-meta" id="drop-dl-meta">0</span>
+          </div>
+          <div id="drop-dl-list" class="ax-list"></div>
         </div>
       </div>
     </div><!-- /#tab-drop -->

@@ -532,6 +532,20 @@ details.ax-advanced > .ax-advanced-body {
 .ax-frame .ax-dot.self { background: #c4a554; }
 .ax-frame .ax-dot.offline { background: #555; }
 .ax-dot.unknown { background: #4a4030; }
+
+/* drop-tab dropzone */
+.ax-dropzone {
+  border: 1px dashed #3a3024;
+  border-radius: 4px;
+  padding: 32px 16px;
+  text-align: center;
+  color: #7a6e5a;
+  cursor: pointer;
+  margin: 12px 0;
+  transition: background 80ms linear, border-color 80ms linear;
+}
+.ax-dropzone:hover { background: rgba(212, 200, 166, 0.03); border-color: #4a4030; }
+.ax-dropzone.is-drag { background: rgba(134, 184, 107, 0.06); border-color: #3a5a30; color: #86b86b; }
 .ax-frame .ax-peers tbody tr.is-offline { opacity: 0.55; }
 
 .ax-frame .ax-peers .muted { color: #666; }

@@ -31,6 +31,7 @@ import (
 	internaldns "github.com/vseplet/f2f/source/mac/internal/dns"
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/keychain"
+	internaltorrent "github.com/vseplet/f2f/source/mac/internal/torrent"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
 	"github.com/vseplet/f2f/source/mac/internal/route"
@@ -110,6 +111,7 @@ type PeerStatusInfo struct {
 	Active      bool          `json:"active"`
 	Self        bool          `json:"self,omitempty"`
 	Domains     []DomainEntry `json:"domains,omitempty"`
+	Files       []PeerFile    `json:"files,omitempty"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -164,6 +166,7 @@ type peerState struct {
 	Online      bool
 	LastSeenAt  int64
 	Domains     []DomainEntry
+	Files       []PeerFile   // populated by filesPollLoop
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -181,8 +184,9 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	egr      *egress.Egress
-	dnsSrv   *internaldns.Server // local DNS for <camp_id>.f2f
-	ca       *ca.CA              // local CA for the current camp_id
+	dnsSrv   *internaldns.Server     // local DNS for <camp_id>.f2f
+	ca       *ca.CA                  // local CA for the current camp_id
+	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
@@ -262,6 +266,15 @@ type TrustedPeerCA struct {
 type domainHealth struct {
 	Status    string // "ok" | "fail"
 	CheckedAt int64  // unix seconds
+}
+
+// PeerFile is one file entry from a peer's /api/files response,
+// rehydrated into our shape (Path stripped — peer-facing data only).
+type PeerFile struct {
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	InfoHash string `json:"info_hash"`
+	Magnet   string `json:"magnet"`
 }
 
 // New returns a fresh Engine. Start it to bring it up.
@@ -479,6 +492,8 @@ func (e *Engine) Start(cfg Config) error {
 		go e.domainPollLoop(ctx)
 		e.workers.Add(1)
 		go e.domainHealthLoop(ctx)
+		e.workers.Add(1)
+		go e.filesPollLoop(ctx)
 	}
 	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
 	// — 5353 is contended on macOS by mDNSResponder and any running
@@ -510,6 +525,24 @@ func (e *Engine) Start(cfg Config) error {
 		e.loadTrustedPeerCAs()
 		e.workers.Add(1)
 		go e.peerCAPollLoop(ctx)
+	}
+	// BitTorrent client for camp file sharing. Binds on <tunnel_ip>:6881
+	// — only reachable through utun, never the public internet.
+	// Start in a goroutine: anacrolix's NewClient can take a non-trivial
+	// moment, and we don't want engine.Start to block on it (would
+	// freeze the UI in "loading…").
+	if e.cfg.Camp != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("torrent: PANIC during startup: %v (file sharing disabled)", r)
+				}
+			}()
+			log.Printf("torrent: initialising client …")
+			if err := e.startTorrent(); err != nil {
+				log.Printf("torrent: %v (file sharing disabled)", err)
+			}
+		}()
 	}
 	if e.OnStarted != nil {
 		e.OnStarted(cfg.LocalIP)
@@ -563,6 +596,59 @@ func (e *Engine) ensureCA() error {
 // failed.
 func (e *Engine) CA() *ca.CA {
 	return e.ca
+}
+
+// torrentSharedDir / torrentDownloadsDir are the on-disk locations the
+// BT client uses. The shared dir is per-user (engine runs as root via
+// sudo, so we put it under $SUDO_USER's home so the UI can drag files
+// into it). DownloadsDir we put under ~/Downloads/f2f-drops/ — peers
+// sort into subfolders per sender at write time.
+func (e *Engine) torrentSharedDir() string {
+	home := userHome()
+	return filepath.Join(home, "Library", "Application Support", "f2f", "shared")
+}
+
+func (e *Engine) torrentDownloadsDir() string {
+	home := userHome()
+	return filepath.Join(home, "Downloads", "f2f-drops")
+}
+
+// userHome returns the home of the invoking (non-root) user. Engine runs
+// as root via sudo, but files should be owned/visible to the user.
+func userHome() string {
+	if su := os.Getenv("SUDO_USER"); su != "" {
+		// /Users/<su>
+		return filepath.Join("/Users", su)
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	return "/tmp"
+}
+
+func (e *Engine) startTorrent() error {
+	opts := internaltorrent.Options{
+		ListenAddr:   net.JoinHostPort(e.cfg.LocalIP, fmt.Sprint(internaltorrent.DefaultPort)),
+		SharedDir:    e.torrentSharedDir(),
+		DownloadsDir: e.torrentDownloadsDir(),
+	}
+	log.Printf("torrent: binding on %s …", opts.ListenAddr)
+	t0 := time.Now()
+	c, err := internaltorrent.New(opts)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.torrent = c
+	e.mu.Unlock()
+	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
+		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
+	return nil
+}
+
+// Torrent returns the live BT client (nil if not running).
+func (e *Engine) Torrent() *internaltorrent.Client {
+	return e.torrent
 }
 
 // trustedPeersDir is where we cache peer CA certs (one file per peer)
@@ -854,6 +940,74 @@ func (e *Engine) CampPeers() []rendezvous.PeerInfo {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
+// filesPollLoop walks online peers every minute and pulls /api/files.
+// The returned list is cached on peerState.Files so the UI's "camp
+// library" can show what's available. We don't talk BT yet — that's
+// triggered when the user clicks download.
+func (e *Engine) filesPollLoop(ctx context.Context) {
+	defer e.workers.Done()
+	// Give the camp poll a chance to populate peers first.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(7 * time.Second):
+	}
+	e.pollAllPeerFiles(ctx)
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		e.pollAllPeerFiles(ctx)
+	}
+}
+
+func (e *Engine) pollAllPeerFiles(ctx context.Context) {
+	type target struct {
+		tunnelIP string
+		name     string
+	}
+	var targets []target
+	e.mu.Lock()
+	for tip, p := range e.peers {
+		if !p.Online {
+			continue
+		}
+		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+	}
+	port := e.tunnelHTTPPort
+	e.mu.Unlock()
+	if port == "" {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, t := range targets {
+		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/files"
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		var files []PeerFile
+		err = json.NewDecoder(resp.Body).Decode(&files)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		e.mu.Lock()
+		if p, ok := e.peers[t.tunnelIP]; ok {
+			p.Files = files
+		}
+		e.mu.Unlock()
+	}
+}
+
 // domainHealthLoop TCP-dials each published domain on 127.0.0.1:<port>
 // every few seconds and stamps the result onto myDomainHealth. The
 // status flows out through MyDomains() — into /api/my-domains for the
@@ -1103,6 +1257,9 @@ func (e *Engine) Stop() error {
 	}
 
 	e.mu.Lock()
+	if e.torrent != nil {
+		_ = e.torrent.Close()
+	}
 	e.running = false
 	e.tun = nil
 	e.udp = nil
@@ -1110,6 +1267,7 @@ func (e *Engine) Stop() error {
 	e.egr = nil
 	e.dnsSrv = nil
 	e.ca = nil
+	e.torrent = nil
 	e.announce = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
@@ -1231,6 +1389,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Reachable:   p.Online && seen != 0 && now-seen < reachableWindowMs,
 			Active:      p.TunnelIP == active,
 			Domains:     append([]DomainEntry(nil), p.Domains...),
+			Files:       append([]PeerFile(nil), p.Files...),
 		})
 	}
 	return out

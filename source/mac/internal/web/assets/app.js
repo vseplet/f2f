@@ -752,15 +752,175 @@ $(function () {
     });
   }
 
+  // ---- drop tab: shared files + camp library + active downloads ----
+  function refreshMyFiles() {
+    $.ajax({ url: '/api/files/mine', dataType: 'json' })
+      .done((list) => renderMyFiles(list))
+      .fail((xhr) => {
+        if (xhr.status === 503) renderMyFiles([], 'torrent client not running');
+        else renderMyFiles([]);
+      });
+  }
+  function renderMyFiles(list, errMsg) {
+      const arr = Array.isArray(list) ? list : [];
+      $('#drop-my-meta').text(arr.length);
+      const $list = $('#drop-my-list');
+      $list.empty();
+      if (errMsg) {
+        $list.append($('<div class="ax-list-empty">').text(errMsg));
+        return;
+      }
+      if (arr.length === 0) {
+        $list.append('<div class="ax-list-empty">nothing shared yet.</div>');
+        return;
+      }
+      arr.forEach((f) => {
+        const $row = $('<div class="ax-intercept">');
+        const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+        $head.append($('<span class="ax-intercept-caret">').text(' '));
+        $head.append($('<span class="ax-intercept-spec">').text(f.name));
+        $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(f.size)));
+        $head.append($('<span class="ax-pill ax-pill-peer">').text(f.info_hash.slice(0, 12)));
+        const $rm = $('<button class="ax-list-remove">remove</button>');
+        $rm.on('click', () => {
+          $.ajax({ url: '/api/files/mine/' + encodeURIComponent(f.info_hash), method: 'DELETE' })
+            .done(refreshMyFiles)
+            .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
+        });
+        $head.append($('<span class="ax-intercept-meta">'));
+        $head.append($rm);
+        $row.append($head);
+        $list.append($row);
+      });
+  }
+
+  function refreshLibrary() {
+    const others = livePeers.filter((p) => !p.self);
+    const rows = [];
+    others.forEach((p) => {
+      const files = Array.isArray(p.files) ? p.files : [];
+      files.forEach((f) => rows.push({ peer: p.name, peerTunnel: p.tunnel_ip, ...f }));
+    });
+    $('#drop-lib-meta').text(rows.length);
+    const $list = $('#drop-lib-list');
+    $list.empty();
+    if (rows.length === 0) {
+      $list.append('<div class="ax-list-empty">no files shared by any peer yet.</div>');
+      return;
+    }
+    rows.forEach((r) => {
+      const $row = $('<div class="ax-intercept">');
+      const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+      $head.append($('<span class="ax-intercept-caret">').text(' '));
+      $head.append($('<span class="ax-intercept-spec">').text(r.name));
+      $head.append($('<span class="ax-pill ax-pill-peer">').text('from ' + r.peer));
+      $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(r.size)));
+      const $dl = $('<button class="ax-list-remove" style="color:#86b86b">download</button>');
+      $dl.on('click', () => {
+        // peer addr: <peer_tunnel_ip>:6881 — BT client listens there.
+        const peerAddr = r.peerTunnel + ':6881';
+        $.ajax({
+          url: '/api/files/download',
+          method: 'POST',
+          contentType: 'application/json',
+          data: JSON.stringify({ magnet: r.magnet, peers: [peerAddr] }),
+        })
+          .done(refreshDownloads)
+          .fail((xhr) => alert('Download failed: ' + errorOf(xhr)));
+      });
+      $head.append($('<span class="ax-intercept-meta">'));
+      $head.append($dl);
+      $row.append($head);
+      $list.append($row);
+    });
+  }
+
+  function refreshDownloads() {
+    $.ajax({ url: '/api/files/downloads', dataType: 'json' })
+      .done((list) => renderDownloads(list))
+      .fail((xhr) => {
+        if (xhr.status === 503) renderDownloads([], 'torrent client not running');
+        else renderDownloads([]);
+      });
+  }
+  function renderDownloads(list, errMsg) {
+    const arr = Array.isArray(list) ? list : [];
+    $('#drop-dl-meta').text(arr.length);
+    const $list = $('#drop-dl-list');
+    $list.empty();
+    if (errMsg) {
+      $list.append($('<div class="ax-list-empty">').text(errMsg));
+      return;
+    }
+    if (arr.length === 0) {
+      $list.append('<div class="ax-list-empty">no active downloads.</div>');
+      return;
+    }
+    arr.forEach((d) => {
+      const $row = $('<div class="ax-intercept">');
+      const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+      $head.append($('<span class="ax-intercept-caret">').text(' '));
+      $head.append($('<span class="ax-intercept-spec">').text(d.name || d.info_hash.slice(0, 12)));
+      if (d.size) {
+        const total = d.size;
+        const done = d.bytes_completed || 0;
+        const pct = Math.floor((done / total) * 100);
+        $head.append($('<span class="ax-pill ax-pill-active">').text(pct + '%'));
+        $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(done) + ' / ' + fmtBytes(total)));
+      }
+      $head.append($('<span class="ax-intercept-meta">'));
+      $row.append($head);
+      $list.append($row);
+    });
+  }
+
+  // Drop-zone wiring.
+  (function () {
+    const $zone = $('#drop-dropzone');
+    const $inp = $('#drop-fileinput');
+    function upload(file) {
+      const fd = new FormData();
+      fd.append('file', file);
+      $.ajax({
+        url: '/api/files/mine/upload',
+        method: 'POST',
+        data: fd,
+        processData: false,
+        contentType: false,
+      })
+        .done(refreshMyFiles)
+        .fail((xhr) => alert('Upload failed: ' + errorOf(xhr)));
+    }
+    $zone.on('click', () => $inp.click());
+    $inp.on('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) upload(f);
+      $inp.val('');
+    });
+    $zone.on('dragover', (e) => { e.preventDefault(); $zone.addClass('is-drag'); });
+    $zone.on('dragleave', () => $zone.removeClass('is-drag'));
+    $zone.on('drop', (e) => {
+      e.preventDefault();
+      $zone.removeClass('is-drag');
+      const f = e.originalEvent.dataTransfer.files && e.originalEvent.dataTransfer.files[0];
+      if (f) upload(f);
+    });
+  })();
+
   restoreForm();
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();
   refreshTrustedPeers();
+  refreshMyFiles();
+  refreshDownloads();
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
   setInterval(refreshTrustedPeers, 5000);
+  setInterval(refreshMyFiles, 5000);
+  setInterval(refreshDownloads, 2000);
+  setInterval(refreshLibrary, 5000);
   // Known-domains panel reads from livePeers, which is updated in
   // applyStatus. Trigger a render on each status refresh.
   setInterval(renderKnownDomains, 3000);

@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -115,6 +117,7 @@ func (s *Server) BindTunnel(ip string) error {
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -320,6 +323,18 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
+
+	// File sharing via BitTorrent (camp-only, no DHT/public trackers).
+	// /api/files/mine — UI-facing CRUD for what we publish.
+	// /api/files — read-only listing exposed on the tunnel listener
+	// so peers can browse our catalog.
+	mux.HandleFunc("GET /api/files/mine", s.handleListMyFiles)
+	mux.HandleFunc("POST /api/files/mine", s.handleAddMyFile)
+	mux.HandleFunc("POST /api/files/mine/upload", s.handleUploadMyFile)
+	mux.HandleFunc("DELETE /api/files/mine/{hash}", s.handleRemoveMyFile)
+	mux.HandleFunc("POST /api/files/download", s.handleAddDownload)
+	mux.HandleFunc("GET /api/files/downloads", s.handleListDownloads)
+	mux.HandleFunc("GET /api/files", s.handleListFiles)
 
 	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
 	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
@@ -665,6 +680,187 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 // installed locally — fingerprint, common name, install timestamp.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+}
+
+// fileEntry is the JSON shape returned by /api/files and friends.
+type fileEntry struct {
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	InfoHash string `json:"info_hash"`
+	Magnet   string `json:"magnet"`
+	Path     string `json:"path,omitempty"` // omitted from peer-facing response
+}
+
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	out := []fileEntry{}
+	for _, h := range t.ListSeeds() {
+		out = append(out, fileEntry{
+			Name: h.Name, Size: h.Size,
+			InfoHash: h.InfoHash, Magnet: h.Magnet,
+			// Path intentionally omitted on peer-facing path; we strip
+			// below for tunnel listener requests.
+			Path: h.Path,
+		})
+	}
+	// Hide local filesystem path from peer-facing tunnel-listener requests.
+	if !isLoopback(r.RemoteAddr) {
+		for i := range out {
+			out[i].Path = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleListMyFiles(w http.ResponseWriter, r *http.Request) {
+	// Same as handleListFiles but always includes Path (UI is on loopback).
+	s.handleListFiles(w, r)
+}
+
+type addMyFileReq struct {
+	Path string `json:"path"`
+}
+
+func (s *Server) handleAddMyFile(w http.ResponseWriter, r *http.Request) {
+	var req addMyFileReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	h, err := t.AddSeed(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fileEntry{
+		Name: h.Name, Size: h.Size,
+		InfoHash: h.InfoHash, Magnet: h.Magnet, Path: h.Path,
+	})
+}
+
+// handleUploadMyFile saves an uploaded file into the shared directory
+// and starts seeding it. Body is multipart/form-data with a single
+// "file" part. Used by the UI's drag-and-drop area so the user doesn't
+// have to type filesystem paths.
+func (s *Server) handleUploadMyFile(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	// 8GiB cap on a single upload — generous, our overlay isn't a CDN.
+	if err := r.ParseMultipartForm(8 << 30); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer file.Close()
+	dstPath := filepath.Join(t.SharedDir(), filepath.Base(hdr.Filename))
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		os.Remove(dstPath)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	dst.Close()
+	h, err := t.AddSeed(dstPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fileEntry{
+		Name: h.Name, Size: h.Size,
+		InfoHash: h.InfoHash, Magnet: h.Magnet, Path: h.Path,
+	})
+}
+
+func (s *Server) handleRemoveMyFile(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	if err := t.RemoveSeed(r.PathValue("hash")); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type addDownloadReq struct {
+	Magnet string   `json:"magnet"`
+	Peers  []string `json:"peers"`
+}
+
+func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
+	var req addDownloadReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	d, err := t.AddDownload(req.Magnet, req.Peers)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, fileEntry{
+		Name: d.Name, Size: d.Size, InfoHash: d.InfoHash,
+	})
+}
+
+func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	out := []map[string]any{}
+	for _, d := range t.ListDownloads() {
+		row := map[string]any{
+			"info_hash":  d.InfoHash,
+			"name":       d.Name,
+			"size":       d.Size,
+			"started_at": d.StartedAt.Unix(),
+		}
+		if d.Torrent != nil && d.Torrent.Info() != nil {
+			row["bytes_completed"] = d.Torrent.BytesCompleted()
+			row["bytes_missing"] = d.Torrent.BytesMissing()
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1"
 }
 
 type startRequest struct {
