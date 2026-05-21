@@ -76,12 +76,17 @@ type SeedHandle struct {
 }
 
 // Download tracks one in-flight (or completed) incoming transfer.
+// Peers is the list we feed to anacrolix on AddDownload and re-feed
+// periodically while the torrent isn't complete — anacrolix sometimes
+// fails the initial dial (peer busy with another torrent) and won't
+// retry on its own without DHT/PEX/trackers, which we've disabled.
 type Download struct {
-	InfoHash string
-	Name     string
-	Size     int64
-	Torrent  *atorrent.Torrent
+	InfoHash  string
+	Name      string
+	Size      int64
+	Torrent   *atorrent.Torrent
 	StartedAt time.Time
+	Peers     []string
 }
 
 // New brings up a fresh BT client on the configured ListenAddr.
@@ -238,25 +243,22 @@ func (c *Client) ListSeeds() []*SeedHandle {
 }
 
 // AddDownload starts pulling a torrent identified by infoHash. Initial
-// peers are provided by the caller (we never use DHT/trackers).
+// peers are provided by the caller (we never use DHT/trackers). The
+// list is also stashed on the Download struct so the engine can
+// re-feed it periodically — anacrolix sometimes fails the initial
+// dial (peer busy with another torrent we're sharing) and without
+// DHT/PEX/trackers it has no way to find the same peer again.
 func (c *Client) AddDownload(magnetOrHash string, peerAddrs []string) (*Download, error) {
 	t, err := c.atc.AddMagnet(magnetOrHash)
 	if err != nil {
 		return nil, fmt.Errorf("torrent: add magnet: %w", err)
 	}
-	// Manually add peers we know from the camp.
-	addPeers := make([]atorrent.PeerInfo, 0, len(peerAddrs))
-	for _, a := range peerAddrs {
-		addPeers = append(addPeers, atorrent.PeerInfo{
-			Addr:   strAddr(a),
-			Source: atorrent.PeerSourceDirect,
-		})
-	}
-	t.AddPeers(addPeers)
+	feedPeers(t, peerAddrs)
 	d := &Download{
 		InfoHash:  t.InfoHash().HexString(),
 		Torrent:   t,
 		StartedAt: time.Now(),
+		Peers:     append([]string(nil), peerAddrs...),
 	}
 	c.mu.Lock()
 	c.loading[d.InfoHash] = d
@@ -273,6 +275,29 @@ func (c *Client) AddDownload(magnetOrHash string, peerAddrs []string) (*Download
 		t.DownloadAll()
 	}()
 	return d, nil
+}
+
+// FeedPeers re-adds the recorded peer list to the torrent. Called
+// from the engine's refresh loop while a download is in flight.
+func (c *Client) FeedPeers(d *Download) {
+	if d == nil || d.Torrent == nil || len(d.Peers) == 0 {
+		return
+	}
+	feedPeers(d.Torrent, d.Peers)
+}
+
+func feedPeers(t *atorrent.Torrent, peerAddrs []string) {
+	if t == nil || len(peerAddrs) == 0 {
+		return
+	}
+	addPeers := make([]atorrent.PeerInfo, 0, len(peerAddrs))
+	for _, a := range peerAddrs {
+		addPeers = append(addPeers, atorrent.PeerInfo{
+			Addr:   strAddr(a),
+			Source: atorrent.PeerSourceDirect,
+		})
+	}
+	t.AddPeers(addPeers)
 }
 
 // ListDownloads returns a copy of all known downloads (in progress +

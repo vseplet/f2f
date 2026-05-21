@@ -730,14 +730,35 @@ func (e *Engine) startTorrent() error {
 	return nil
 }
 
-// pruneLoop drops Download/Seed entries whose on-disk file is gone.
-// Runs every 30s — cheap, and most users delete only occasionally.
+// pruneLoop drops Download/Seed entries whose on-disk file is gone,
+// and re-feeds peer addresses to active downloads so anacrolix has a
+// chance to re-dial peers that were unreachable on the first try.
+// Without re-feeding, a download that loses (or never makes) its
+// peer connection stays stuck at 0% forever — DHT/PEX/trackers are
+// disabled, anacrolix has no other way to find that peer again.
 func (e *Engine) pruneLoop(c *internaltorrent.Client) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	e.pruneOnce(c) // immediate pass on start
 	for range ticker.C {
 		e.pruneOnce(c)
+		e.refeedActiveDownloads(c)
+	}
+}
+
+func (e *Engine) refeedActiveDownloads(c *internaltorrent.Client) {
+	for _, d := range c.ListDownloads() {
+		if d.Torrent == nil || d.Torrent.Info() == nil {
+			// Still waiting for metadata — re-feed too, that's
+			// exactly the stuck-at-0% case.
+			c.FeedPeers(d)
+			continue
+		}
+		total := d.Torrent.Info().TotalLength()
+		if total > 0 && d.Torrent.BytesCompleted() >= total {
+			continue // complete, no need
+		}
+		c.FeedPeers(d)
 	}
 }
 
