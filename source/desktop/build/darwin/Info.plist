@@ -23,6 +23,10 @@
         <string>true</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
+        <key>NSCameraUsageDescription</key>
+        <string>f2f-desktop uses your camera for peer-to-peer video calls.</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>f2f-desktop uses your microphone for peer-to-peer audio calls.</string>
         {{if .Info.FileAssociations}}
         <key>CFBundleDocumentTypes</key>
         <array>

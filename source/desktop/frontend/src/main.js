@@ -1,7 +1,7 @@
 import './style.css';
 
-import { Start, Stop, Status, SendSignal } from '../wailsjs/go/main/App';
-import { EventsOn } from '../wailsjs/runtime/runtime';
+import { Start, Stop, Status } from '../wailsjs/go/main/App';
+import { startMeet } from './meet.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -147,49 +147,6 @@ function escapeHtml(s) {
 refresh();
 setInterval(refresh, 2000);
 
-// ---- meet tab: signal transport ----
-const $logBody = $('#ax-log-body');
-const $logCount = $('#ax-log-count');
-const $callBtn = $('#ax-call-btn');
-const $callMeta = $('#ax-call-meta');
-const $callSel = $('#ax-call-peer');
-let logLines = 0;
-
-function meetLog(line) {
-  logLines++;
-  $logCount.textContent = logLines;
-  const div = document.createElement('div');
-  div.textContent = line;
-  $logBody.appendChild(div);
-  $logBody.scrollTop = $logBody.scrollHeight;
-}
-
-$('#ax-log-clear').addEventListener('click', () => {
-  $logBody.innerHTML = '';
-  logLines = 0;
-  $logCount.textContent = '0';
-});
-
-// Subscribe to signal-frames from peers. Body is currently a plain
-// string; for WebRTC we'll JSON-parse it (Step 2) — for now we just
-// log so the transport can be verified end-to-end.
-EventsOn('signal', (msg) => {
-  meetLog(`← from ${msg.from}: ${msg.body}`);
-});
-
-$callBtn.addEventListener('click', async () => {
-  const to = $callSel.value;
-  if (!to) {
-    $callMeta.textContent = 'no peer selected';
-    return;
-  }
-  const body = `ping from desktop ${Date.now()}`;
-  try {
-    await SendSignal(to, body);
-    meetLog(`→ to ${to}: ${body}`);
-    $callMeta.textContent = '';
-  } catch (e) {
-    $callMeta.textContent = 'send failed';
-    meetLog(`! send to ${to} failed: ${e?.message || e}`);
-  }
-});
+// Hand the meet tab over to its module — owns all of #ax-* DOM and the
+// 'signal' event subscription.
+startMeet();
