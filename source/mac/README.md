@@ -121,8 +121,13 @@ peer-у. У них поднимется egress, и пакет уйдёт в пу
 - **`http://gitlab.<camp_id>.f2f:3000`** — прямой проход в утун,
   proxy не задействован.
 
+Поле **host** опционально — default `127.0.0.1`. Можно указать
+`localhost` (для Node ≥17 dev-серверов с IPv6-only bind'ом), или
+IP/имя другой машины в LAN (`192.168.1.5`, `nas.local`) если хочешь
+выставить наружу её сервис под camp-доменом.
+
 Точка слева от каждого домена — health: зелёная = backend отвечает на
-TCP-dial 127.0.0.1:port, красная = не отвечает, серая = не проверено.
+TCP-dial `<host>:port`, красная = не отвечает, серая = не проверено.
 Этот же статус peer'ы видят у твоих доменов через polling.
 
 Под ним — known domains (опубликованное другими peer-ами) и trusted
@@ -147,17 +152,29 @@ P2P file sharing внутри camp-а через BitTorrent.
 
 - **My shared files**: drag-and-drop файл в зону → файл копируется в
   `~/Library/Application Support/f2f/shared/` и начинает seed'иться
-  через BT-клиент на `<tunnel_ip>:6881`. Имя, размер, info_hash.
-  Remove снимает с раздачи (файл на диске остаётся).
-- **Camp library**: всё что seed'ят другие peer-ы (filesPollLoop
-  каждую минуту дёргает `/api/files` у online-пиров). Кнопка
-  download стартует BT-load — engine добавляет magnet с известным
-  peer'овским адресом, anacrolix качает.
-- **Active downloads**: прогресс активных (% + bytes_completed / size).
+  через BT-клиент на `<tunnel_ip>:6881`. Клик на имени открывает
+  файл в Finder. Remove снимает с раздачи (файл на диске остаётся).
+- **Camp library**: всё что seed'ят другие peer-ы (раз в минуту
+  опрашивается `/api/files` у online-peer'ов). У записи которую
+  **уже скачал** — имя кликабельное (Finder) + зелёный pill
+  `downloaded`/`seeding`. Если качается — pill `%`. Иначе — кнопка
+  download.
+- **Active downloads**: только in-progress. Когда файл досскачался —
+  уходит в library с pill'ом seeding.
 
-Скачанное лежит в `~/Downloads/f2f-drops/`. Auto-seeding включён —
-скачанный файл автоматически продолжает раздаваться следующим
-peer'ам (multi-source).
+Скачанное лежит в `~/Downloads/f2f-drops/`, владелец — твой юзер
+(не root, engine сам chown'ит). Auto-seeding включён — скачанный
+файл продолжает раздаваться следующим peer'ам (multi-source).
+
+**Persistence**: список раздач (`shared/`) и список скачанных файлов
+(`downloads.json`) переживают рестарт engine'а. После рестарта —
+автоматически re-seed + re-pickup, ничего повторно тянуть не надо.
+
+**Recovery**: если peer-source перезапустился во время загрузки или
+ушёл в оффлайн и вернулся — engine детектит stall (нет прогресса
+>90с) и делает drop+re-add магнита, anacrolix переподключается с
+сохранением скачанных piece'ов. Удалил файл руками в Finder —
+engine это видит и через ~30с снимает запись из UI.
 
 DHT, публичные tracker'ы и PEX отключены — discovery только через
 наш `/api/files` endpoint. IPv6 listen отключен (utun у нас
@@ -295,7 +312,8 @@ Loopback (`127.0.0.1:2202`):
 | POST | `/api/files/mine/upload` | multipart upload в shared-каталог + auto-seed |
 | DELETE | `/api/files/mine/{hash}` | снять с раздачи (файл на диске остаётся) |
 | POST | `/api/files/download` | начать download (`{magnet, peers[]}`) |
-| GET | `/api/files/downloads` | прогресс активных/завершённых |
+| GET | `/api/files/downloads` | прогресс активных/завершённых (поля complete/seeding/path) |
+| POST | `/api/files/reveal` | открыть `<path>` в Finder (только под shared/ или downloads/) |
 | GET | `/api/log/stream` | SSE лог engine |
 | POST | `/api/signal/{outbox,inbox}` | WebRTC сигналинг |
 | GET | `/api/signal/stream` | SSE сигналов для браузера |

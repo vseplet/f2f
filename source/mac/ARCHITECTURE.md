@@ -743,13 +743,51 @@ type Client struct {
     loading  map[string]*Download    // info_hash hex → download
 }
 
+type Download struct {
+    InfoHash, Name, Magnet string
+    Size                   int64
+    Torrent                *atorrent.Torrent
+    StartedAt              time.Time
+    Peers                  []string  // re-fed periodically by engine
+    LastProgressAt         time.Time // for stall detection
+    LastBytes              int64
+}
+
 func New(opts Options) (*Client, error)
 func (c *Client) AddSeed(path string) (*SeedHandle, error)
 func (c *Client) RemoveSeed(infoHashHex string) error
 func (c *Client) ListSeeds() []*SeedHandle
 func (c *Client) AddDownload(magnetURI string, peerAddrs []string) (*Download, error)
+func (c *Client) RemoveDownload(infoHashHex string) bool
+func (c *Client) FeedPeers(d *Download)
+func (c *Client) DownloadPath(d *Download) string
 func (c *Client) ListDownloads() []*Download
 ```
+
+**Persistence + recovery (живёт в `engine`, не в этом пакете):**
+
+- `~/Library/Application Support/f2f/downloads.json` — список
+  `{magnet, info_hash, peers}` всех когда-либо начатых downloads.
+  Сохраняется в `engine.AddDownload`, читается в `restoreDownloads`
+  при старте engine'а. После рестарта anacrolix re-hash'ит файлы на
+  диске → resumes от текущего прогресса (новые piece'ы не качаются
+  заново).
+- `engine.rescanSharedDir` на старте обходит SharedDir и
+  `AddSeed`'ит всё что там лежит — раздачи переживают рестарт.
+- `engine.pruneLoop` (раз в 30с): stat path каждого Download/Seed,
+  если файл удалён юзером — `RemoveDownload`/`RemoveSeed`.
+  Inflight-загрузки **не дропаются** (они пишут в `.part`, финального
+  пути ещё нет).
+- `engine.refeedActiveDownloads` (тоже в pruneLoop): для каждого
+  inflight Download делает `FeedPeers` — anacrolix получает peer'а
+  заново. Если **нет прогресса >90с** (LastProgressAt) → дропаем
+  torrent и заново `AddDownload(magnet, peers)`. Кейс «source-peer
+  рестартанул мид-загрузка»: anacrolix получает свежий цикл
+  подключений + сохранённые piece'ы → resume.
+- `engine.chownLoop` (раз в 10с): рекурсивно chown'им SharedDir и
+  DownloadsDir в SUDO_USER. Engine крутится под root через sudo,
+  anacrolix пишет piece'ы как root, без chown юзер не мог бы
+  удалить или перенести файлы из Finder без админ-прав.
 
 **Конфигурация anacrolix-клиента:**
 
