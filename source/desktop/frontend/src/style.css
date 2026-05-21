@@ -30,19 +30,22 @@ html, body {
 
 .hidden { display: none !important; }
 
-/* Pane "fullscreen" — pinned to fill the whole document, on top of
-   everything. Triggered via JS toggling .fs on the .ax-pane element.
-   We use this instead of the browser Fullscreen API because WKWebView
-   inside Wails is inconsistent about HTML5 fullscreen permissions. */
-.ax-pane.fs {
+/* Pane "fullscreen": instead of resizing the pane itself (breaks the
+   flex layout on exit), pin only the inner <video> over everything.
+   The pane stays in its original spot, so when .fs is removed the
+   layout snaps back cleanly. Used because the browser Fullscreen API
+   is inconsistent inside Wails WKWebView. */
+.ax-pane.fs video {
   position: fixed !important;
   inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
   z-index: 9999 !important;
-  aspect-ratio: auto !important;
-  flex: none !important;
-  border-radius: 0 !important;
+  object-fit: contain !important;
+  background: #000;
+  transform: none !important; /* override the local-cam mirror flip */
 }
-.ax-pane.fs video { object-fit: contain !important; background: #000; }
+.ax-pane.fs .ax-pane-header { z-index: 10000; position: fixed; left: 12px; right: 12px; top: 12px; }
 body.fs-active { overflow: hidden; }
 
 /* Audio tab — terminal aesthetic. Self-contained: scoped under .ax-frame

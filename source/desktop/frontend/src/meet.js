@@ -168,6 +168,12 @@ export function startMeet() {
     if (!msg || !msg.kind) return;
     if (!callPartner || callPartner === ev.from) {
       callPartner = ev.from;
+      // Auto-select the caller in the peer dropdown so the answerer
+      // sees who's on the other end without having to pick from the
+      // list manually. Falls back silently if the option isn't in
+      // the select yet (peer list still propagating).
+      const hasOpt = Array.from($callSel.options).some((o) => o.value === callPartner);
+      if (hasOpt) $callSel.value = callPartner;
       // Pane labels: look up the peer's nickname now that we know it.
       if (typeof window.f2fPeerName === 'function' && typeof window.f2fSetPeerLabel === 'function') {
         window.f2fSetPeerLabel(window.f2fPeerName(callPartner), callPartner);
