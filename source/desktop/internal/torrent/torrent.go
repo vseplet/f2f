@@ -138,6 +138,10 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
+// LocalPort returns the UDP port anacrolix actually bound on. Useful
+// when the caller passed ":0" and needs to know the resolved port.
+func (c *Client) LocalPort() int { return c.atc.LocalPort() }
+
 // Close stops the BT client. Idempotent.
 func (c *Client) Close() error {
 	if c == nil || c.atc == nil {

@@ -97,6 +97,11 @@ type Client struct {
 	// torrent is the BT client; nil while file sharing isn't up.
 	// Mutated under c.mu.
 	torrent *internaltorrent.Client
+	// btProxy multiplexes BT (uTP) traffic onto the same UDP socket
+	// we use for hole-punch / signal / state. anacrolix doesn't
+	// accept custom PacketConns, so the proxy presents itself as a
+	// loopback peer per remote peer; see btproxy.go.
+	btProxy *btProxy
 }
 
 func New() *Client {
@@ -122,6 +127,7 @@ func (c *Client) Start(cfg Config) error {
 	}
 	c.udp = udp
 	log.Printf("lite: UDP listening on %s", udp.LocalAddr())
+	c.btProxy = newBTProxy(udp)
 
 	ac, err := rendezvous.NewAnnounceClient(udp, cfg.StunAddr, cfg.Name, cfg.ID)
 	if err != nil {
@@ -211,8 +217,12 @@ func (c *Client) Stop() error {
 	}
 	c.workers.Wait()
 	c.stopTorrent()
+	if c.btProxy != nil {
+		c.btProxy.closeAll()
+	}
 	c.mu.Lock()
 	c.peers = map[string]*peer{}
+	c.btProxy = nil
 	c.mu.Unlock()
 	c.tunnelIP.Store("")
 	c.reflex.Store("")
@@ -368,6 +378,16 @@ func (c *Client) recvLoop(ctx context.Context) {
 				body := make([]byte, n-1)
 				copy(body, pkt[1:])
 				c.handleStatePacket(fromPeer, body)
+			default:
+				// Anything else from a known peer is assumed to be BT
+				// (uTP) traffic. Relay to anacrolix via the per-peer
+				// loopback forwarder. uTP packets never start with our
+				// magic prefixes so this catch-all is safe.
+				if c.btProxy != nil {
+					body := make([]byte, n)
+					copy(body, pkt)
+					c.btProxy.forwardFromPeer(from, body)
+				}
 			}
 		}
 	}

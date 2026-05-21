@@ -81,9 +81,11 @@ func (c *Client) torrentEnabled() bool {
 	return c.torrent != nil
 }
 
-// startTorrent boots the BT client bound to 0.0.0.0:<ephemeral>. The
-// lite client has no tunnel_ip, so we use any free port and tell peers
-// about it via the state envelope when they need to dial back.
+// startTorrent boots the BT client bound to 127.0.0.1:<ephemeral> —
+// loopback only, because real peer traffic rides on the lite client's
+// hole-punched UDP socket via btProxy. Anacrolix never touches the
+// public network directly; everything flows lite-socket ↔ btProxy ↔
+// anacrolix-loopback.
 //
 // Runs in a goroutine: anacrolix.NewClient can be slow to initialise
 // (storage setup, listener bind, internal state). Blocking Start
@@ -95,7 +97,7 @@ func (c *Client) startTorrent() {
 		}
 	}()
 	opts := internaltorrent.Options{
-		ListenAddr:   "0.0.0.0:0",
+		ListenAddr:   "127.0.0.1:0",
 		SharedDir:    c.torrentSharedDir(),
 		DownloadsDir: c.torrentDownloadsDir(),
 	}
@@ -106,11 +108,19 @@ func (c *Client) startTorrent() {
 		log.Printf("torrent: %v (file sharing disabled)", err)
 		return
 	}
+	port := tc.LocalPort()
+	btAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	c.mu.Lock()
 	c.torrent = tc
+	prx := c.btProxy
 	c.mu.Unlock()
-	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
-		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
+	if prx != nil {
+		if err := prx.setAnacrolix(btAddr); err != nil {
+			log.Printf("torrent: btproxy setAnacrolix: %v", err)
+		}
+	}
+	log.Printf("torrent: ready in %v (loopback=%s shared=%s downloads=%s)",
+		time.Since(t0).Round(time.Millisecond), btAddr, opts.SharedDir, opts.DownloadsDir)
 
 	// Re-seed shared/ + replay saved downloads in the background.
 	go c.rescanSharedDir(tc, opts.SharedDir)
@@ -248,14 +258,36 @@ func (c *Client) RemoveSeed(infoHashHex string) error {
 // AddDownload wraps the BT client's AddDownload, persists the entry
 // to downloads.json so it survives restart, and is idempotent against
 // re-adding the same info_hash.
+//
+// peers is the list of REAL remote peer endpoints (UDP host:port the
+// hole-punched lite socket can reach). We translate each into a
+// loopback btproxy forwarder address — anacrolix only ever sees
+// 127.0.0.1:xxx peers, the proxy handles the rest.
 func (c *Client) AddDownload(magnet string, peers []string) (*DownloadInfo, error) {
 	c.mu.Lock()
 	tc := c.torrent
+	prx := c.btProxy
 	c.mu.Unlock()
 	if tc == nil {
 		return nil, fmt.Errorf("torrent client not running")
 	}
-	d, err := tc.AddDownload(magnet, peers)
+	loopbackPeers := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addr, err := net.ResolveUDPAddr("udp4", p)
+		if err != nil {
+			log.Printf("download: bad peer addr %q: %v", p, err)
+			continue
+		}
+		fa := ""
+		if prx != nil {
+			fa = prx.forwarderAddrFor(addr)
+		}
+		if fa == "" {
+			continue
+		}
+		loopbackPeers = append(loopbackPeers, fa)
+	}
+	d, err := tc.AddDownload(magnet, loopbackPeers)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +300,8 @@ func (c *Client) AddDownload(magnet string, peers []string) (*DownloadInfo, erro
 		}
 	}
 	if !dup {
+		// We persist the REAL peer endpoints, not the loopback
+		// addresses (those are rebuilt by btproxy on each run).
 		saved = append(saved, savedDownload{Magnet: magnet, InfoHash: d.InfoHash, Peers: peers})
 		if err := saveDownloads(saved); err != nil {
 			log.Printf("downloads: persist: %v", err)
@@ -503,7 +537,11 @@ func (c *Client) restoreDownloads(tc *internaltorrent.Client) {
 	}
 	added := 0
 	for _, s := range saved {
-		if _, err := tc.AddDownload(s.Magnet, s.Peers); err != nil {
+		// Same loopback translation as AddDownload — the persisted
+		// addresses are real peer endpoints, anacrolix only ever
+		// sees forwarders.
+		loopback := c.translatePeersForBT(s.Peers)
+		if _, err := tc.AddDownload(s.Magnet, loopback); err != nil {
 			log.Printf("downloads: restore %s: %v", s.InfoHash, err)
 			continue
 		}
@@ -512,6 +550,29 @@ func (c *Client) restoreDownloads(tc *internaltorrent.Client) {
 	if added > 0 {
 		log.Printf("downloads: restored %d previously-downloaded torrent(s)", added)
 	}
+}
+
+// translatePeersForBT converts real peer UDP endpoints into loopback
+// forwarder addresses anacrolix can dial. Skips ones we can't proxy
+// yet (no forwarder available). Used by AddDownload + restoreDownloads.
+func (c *Client) translatePeersForBT(peers []string) []string {
+	c.mu.Lock()
+	prx := c.btProxy
+	c.mu.Unlock()
+	if prx == nil {
+		return nil
+	}
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addr, err := net.ResolveUDPAddr("udp4", p)
+		if err != nil {
+			continue
+		}
+		if fa := prx.forwarderAddrFor(addr); fa != "" {
+			out = append(out, fa)
+		}
+	}
+	return out
 }
 
 type savedDownload struct {

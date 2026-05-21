@@ -38,7 +38,9 @@ camp-logs:
 	cd source/camp && flyctl logs
 
 desktop-install-wails:
-	go install github.com/wailsapp/wails/v2/cmd/wails@latest
+	@# pin to master: v2.12.0 (the latest tag) has a bug in its
+	@# package-loader that breaks our build with anacrolix imports.
+	go install github.com/wailsapp/wails/v2/cmd/wails@master
 
 desktop-dev:
 	cd source/desktop && $(WAILS) dev
