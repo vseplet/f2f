@@ -22,68 +22,22 @@ $(function () {
   const $log = $('#log');
   const $interceptInput = $('#intercept-input');
 
-  // The intercept list is owned by the frontend and persisted in
-  // localStorage. The engine has its own copy while running (the "live"
-  // entries with IDs and resolved prefixes) — we reconcile the two on
-  // every status refresh.
-  // Stored as a JSON array of {spec, peer} objects. Legacy entries
-  // (strings, or {spec} without peer) are dropped on load — peer is
-  // mandatory now.
-  const STORE_KEY = 'f2f:intercepts';
-  function getStoredSpecs() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-      return arr.filter((e) => e && typeof e === 'object'
-        && typeof e.spec === 'string' && e.spec
-        && typeof e.peer === 'string' && e.peer);
-    } catch (_) { return []; }
-  }
-  function setStoredSpecs(arr) {
-    localStorage.setItem(STORE_KEY, JSON.stringify(arr));
-  }
-  function addStoredSpec(spec, peer) {
-    const list = getStoredSpecs();
-    if (!list.some((e) => e.spec === spec && e.peer === peer)) {
-      list.push({ spec, peer });
-      setStoredSpecs(list);
-    }
-  }
-  function removeStoredSpec(spec, peer) {
-    setStoredSpecs(getStoredSpecs().filter((e) => !(e.spec === spec && e.peer === peer)));
-  }
+  // All per-camp settings (intercepts, my-domains, firewall, name, peer
+  // catalog) are owned by the backend now — $HOME/.f2f/<camp_id>.config.json.
+  // The frontend just reads /api/status for live state and PUT/POST'es
+  // changes to the appropriate endpoint. No more localStorage.
+  // One-shot purge of any leftover keys from the old localStorage-backed
+  // implementation. Runs at load time; harmless on a clean install.
+  ['f2f:intercepts', 'f2f:my-domains', 'f2f:camp-name', 'f2f:camp-id', 'f2f:camp-room']
+    .forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
   let liveIntercepts = []; // last seen from /api/status
   let livePeers = [];      // last seen camp peers from /api/status
   const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
-  // Persist config form values across reloads. Each field has a localStorage
-  // key; we restore on load and save on every change. Engine-driven updates
-  // (when running) also write to localStorage so the form starts from the
-  // last actual state next time.
-  const FIELDS = ['#camp-name', '#camp-id'];
-  const storageKey = (sel) => 'f2f:' + sel.slice(1);
-  function restoreForm() {
-    // One-shot migration: the old key was f2f:camp-room before the
-    // rename. If the user has a value there and nothing yet under the
-    // new key, carry it over once. Safe to leave indefinitely.
-    const legacyRoom = localStorage.getItem('f2f:camp-room');
-    if (legacyRoom && !localStorage.getItem('f2f:camp-id')) {
-      localStorage.setItem('f2f:camp-id', legacyRoom);
-    }
-    if (legacyRoom !== null) localStorage.removeItem('f2f:camp-room');
-
-    FIELDS.forEach((sel) => {
-      const v = localStorage.getItem(storageKey(sel));
-      if (v !== null && v !== '') $(sel).val(v);
-    });
-  }
-  function persistField(sel) {
-    localStorage.setItem(storageKey(sel), $(sel).val() || '');
-  }
-  FIELDS.forEach((sel) => $(sel).on('change input', () => persistField(sel)));
+  // Camp identity is loaded from the backend on first render — see
+  // refreshCamps(). The form fields are no longer the source of truth.
+  function restoreForm() { /* no-op: backend is authoritative now */ }
 
   const fmtBytes = (n) => {
     if (n < 1024) return n + ' B';
@@ -93,6 +47,37 @@ $(function () {
   };
 
   const errorOf = (xhr) => (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || 'unknown error';
+
+  // armRemove wires a destructive button to a two-click pattern: first
+  // click flips the label to "confirm?" for 3 s; a second click in
+  // that window calls onConfirm. No modal dialog. After the window
+  // expires the button reverts. Drop-in replacement for confirm().
+  function armRemove($btn, onConfirm, opts) {
+    opts = opts || {};
+    const label = opts.label || 'remove';
+    const armed = opts.armedLabel || 'confirm?';
+    const windowMs = opts.windowMs || 3000;
+    let armedAt = 0;
+    let timer = null;
+    function disarm() {
+      armedAt = 0;
+      $btn.text(label).removeClass('is-armed');
+      if (timer) { clearTimeout(timer); timer = null; }
+    }
+    $btn.text(label);
+    $btn.on('click', (e) => {
+      e.stopPropagation();
+      const now = Date.now();
+      if (armedAt && (now - armedAt) <= windowMs) {
+        disarm();
+        onConfirm();
+        return;
+      }
+      armedAt = now;
+      $btn.text(armed).addClass('is-armed');
+      timer = setTimeout(disarm, windowMs);
+    });
+  }
 
   // setEngineState updates the combined status/toggle button in the
   // tabbar. `state` ∈ {running, stopped, loading, error}; `label` is the
@@ -118,6 +103,75 @@ $(function () {
     $.getJSON('/api/status', applyStatus).fail(() => setEngineState('error', 'API error', ''));
   }
 
+  // refreshCamps pulls $HOME/.f2f/state.json — the last selected camp_id
+  // and the roster of known camps — and wires up the dropdown. Called
+  // once on load, after start, and after Stop.
+  let knownCamps = [];
+  function refreshCamps() {
+    $.getJSON('/api/camps', (st) => {
+      knownCamps = (st && Array.isArray(st.known_camps)) ? st.known_camps : [];
+      renderCampPicker();
+      const last = st && st.last_camp_id;
+      // Pre-select the last camp in the picker if engine isn't running
+      // and the user hasn't picked anything else yet — gives one-click
+      // "start where you left off" affordance.
+      if (last && !engineRunning && !$('#camp-picker').val()) {
+        $('#camp-picker').val(last);
+      }
+    });
+  }
+  // renderCampPicker builds the dropdown: every known camp + a
+  // sentinel "+ new camp" at the bottom that reveals the join form.
+  function renderCampPicker() {
+    const $sel = $('#camp-picker');
+    const cur = $sel.val();
+    $sel.empty();
+    $sel.append($('<option>').val('').text('— pick a camp —'));
+    knownCamps.forEach((c) => {
+      const label = c.name ? `${c.id} (${c.name})` : c.id;
+      $sel.append($('<option>').val(c.id).text(label));
+    });
+    $sel.append($('<option>').val('__new__').text('+ new camp'));
+    if (cur) $sel.val(cur);
+  }
+  $('#camp-picker').on('change', function () {
+    const id = $(this).val();
+    if (id === '__new__') {
+      $('#camp-name').val('');
+      $('#camp-id').val('');
+      $('#new-camp-form').removeClass('hidden');
+      setTimeout(() => $('#camp-name').focus(), 0);
+      return;
+    }
+    $('#new-camp-form').addClass('hidden');
+    if (!id) return;
+    // Known camp picked — auto-start. Backend stop+starts if we were
+    // running with a different camp_id. triggerStart re-reads picker
+    // state itself, so we don't need to mirror values into inputs.
+    triggerStart();
+  });
+  $('#btn-new-camp-start').on('click', () => {
+    const id = ($('#camp-id').val() || '').trim();
+    const name = ($('#camp-name').val() || '').trim();
+    if (!id || !name) {
+      alert('camp_id and name are required for a new camp');
+      return;
+    }
+    triggerStart();
+  });
+  $('#btn-new-camp-cancel').on('click', () => {
+    $('#new-camp-form').addClass('hidden');
+    $('#camp-picker').val('');
+  });
+  // Running-state header link: collapse status, expose picker so the
+  // user can switch without stopping first.
+  $('#identity-switch').on('click', (e) => {
+    e.preventDefault();
+    $('#identity-status').addClass('hidden');
+    $('#identity-picker').removeClass('hidden');
+    $('#camp-picker').val('').trigger('focus');
+  });
+
   // Auto-start fires once after the first /api/status response that says
   // the engine is stopped *and* we have a camp identity stored. After
   // that, the user is in control via the Start/Stop buttons.
@@ -135,32 +189,37 @@ $(function () {
   // next click triggers a second operation that races the first and gets
   // "already running" / a name_taken.
   let pendingOp = null; // 'starting' | 'stopping' | null
-  let autoStarted = false;
-  function maybeAutoStart(s) {
-    if (autoStarted) return;
-    if (s.running) {
-      autoStarted = true;
-      return;
-    }
-    const name = $('#camp-name').val().trim();
-    const id = $('#camp-id').val().trim();
-    if (!name || !id) return;
-    autoStarted = true;
-    triggerStart();
+  // Tracked from /api/status — drives `<name>.<camp_id>.f2f` rendering
+  // in the domains panels. With the identity rework #camp-id input is
+  // now only filled on the "+ new camp" path, so we can't read it
+  // there anymore. Falls back to the picker value if status hasn't
+  // arrived yet (page-load → first refreshStatus is a brief window).
+  let currentCampID = '';
+  function campIDOrPlaceholder() {
+    return currentCampID || ($('#camp-picker').val() || '').trim().replace(/^__new__$/, '') || '<camp_id>';
   }
 
   function applyStatus(s) {
-    maybeAutoStart(s);
     if (pendingOp) {
-      // Hold the loading state while an op is in flight; inputs stay
-      // locked too so the user doesn't edit them mid-transition.
-      $('#camp-name, #camp-id').prop('disabled', true);
+      $('#camp-name, #camp-id, #camp-picker').prop('disabled', true);
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
-      $('#camp-name, #camp-id').prop('disabled', true);
+      currentCampID = s.camp_id || '';
+      // Running: collapse the picker and form into a one-line readout.
+      // The "switch" link inside #identity-status re-exposes the picker
+      // without forcing a manual stop first.
+      $('#identity-name').text(s.camp_name || '?');
+      $('#identity-camp').text(s.camp_id || '?');
+      $('#identity-status').removeClass('hidden');
+      $('#identity-picker').addClass('hidden');
+      $('#new-camp-form').addClass('hidden');
+      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
     } else {
       setEngineState('stopped', 'start', '');
-      $('#camp-name, #camp-id').prop('disabled', false);
+      currentCampID = '';
+      $('#identity-status').addClass('hidden');
+      $('#identity-picker').removeClass('hidden');
+      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
     }
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
@@ -170,7 +229,6 @@ $(function () {
     livePeers = s.peers || [];
     refreshInterceptPeerSelect();
     refreshCallPeerSelect(s.active_peer_tunnel_ip || '');
-    reconcileStoredIntercepts();
     renderIntercepts();
 
     $('#tx-packets').text(s.tx_packets || 0);
@@ -181,21 +239,7 @@ $(function () {
 
   function renderIntercepts() {
     $list.empty();
-    const stored = getStoredSpecs();
-    const liveKey = (spec, peer) => spec + '\x00' + peer;
-    const liveByKey = {};
-    liveIntercepts.forEach((l) => { liveByKey[liveKey(l.spec, l.peer)] = l; });
-
-    const seenKeys = new Set();
-    const items = stored.map((e) => {
-      const k = liveKey(e.spec, e.peer);
-      seenKeys.add(k);
-      return { spec: e.spec, peer: e.peer, live: liveByKey[k] || null };
-    });
-    liveIntercepts.forEach((l) => {
-      const k = liveKey(l.spec, l.peer);
-      if (!seenKeys.has(k)) items.push({ spec: l.spec, peer: l.peer, live: l, orphan: true });
-    });
+    const items = liveIntercepts.map((l) => ({ spec: l.spec, peer: l.peer, live: l }));
 
     $('#intercept-meta').text(items.length);
 
@@ -219,7 +263,6 @@ $(function () {
       $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + it.peer));
       if (it.live) $head.append($('<span class="ax-pill ax-pill-active">').text('active'));
       else         $head.append($('<span class="ax-pill ax-pill-pending">').text('pending'));
-      if (it.orphan) $head.append($('<span class="ax-pill ax-pill-pending">').text('unsaved'));
 
       const $meta = $('<span class="ax-intercept-meta">');
       if (parsed.length) {
@@ -231,7 +274,7 @@ $(function () {
       $head.append($meta);
 
       const $rm = $('<button class="ax-list-remove">remove</button>');
-      $rm.on('click', (e) => { e.stopPropagation(); removeSpec(it.spec, it.peer, it.live); });
+      $rm.on('click', (e) => { e.stopPropagation(); removeSpec(it.live); });
       $head.append($rm);
 
       $head.on('click', () => {
@@ -280,8 +323,7 @@ $(function () {
     };
   }
 
-  function removeSpec(spec, peer, live) {
-    removeStoredSpec(spec, peer);
+  function removeSpec(live) {
     const after = () => { refreshStatus(); };
     if (live && live.id) {
       $.ajax({ url: '/api/intercepts/' + encodeURIComponent(live.id), method: 'DELETE' })
@@ -318,25 +360,31 @@ $(function () {
     }
   }
 
-  // reconcileStoredIntercepts retries POSTing any stored intercept that's
-  // not currently live. Runs on every status refresh while the engine is
-  // up. Silent failures are fine — they'll be retried next tick.
-  function reconcileStoredIntercepts() {
-    if (!engineRunning) return;
-    const liveKey = (spec, peer) => spec + '\x00' + peer;
-    const liveSet = new Set(liveIntercepts.map((l) => liveKey(l.spec, l.peer)));
-    getStoredSpecs().forEach((e) => {
-      if (liveSet.has(liveKey(e.spec, e.peer))) return;
-      addOne(e.spec, e.peer).fail(() => { /* retry next refresh */ });
-    });
-  }
-
-
   function triggerStart() {
-    const cfg = {
-      camp_name: $('#camp-name').val().trim(),
-      camp_id: $('#camp-id').val().trim(),
-    };
+    // Source of truth is the picker. Two paths:
+    //   - picker = known camp id → use it directly, name from
+    //     knownCamps entry (camp config on disk already has the name).
+    //   - picker = "__new__" → user is creating a fresh camp, read
+    //     name + id from the join form below.
+    //   - picker = "" → nothing selected, surface it.
+    const pick = ($('#camp-picker').val() || '').trim();
+    let id = '';
+    let name = '';
+    if (pick && pick !== '__new__') {
+      id = pick;
+      const entry = knownCamps.find((c) => c.id === pick);
+      if (entry && entry.name) name = entry.name;
+    } else if (pick === '__new__') {
+      id = ($('#camp-id').val() || '').trim();
+      name = ($('#camp-name').val() || '').trim();
+    }
+    if (!id) {
+      $('#identity-picker').removeClass('hidden');
+      $('#camp-picker').trigger('focus');
+      return;
+    }
+    const cfg = { camp_id: id };
+    if (name) cfg.camp_name = name;
     pendingOp = 'starting';
     setEngineState('loading', 'starting…', '');
     $.ajax({
@@ -346,7 +394,7 @@ $(function () {
       data: JSON.stringify(cfg)
     })
       .always(() => { pendingOp = null; })
-      .done(refreshStatus)
+      .done(() => { refreshStatus(); refreshCamps(); })
       .fail((xhr) => {
         refreshStatus();
         alert('Start failed: ' + errorOf(xhr));
@@ -389,22 +437,18 @@ $(function () {
       alert('Pick a peer to route this intercept through.');
       return;
     }
-
-    // Save locally first — survives engine restarts; reconciliation
-    // pushes anything stored-but-not-live into engine on next status tick.
-    specs.forEach((spec) => addStoredSpec(spec, peer));
+    if (!engineRunning) {
+      alert('Engine must be running to add intercepts.');
+      return;
+    }
     $interceptInput.val('');
-    renderIntercepts();
-
-    if (!engineRunning) return;
-
     const errors = [];
     const requests = specs.map((spec) =>
       addOne(spec, peer).fail((xhr) => errors.push(`${spec}: ${errorOf(xhr)}`))
     );
     $.when(...requests).always(() => {
       refreshStatus();
-      if (errors.length) alert('Some intercepts failed to apply live:\n' + errors.join('\n'));
+      if (errors.length) alert('Some intercepts failed to apply:\n' + errors.join('\n'));
     });
   });
 
@@ -593,38 +637,12 @@ $(function () {
   }
 
   // ---- DNS tab: own published domains + known domains across peers ----
-  // localStorage is the source of truth — engine holds an in-memory copy
-  // that gets blown away on restart, so on every refresh we re-push if
-  // the runtime list lost entries we still have stored.
-  const MY_DOMAINS_KEY = 'f2f:my-domains';
-  function getStoredMyDomains() {
-    try {
-      const raw = localStorage.getItem(MY_DOMAINS_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr.filter((e) => e && typeof e === 'object' && typeof e.name === 'string') : [];
-    } catch (_) { return []; }
-  }
-  function setStoredMyDomains(list) {
-    localStorage.setItem(MY_DOMAINS_KEY, JSON.stringify(list));
-  }
-  let myDomains = getStoredMyDomains();
+  // Backend is the source of truth — engine persists the list in the
+  // per-camp config and re-publishes it on start. UI just reads /api/my-domains.
+  let myDomains = [];
   function refreshMyDomains() {
     $.getJSON('/api/my-domains', (list) => {
-      const fromEngine = Array.isArray(list) ? list : [];
-      const stored = getStoredMyDomains();
-      // Reconcile: if stored has entries that engine doesn't, re-push.
-      // This survives engine restart while UI keeps running.
-      const sameLen = fromEngine.length === stored.length;
-      const sameAll = sameLen && stored.every((s) =>
-        fromEngine.some((e) => e.name === s.name && (e.port || 0) === (s.port || 0))
-      );
-      if (!sameAll && stored.length > 0) {
-        putMyDomains(stored, { silent: true });
-        return; // putMyDomains calls refreshMyDomains on done — render via that
-      }
-      myDomains = fromEngine;
-      setStoredMyDomains(myDomains);
+      myDomains = Array.isArray(list) ? list : [];
       renderMyDomains();
     });
   }
@@ -637,8 +655,7 @@ $(function () {
       return;
     }
     myDomains.forEach((d) => {
-      const campID = $('#camp-id').val() || '<camp_id>';
-      const fqdn = d.name + '.' + campID + '.f2f';
+      const fqdn = d.name + '.' + campIDOrPlaceholder() + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
@@ -663,9 +680,7 @@ $(function () {
       $list.append($row);
     });
   }
-  function putMyDomains(list, opts) {
-    opts = opts || {};
-    setStoredMyDomains(list); // persist regardless of engine state
+  function putMyDomains(list) {
     $.ajax({
       url: '/api/my-domains',
       method: 'PUT',
@@ -673,7 +688,7 @@ $(function () {
       data: JSON.stringify(list),
     })
       .done(refreshMyDomains)
-      .fail((xhr) => { if (!opts.silent) alert('Save failed: ' + errorOf(xhr)); });
+      .fail((xhr) => { alert('Save failed: ' + errorOf(xhr)); });
   }
   $('#btn-add-my-domain').on('click', () => {
     const name = ($('#my-domain-name').val() || '').trim().toLowerCase();
@@ -709,7 +724,7 @@ $(function () {
       $list.append('<div class="ax-list-empty">no domains published by any peer yet.</div>');
       return;
     }
-    const campID = $('#camp-id').val() || '<camp_id>';
+    const campID = campIDOrPlaceholder();
     rows.forEach((r) => {
       const fqdn = r.name + '.' + campID + '.f2f';
       const $row = $('<div class="ax-intercept">');
@@ -843,6 +858,10 @@ $(function () {
   });
 
   // ---- trusted peer CAs (DNS tab, bottom section) ----
+  // One row per installed peer CA: peer name + fingerprint + age +
+  // two-click remove. Backend lists everything we've ever auto-installed
+  // via peerCAPollLoop; remove drops the PEM, keychain entry, and the
+  // record in <camp_id>.config.json.
   function refreshTrustedPeers() {
     $.getJSON('/api/trusted-peers', (list) => {
       const rows = Array.isArray(list) ? list : [];
@@ -862,6 +881,16 @@ $(function () {
         $head.append($('<span class="ax-pill ax-pill-peer">').text(r.fingerprint || ''));
         const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '—';
         $head.append($('<span class="ax-intercept-meta">').text('installed ' + when));
+        const $rm = $('<button class="ax-list-remove">');
+        armRemove($rm, () => {
+          $.ajax({
+            url: '/api/trusted-peers/' + encodeURIComponent(r.fingerprint),
+            method: 'DELETE',
+          })
+            .done(refreshTrustedPeers)
+            .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
+        });
+        $head.append($rm);
         $row.append($head);
         $list.append($row);
       });
@@ -1037,14 +1066,33 @@ $(function () {
       $head.append($('<span class="ax-intercept-caret">').text(' '));
       const displayName = d.name || d.info_hash.slice(0, 12);
       $head.append($('<span class="ax-intercept-spec">').text(displayName));
-      if (d.size) {
+      if (d.fetching_metadata) {
+        // Magnet added, anacrolix hasn't fetched the .torrent yet —
+        // source peer offline or never connected. Show this so the user
+        // knows the row isn't just "0% but downloading", it's stuck
+        // waiting on the source.
+        $head.append($('<span class="ax-pill ax-pill-pending">').text('fetching metadata…'));
+      } else if (d.size) {
         const total = d.size;
         const done = d.bytes_completed || 0;
-        const pct = Math.floor((done / total) * 100);
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
         $head.append($('<span class="ax-pill ax-pill-active">').text(pct + '%'));
         $head.append($('<span class="ax-pill ax-pill-peer">').text(fmtBytes(done) + ' / ' + fmtBytes(total)));
       }
+      if (Array.isArray(d.peers) && d.peers.length) {
+        $head.append($('<span class="ax-pill ax-pill-peer">').text('from ' + d.peers.join(', ')));
+      }
       $head.append($('<span class="ax-intercept-meta">'));
+      const $rm = $('<button class="ax-list-remove">');
+      armRemove($rm, () => {
+        $.ajax({
+          url: '/api/files/downloads/' + encodeURIComponent(d.info_hash),
+          method: 'DELETE',
+        })
+          .done(refreshDownloads)
+          .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
+      });
+      $head.append($rm);
       $row.append($head);
       $list.append($row);
     });
@@ -1084,6 +1132,7 @@ $(function () {
   })();
 
   restoreForm();
+  refreshCamps();
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();

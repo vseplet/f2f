@@ -112,6 +112,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	if label == "" || strings.Contains(label, ".") {
 		// Multi-level under the TLD aren't supported.
 		m.Rcode = dns.RcodeNameError
+		s.attachSOA(m)
 		_ = w.WriteMsg(m)
 		return
 	}
@@ -119,6 +120,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	ip := s.lookup(label)
 	if ip == "" {
 		m.Rcode = dns.RcodeNameError
+		s.attachSOA(m)
 		_ = w.WriteMsg(m)
 		return
 	}
@@ -132,8 +134,33 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		}
 	}
 	// For AAAA queries we deliberately respond NOERROR with empty answer
-	// (no v6 in our overlay). Apps then fall back to A.
+	// (no v6 in our overlay). Apps then fall back to A. Attach SOA so
+	// the negative response is cached for one second only — peers can
+	// register new names at any time and we don't want minutes of
+	// "doesn't exist" served from cache.
+	if len(m.Answer) == 0 {
+		s.attachSOA(m)
+	}
 	_ = w.WriteMsg(m)
+}
+
+// attachSOA appends a minimal SOA RR with Minimum=1 to the authority
+// section so RFC 2308 negative caching is capped at one second. The
+// values don't need to be real — no one polls this zone over DNS, the
+// data comes from the camp HTTP API. We just need MinTTL low so
+// macOS's mDNSResponder cache doesn't pin a stale NXDOMAIN.
+func (s *Server) attachSOA(m *dns.Msg) {
+	zone := strings.TrimPrefix(s.suffix, ".")
+	m.Ns = append(m.Ns, &dns.SOA{
+		Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 1},
+		Ns:      "ns." + zone,
+		Mbox:    "hostmaster." + zone,
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  1,
+	})
 }
 
 // lookup scans the peer-domains catalog for the matching label and

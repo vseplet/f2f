@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/mac/internal/ca"
+	"github.com/vseplet/f2f/source/mac/internal/config"
 	internaldns "github.com/vseplet/f2f/source/mac/internal/dns"
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/firewall"
@@ -278,6 +279,15 @@ type Engine struct {
 	// after Stop tears everything down.
 	OnStarted func(localIP string)
 	OnStopped func()
+
+	// store is the singleton handle to $HOME/.f2f/. Lazily opened on
+	// the first Start so test code that just calls New() doesn't touch
+	// the filesystem.
+	store *config.Store
+	// camp mirrors the on-disk <camp_id>.config.json for the currently
+	// running camp. nil when engine is stopped or in static mode.
+	// Mutations under e.mu are followed by persistCampLocked.
+	camp *config.Camp
 }
 
 // TrustedPeerCA is one row in the UI's trusted-peers panel.
@@ -363,6 +373,19 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
+	}
+
+	// Open $HOME/.f2f/ + load (or create) the per-camp config. Camp
+	// mode only — static --peer mode has no per-camp identity.
+	if cfg.Camp != nil {
+		if err := e.ensureStore(); err != nil {
+			return fmt.Errorf("config store: %w", err)
+		}
+		c, err := e.loadOrCreateCamp(cfg.Camp.ID, cfg.Camp.Name)
+		if err != nil {
+			return fmt.Errorf("config load %s: %w", cfg.Camp.ID, err)
+		}
+		e.camp = c
 	}
 
 	// Egress goes first so its rollback runs last on the way down.
@@ -481,7 +504,7 @@ func (e *Engine) Start(cfg Config) error {
 	// egress-forwarded packets are unaffected). Allow only f2f-
 	// internal ports + user-configured ones. Failure here is non-
 	// fatal — tunnel still works, just without input filtering.
-	e.userFirewall = loadUserFirewall()
+	e.userFirewall = userFirewallFromCamp(e.camp)
 	fw, err := firewall.Open(tun.Name(), localIP, mergeFirewallRules(e.userFirewall))
 	if err != nil {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
@@ -495,12 +518,43 @@ func (e *Engine) Start(cfg Config) error {
 	// once peers are visible (peer assignment is mandatory).
 	e.routes = route.New(tun.Name())
 
+	// Stamp cfg into the engine before any hydrate path runs — they
+	// read e.cfg.Camp.Name to filter our own entry out of the peer
+	// catalog. (Workers don't start until further down; e.running is
+	// still false, so nothing observes the partial state.)
+	e.cfg = cfg
+
+	// Seed in-memory state from camp config — peer catalog so the UI
+	// sees known nodes before the first poll; my-domains so we
+	// re-announce them right away; intercepts restored after e.peers
+	// is populated (so hasPeerNameLocked checks pass).
+	if e.camp != nil {
+		e.pruneSelfFromCatalogLocked()
+		e.hydratePeersFromCatalog()
+		domains := make([]DomainEntry, 0, len(e.camp.MyDomains))
+		for _, d := range e.camp.MyDomains {
+			domains = append(domains, DomainEntry{
+				Name:  d.Name,
+				Host:  d.Host,
+				Port:  d.Port,
+				Proto: d.Proto,
+			})
+		}
+		e.myDomains.Store(&domains)
+	}
+
 	// Workers.
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
 	e.started = time.Now()
-	e.cfg = cfg
 	e.running = true
+
+	// Intercepts can be installed now that running=true (addInterceptLocked
+	// guards on it). Failures are logged inside the helper.
+	if e.camp != nil {
+		e.restoreInterceptsFromCamp()
+		e.upsertKnownCamp(e.camp.CampID, e.camp.Name)
+	}
 
 	e.workers.Add(1)
 	go e.tunToPeerLoop(ctx)
@@ -559,6 +613,9 @@ func (e *Engine) Start(cfg Config) error {
 				log.Printf("dns: write resolver: %v", rerr)
 			} else {
 				log.Printf("dns: serving %s.f2f on %s", e.cfg.Camp.ID, dnsAddr)
+				// Flush macOS's resolver cache so any stale NXDOMAIN
+				// pinned before our DNS was up gets dropped immediately.
+				internaldns.FlushCache()
 			}
 		}
 	}
@@ -998,6 +1055,34 @@ func (e *Engine) AddDownload(magnet string, peers []string) (*internaltorrent.Do
 	return d, nil
 }
 
+// RemoveDownload cancels (or unseeds) a download by info_hash and
+// drops it from downloads.json so it doesn't come back on restart.
+// Returns true if anacrolix had an entry; false means we tried to
+// remove something unknown — still drops from the persisted list as
+// a courtesy. Files on disk are NOT deleted; pruneLoop handles that
+// case when the user removes them via Finder.
+func (e *Engine) RemoveDownload(infoHash string) bool {
+	t := e.torrent
+	removed := false
+	if t != nil {
+		removed = t.RemoveDownload(infoHash)
+	}
+	saved := loadSavedDownloads()
+	kept := saved[:0]
+	for _, s := range saved {
+		if s.InfoHash == infoHash {
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if len(kept) != len(saved) {
+		if err := saveDownloads(kept); err != nil {
+			log.Printf("downloads: persist after remove: %v", err)
+		}
+	}
+	return removed
+}
+
 // restoreDownloads re-registers every persisted download with the
 // torrent client. Anacrolix re-checks on-disk pieces; complete files
 // become available for seeding immediately and appear in /api/files/
@@ -1071,11 +1156,6 @@ type FirewallPort struct {
 	Enabled     bool   `json:"enabled"`
 }
 
-// firewallStatePath persists user-configured port rules across runs.
-func firewallStatePath() string {
-	return filepath.Join(userHome(), "Library", "Application Support", "f2f", "firewall.json")
-}
-
 // FirewallActive reports whether the pf anchor for the inbound utun
 // filter is currently loaded — true means user-toggled rules are
 // actually enforced by the kernel, false means the engine isn't
@@ -1125,20 +1205,26 @@ func (e *Engine) UserFirewallPorts() []FirewallPort {
 	return out
 }
 
-// SetUserFirewallPorts replaces the user allow list, persists it,
-// and re-applies the pf anchor with built-in + enabled user rules.
-// Idempotent — safe to call on every UI save.
+// SetUserFirewallPorts replaces the user allow list, persists it
+// into the per-camp config, and re-applies the pf anchor with
+// built-in + enabled user rules. Idempotent — safe to call on every
+// UI save. Returns ErrEngineNotRunning if the engine isn't up: the
+// camp config is keyed by camp_id, so we need a running engine to
+// know which file to write.
 func (e *Engine) SetUserFirewallPorts(list []FirewallPort) error {
 	cleaned := cleanUserFirewall(list)
 	e.mu.Lock()
-	e.userFirewall = cleaned
-	fw := e.fw
-	e.mu.Unlock()
-	if err := saveUserFirewall(cleaned); err != nil {
-		log.Printf("firewall: persist: %v", err)
+	if !e.running || e.camp == nil {
+		e.mu.Unlock()
+		return errors.New("engine not running")
 	}
+	e.userFirewall = cleaned
+	e.camp.Firewall = userFirewallToCamp(cleaned)
+	fw := e.fw
+	e.persistCampLocked()
+	e.mu.Unlock()
 	if fw == nil {
-		return nil // engine not running; will be applied on next Start
+		return nil // pf anchor failed at Start; will retry next Start
 	}
 	rules := mergeFirewallRules(cleaned)
 	if err := fw.Apply(rules); err != nil {
@@ -1187,29 +1273,36 @@ func cleanUserFirewall(in []FirewallPort) []FirewallPort {
 	return out
 }
 
-func loadUserFirewall() []FirewallPort {
-	data, err := os.ReadFile(firewallStatePath())
-	if err != nil {
+// userFirewallFromCamp converts the on-disk shape to the engine's
+// in-memory FirewallPort. Returns a deduplicated/cleaned slice.
+func userFirewallFromCamp(c *config.Camp) []FirewallPort {
+	if c == nil {
 		return nil
 	}
-	var out []FirewallPort
-	if err := json.Unmarshal(data, &out); err != nil {
-		log.Printf("firewall: parse %s: %v", firewallStatePath(), err)
-		return nil
+	out := make([]FirewallPort, 0, len(c.Firewall))
+	for _, p := range c.Firewall {
+		out = append(out, FirewallPort{
+			Port:        p.Port,
+			Protocol:    p.Protocol,
+			Description: p.Description,
+			Enabled:     p.Enabled,
+		})
 	}
 	return cleanUserFirewall(out)
 }
 
-func saveUserFirewall(list []FirewallPort) error {
-	path := firewallStatePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+// userFirewallToCamp is the inverse — engine shape → on-disk shape.
+func userFirewallToCamp(list []FirewallPort) []config.Firewall {
+	out := make([]config.Firewall, 0, len(list))
+	for _, p := range list {
+		out = append(out, config.Firewall{
+			Port:        p.Port,
+			Protocol:    p.Protocol,
+			Description: p.Description,
+			Enabled:     p.Enabled,
+		})
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
+	return out
 }
 
 func countEnabled(list []FirewallPort) int {
@@ -1384,14 +1477,47 @@ func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
 		}
 	}
 	e.trustedPeerCAsMu.Lock()
-	e.trustedPeerCAs[fp] = TrustedPeerCA{
+	entry := TrustedPeerCA{
 		PeerName:    peerName,
 		CommonName:  cert.Subject.CommonName,
 		Fingerprint: fp,
 		InstalledAt: time.Now().Unix(),
 	}
+	e.trustedPeerCAs[fp] = entry
 	e.trustedPeerCAsMu.Unlock()
+	e.persistTrustedPeerToCamp(entry)
 	log.Printf("ca: trusted peer %s", peerName)
+}
+
+// persistTrustedPeerToCamp upserts the trusted-CA metadata into camp
+// config. PEM bytes stay under trustedPeersDir — config carries only
+// fingerprint + display fields so the UI can list and (eventually)
+// remove CAs without re-reading the keychain.
+func (e *Engine) persistTrustedPeerToCamp(t TrustedPeerCA) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.camp == nil {
+		return
+	}
+	for i, ex := range e.camp.TrustedPeers {
+		if ex.Fingerprint == t.Fingerprint {
+			e.camp.TrustedPeers[i] = config.TrustedPeer{
+				PeerName:    t.PeerName,
+				CommonName:  t.CommonName,
+				Fingerprint: t.Fingerprint,
+				InstalledAt: t.InstalledAt,
+			}
+			e.persistCampLocked()
+			return
+		}
+	}
+	e.camp.TrustedPeers = append(e.camp.TrustedPeers, config.TrustedPeer{
+		PeerName:    t.PeerName,
+		CommonName:  t.CommonName,
+		Fingerprint: t.Fingerprint,
+		InstalledAt: t.InstalledAt,
+	})
+	e.persistCampLocked()
 }
 
 func parseCACert(p []byte) (*x509.Certificate, error) {
@@ -1463,26 +1589,51 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				if !existing.Online {
 					log.Printf("camp: peer %s back online (tunnel_ip=%s)", p.Name, p.TunnelIP)
 				}
-			} else if existing.Online {
-				log.Printf("camp: peer %s went offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
+			} else {
+				// Peer went offline (or stayed offline). Clear the stale
+				// endpoint so tunToPeerLoop / holePunchLoop stop firing
+				// packets at an address camp no longer vouches for. The
+				// reverse — going online — is handled above; we always
+				// re-resolve from the fresh UDPEndpoint string.
+				existing.UDPAddr = nil
+				existing.UDPEndpoint = ""
+				existing.PublicIP = ""
+				existing.UDPPort = 0
+				if existing.Online {
+					log.Printf("camp: peer %s went offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				}
 			}
 			existing.Online = p.Online
 		}
 		seen[p.TunnelIP] = struct{}{}
 	}
-	// Drop peers no longer in the camp roster at all (binding expired).
-	// Going offline does NOT trigger removal — those still show up in
-	// `peers` with Online=false from the camp side.
+	// Peers not in the latest poll: camp dropped them from the roster
+	// entirely (binding expired on their side). We KEEP them in e.peers
+	// as offline ghosts so the UI shows historical nodes — same as if
+	// camp still reported them with Online=false. holePunchLoop already
+	// skips peers without UDPAddr, so this is safe.
 	active := e.activeTunnelIP.Load()
 	for tip, st := range e.peers {
 		if _, alive := seen[tip]; alive {
 			continue
 		}
-		log.Printf("camp: peer %s @ %s removed (binding expired)", st.Name, st.UDPAddr)
-		delete(e.peers, tip)
+		if st.Online || st.UDPAddr != nil {
+			log.Printf("camp: peer %s @ %s no longer in roster (kept as offline)", st.Name, st.UDPAddr)
+		}
+		st.Online = false
+		st.UDPAddr = nil
+		st.UDPEndpoint = ""
+		st.PublicIP = ""
+		st.UDPPort = 0
 		if active != nil && *active == tip {
 			e.activeTunnelIP.Store(nil)
 		}
+	}
+	// Merge the snapshot into the persistent catalog so the UI sees
+	// known nodes (incl. currently-offline) on the next engine start.
+	if e.camp != nil {
+		e.mergePeerSnapshotLocked(peers)
+		e.persistCampLocked()
 	}
 }
 
@@ -1851,6 +2002,7 @@ func (e *Engine) Stop() error {
 	e.staticPeer.Store(nil)
 	e.lastStaticPingMs.Store(0)
 	e.intercepts = map[string]*InterceptInfo{}
+	e.camp = nil
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
@@ -2034,7 +2186,8 @@ func (e *Engine) MyDomains() []DomainEntry {
 // SetMyDomains replaces the local-published list atomically. Health
 // state for removed names is dropped so the UI doesn't show stale
 // "ok" indicators. Other peers pick up the change on their next
-// /api/domains poll (~10s).
+// /api/domains poll (~10s). Persists into camp config so the list
+// survives engine restart.
 func (e *Engine) SetMyDomains(list []DomainEntry) {
 	dup := make([]DomainEntry, len(list))
 	copy(dup, list)
@@ -2050,6 +2203,20 @@ func (e *Engine) SetMyDomains(list []DomainEntry) {
 		}
 	}
 	e.myDomainHealthMu.Unlock()
+	e.mu.Lock()
+	if e.camp != nil {
+		e.camp.MyDomains = make([]config.Domain, 0, len(dup))
+		for _, d := range dup {
+			e.camp.MyDomains = append(e.camp.MyDomains, config.Domain{
+				Name:  d.Name,
+				Host:  d.Host,
+				Port:  d.Port,
+				Proto: d.Proto,
+			})
+		}
+		e.persistCampLocked()
+	}
+	e.mu.Unlock()
 }
 
 // PeerDomains returns a snapshot of every known peer's domains, indexed
@@ -2085,6 +2252,7 @@ func toDNSEntries(in []DomainEntry) []internaldns.DomainEntry {
 // AddIntercept resolves spec, installs its host routes via utun, and binds
 // the entry to the named peer. peer must be a name currently in the camp
 // peers map; if not, the intercept is rejected. Requires Running.
+// Persists the (spec, peer) pair into camp config on success.
 func (e *Engine) AddIntercept(spec, peer string) (InterceptInfo, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -2097,7 +2265,27 @@ func (e *Engine) AddIntercept(spec, peer string) (InterceptInfo, error) {
 	if !e.hasPeerNameLocked(peer) {
 		return InterceptInfo{}, fmt.Errorf("peer %q is not in the camp", peer)
 	}
-	return e.addInterceptLocked(spec, peer)
+	info, err := e.addInterceptLocked(spec, peer)
+	if err != nil {
+		return info, err
+	}
+	if e.camp != nil {
+		dup := false
+		for _, it := range e.camp.Intercepts {
+			if it.Spec == info.Spec && it.Peer == info.Peer {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			e.camp.Intercepts = append(e.camp.Intercepts, config.Intercept{
+				Spec: info.Spec,
+				Peer: info.Peer,
+			})
+			e.persistCampLocked()
+		}
+	}
+	return info, nil
 }
 
 // hasPeerNameLocked reports whether any peer in the camp currently has
@@ -2111,7 +2299,8 @@ func (e *Engine) hasPeerNameLocked(name string) bool {
 	return false
 }
 
-// RemoveIntercept deletes all routes installed for the given entry ID.
+// RemoveIntercept deletes all routes installed for the given entry ID
+// and drops the matching (spec, peer) entry from camp config.
 func (e *Engine) RemoveIntercept(id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -2136,6 +2325,17 @@ func (e *Engine) RemoveIntercept(id string) error {
 	}
 	delete(e.intercepts, id)
 	log.Printf("removed intercept %s (%s)", id, info.Spec)
+	if e.camp != nil {
+		kept := e.camp.Intercepts[:0]
+		for _, it := range e.camp.Intercepts {
+			if it.Spec == info.Spec && it.Peer == info.Peer {
+				continue
+			}
+			kept = append(kept, it)
+		}
+		e.camp.Intercepts = kept
+		e.persistCampLocked()
+	}
 	return nil
 }
 

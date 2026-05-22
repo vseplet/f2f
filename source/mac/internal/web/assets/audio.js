@@ -272,7 +272,14 @@
           }
         } else if (e.track.kind === 'video') {
           $videoPeer.srcObject = stream;
-          $videoPeer.volume = 0;
+          // Don't muffle here — in same-stream multi-track WebRTC the
+          // same element ends up carrying audio too, and the audio
+          // branch below sets the real volume. WebKit was treating
+          // volume=0 set here as authoritative and ignoring later
+          // writes until the user dragged the slider (the bug already
+          // fixed in source/desktop, ported here).
+          $videoPeer.muted = false;
+          $videoPeer.volume = volume / 100;
           $panePeer.classList.add('has-video');
           e.track.addEventListener('mute',   () => $panePeer.classList.remove('has-video'));
           e.track.addEventListener('unmute', () => $panePeer.classList.add('has-video'));
@@ -692,9 +699,19 @@
       pc ? hangup() : call();
     });
     // Answerers never click the call button — incoming offers connect
-    // automatically — so we also prime on the first pointerdown anywhere
-    // on the page. Once primed, the listener self-removes.
-    document.addEventListener('pointerdown', primeAudio, { once: true, capture: true });
+    // automatically — so we also prime on every user gesture and on
+    // each one also nudge the actual <video> elements: WebKit autoplay
+    // gating remembers user intent per-element, not just page-wide, so
+    // .play() called from inside a user-gesture handler is what
+    // unmutes the stream. Without this the audio sat at volume/100 but
+    // played silently until the user wiggled the slider.
+    function unlockMedia() {
+      primeAudio();
+      if ($videoPeer.srcObject)       { $videoPeer.muted = false;       $videoPeer.play().catch(() => {}); }
+      if ($videoPeerScreen.srcObject) { $videoPeerScreen.muted = false; $videoPeerScreen.play().catch(() => {}); }
+    }
+    document.addEventListener('pointerdown', unlockMedia, { capture: true });
+    document.addEventListener('keydown', unlockMedia, { capture: true });
     $micBtn.addEventListener('click', () => {
       if (!localStream) return;
       micEnabled = !micEnabled;

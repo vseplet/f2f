@@ -37,14 +37,37 @@
           <div class="ax-section-title">
             <span>— identity</span>
           </div>
-          <div class="ax-grid-2">
-            <div class="ax-field">
-              <label>name</label>
-              <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+          <!-- Running: text-only readout, no inputs. Hidden while
+               stopped — see applyStatus. -->
+          <div id="identity-status" class="ax-section-status hidden">
+            running as <strong id="identity-name"></strong>
+            in camp <strong id="identity-camp"></strong>
+            · <a id="identity-switch" href="#">switch</a>
+          </div>
+          <!-- Stopped: single dropdown of known camps + "new camp"
+               sentinel at the bottom. Selecting a known camp auto-
+               starts; selecting "new camp" reveals the form below. -->
+          <div id="identity-picker" class="ax-field">
+            <label>camp</label>
+            <select id="camp-picker" class="ax-input">
+              <option value="">— pick a camp —</option>
+              <option value="__new__">+ new camp</option>
+            </select>
+          </div>
+          <div id="new-camp-form" class="hidden">
+            <div class="ax-grid-2">
+              <div class="ax-field">
+                <label>name</label>
+                <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
+              </div>
+              <div class="ax-field">
+                <label>camp id</label>
+                <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+              </div>
             </div>
-            <div class="ax-field">
-              <label>camp id</label>
-              <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+            <div class="ax-add-row" style="margin-top:6px">
+              <button id="btn-new-camp-start" class="ax-btn ax-btn-primary">join</button>
+              <button id="btn-new-camp-cancel" class="ax-btn">cancel</button>
             </div>
           </div>
         </div>

@@ -4,9 +4,24 @@ package dns
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
+
+// FlushCache asks macOS to drop its DNS cache and restart the
+// resolver. Called by the engine right after WriteResolver so any
+// stale negative entries from before f2f-mac was running don't pin
+// browsers to NXDOMAIN. Best-effort: failures are logged, not fatal.
+func FlushCache() {
+	if err := exec.Command("dscacheutil", "-flushcache").Run(); err != nil {
+		log.Printf("dns: dscacheutil -flushcache: %v", err)
+	}
+	if err := exec.Command("killall", "-HUP", "mDNSResponder").Run(); err != nil {
+		log.Printf("dns: killall -HUP mDNSResponder: %v", err)
+	}
+}
 
 const resolverDir = "/etc/resolver"
 

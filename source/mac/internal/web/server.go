@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/mac/internal/config"
 	"github.com/vseplet/f2f/source/mac/internal/engine"
 )
 
@@ -333,6 +334,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
+	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
+
+	// Per-camp configuration. /api/camps is the global view (list +
+	// last selected); /api/camp/{id} returns the full config file so
+	// the UI can preview before switching.
+	mux.HandleFunc("GET /api/camps", s.handleListCamps)
+	mux.HandleFunc("GET /api/camp/{id}", s.handleGetCamp)
 
 	// Firewall: default-deny inbound on utun + user-configurable
 	// allow list (in addition to f2f's own ports). Loopback-only,
@@ -350,6 +358,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/files/mine/{hash}", s.handleRemoveMyFile)
 	mux.HandleFunc("POST /api/files/download", s.handleAddDownload)
 	mux.HandleFunc("GET /api/files/downloads", s.handleListDownloads)
+	mux.HandleFunc("DELETE /api/files/downloads/{hash}", s.handleRemoveDownload)
 	mux.HandleFunc("POST /api/files/reveal", s.handleRevealFile)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 
@@ -702,6 +711,59 @@ func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
 }
 
+// handleRemoveTrustedPeer drops one peer CA by fingerprint — file on
+// disk, keychain entry, and config entry. 204 on success; 404 if the
+// fingerprint isn't known.
+func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request) {
+	fp := r.PathValue("fp")
+	if fp == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
+		return
+	}
+	if err := s.engine.RemoveTrustedPeer(fp); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListCamps returns the global state file — last selected
+// camp_id and the roster of every camp the user has ever joined.
+// Powers the UI's camp dropdown / switcher.
+func (s *Server) handleListCamps(w http.ResponseWriter, r *http.Request) {
+	st, err := s.engine.ListCamps()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if st.KnownCamps == nil {
+		st.KnownCamps = []config.KnownCamp{}
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleGetCamp returns the full on-disk config for one camp_id —
+// intercepts, my-domains, firewall, trusted-peer fingerprints, peer
+// catalog. 404 if no config exists yet for that id (i.e. the user
+// hasn't started the engine with this camp_id).
+func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing camp_id"))
+		return
+	}
+	c, err := s.engine.CampConfig(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if c == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no config for camp %q", id))
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
 // handleListFirewall returns the inbound-utun allow list: built-in
 // f2f ports (read-only) + user-configured ports. `active` reflects
 // whether the pf anchor is loaded — false = engine stopped or pf
@@ -894,8 +956,18 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 			"name":       d.Name,
 			"size":       d.Size,
 			"started_at": d.StartedAt.Unix(),
+			// Source peers fed at AddDownload time. Used by the UI to
+			// show "from peer-X" even before torrent metadata arrives,
+			// so users can tell what they were trying to download.
+			"peers": d.Peers,
 		}
-		if d.Torrent != nil && d.Torrent.Info() != nil {
+		// fetching_metadata = magnet added, but anacrolix hasn't pulled
+		// the .torrent yet (source peer offline or didn't connect).
+		// Without this the UI can't distinguish "active 0%" from "stuck
+		// waiting on metadata forever" — shows up as just an info_hash.
+		if d.Torrent == nil || d.Torrent.Info() == nil {
+			row["fetching_metadata"] = true
+		} else {
 			info := d.Torrent.Info()
 			total := info.TotalLength()
 			done := d.Torrent.BytesCompleted()
@@ -919,6 +991,29 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRemoveDownload cancels an in-progress download (or removes a
+// completed one from seeding). info_hash in URL path. 204 on success.
+// Files on disk are kept — anacrolix marks them as no longer managed
+// but doesn't unlink. The engine's pruneLoop catches up later.
+func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	hash := r.PathValue("hash")
+	if hash == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing info_hash"))
+		return
+	}
+	// Engine.RemoveDownload also drops the entry from downloads.json
+	// so it doesn't come back on restart. It returns false for unknown
+	// info_hashes — we still 204 to keep DELETE idempotent.
+	_ = t
+	s.engine.RemoveDownload(hash)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRevealFile runs `open -R <path>` so macOS selects the file in
@@ -980,7 +1075,7 @@ func isLoopback(remoteAddr string) bool {
 }
 
 type startRequest struct {
-	CampName string `json:"camp_name"`
+	CampName string `json:"camp_name,omitempty"`
 	CampID   string `json:"camp_id"`
 }
 
@@ -988,14 +1083,41 @@ type startRequest struct {
 // (utun addresses, UDP listen port, camp endpoint) uses sensible defaults
 // that the engine fills in. Static-peer mode is no longer reachable from
 // the UI — use the CLI if you need it.
+//
+// camp_name is optional when a per-camp config already exists on disk
+// (the engine reads it from $HOME/.f2f/<camp_id>.config.json). It is
+// required on the first start for a given camp_id.
+//
+// If the engine is already running with a different camp_id, we stop
+// it first — gives the UI a one-click "switch camp" affordance.
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	var req startRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.CampName == "" || req.CampID == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name and camp_id are required"))
+	if req.CampID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id is required"))
+		return
+	}
+	if cur := s.engine.Status(); cur.Running {
+		if cur.CampID == req.CampID {
+			writeJSON(w, http.StatusOK, cur)
+			return
+		}
+		if err := s.engine.Stop(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("stop current: %w", err))
+			return
+		}
+	}
+	name := req.CampName
+	if name == "" {
+		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
+			name = existing.Name
+		}
+	}
+	if name == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required for new camp %s", req.CampID))
 		return
 	}
 	cfg := engine.Config{
@@ -1004,7 +1126,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		Camp: &engine.CampConfig{
 			URL:      "wss://f2f-camp.fly.dev/ws",
 			StunAddr: "f2f-camp.fly.dev:3478",
-			Name:     req.CampName,
+			Name:     name,
 			ID:       req.CampID,
 		},
 	}

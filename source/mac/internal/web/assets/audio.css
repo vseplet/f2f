@@ -638,6 +638,10 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   padding: 0 4px;
 }
 .ax-list-remove:hover { color: #c25656; }
+.ax-list-remove.is-armed {
+  color: #c25656;
+  text-decoration: underline;
+}
 
 .ax-add-row {
   display: flex;
