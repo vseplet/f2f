@@ -50,9 +50,13 @@ type KnownCamp struct {
 // Empty slices marshal as [], not null, so the file is friendly to
 // hand-edit when nothing is set yet.
 type Camp struct {
-	CampID       string        `json:"camp_id"`
-	Name         string        `json:"name"`
-	Identity     *Identity     `json:"identity,omitempty"`
+	CampID string `json:"camp_id"`
+	// LegacyName carries the top-level "name" field that older builds
+	// wrote before we moved name into Identity. Marshalled with
+	// omitempty so it disappears on next save once migrated. Always
+	// empty after normaliseCamp runs.
+	LegacyName   string        `json:"name,omitempty"`
+	Identity     Identity      `json:"identity"`
 	Intercepts   []Intercept   `json:"intercepts"`
 	MyDomains    []Domain      `json:"my_domains"`
 	Firewall     []Firewall    `json:"firewall"`
@@ -60,13 +64,15 @@ type Camp struct {
 	PeerCatalog  []Peer        `json:"peer_catalog"`
 }
 
-// Identity is the public side of the per-camp Ed25519 keypair. Mirrored
-// here so the UI can show it without going to /var/lib/f2f/identity/.
-// The matching private key never appears in this file — it lives only
+// Identity is who you are in this camp: display name + public side of
+// the per-camp Ed25519 keypair. Pub/Fingerprint are mirrored here so
+// the UI can render them without reading /var/lib/f2f/identity/. The
+// matching private key never appears in this file — it lives only
 // under /var/lib/f2f/identity/<camp_id>/priv.key (mode 0600, root).
 type Identity struct {
-	Pub         string `json:"pub"`         // 64-hex Ed25519 public key
-	Fingerprint string `json:"fingerprint"` // first 16 hex of SHA-256(pub)
+	Name        string `json:"name"`                  // alias shown to peers
+	Pub         string `json:"pub,omitempty"`         // 64-hex Ed25519 public key
+	Fingerprint string `json:"fingerprint,omitempty"` // first 16 hex of SHA-256(pub)
 }
 
 type Intercept struct {
@@ -242,11 +248,21 @@ func (s *Store) writeJSON(path string, v any) error {
 }
 
 // normaliseCamp guarantees non-nil slices and a populated CampID so
-// callers never need to nil-check before iterating.
-func normaliseCamp(c *Camp, id string) {
+// callers never need to nil-check before iterating. Returns true when
+// the in-memory shape diverges from what would unmarshal cleanly —
+// caller should force a save to migrate the on-disk file.
+func normaliseCamp(c *Camp, id string) (migrated bool) {
 	if c.CampID == "" {
 		c.CampID = id
 	}
+	if c.LegacyName != "" {
+		if c.Identity.Name == "" {
+			c.Identity.Name = c.LegacyName
+		}
+		c.LegacyName = ""
+		migrated = true
+	}
+
 	if c.Intercepts == nil {
 		c.Intercepts = []Intercept{}
 	}
@@ -262,12 +278,13 @@ func normaliseCamp(c *Camp, id string) {
 	if c.PeerCatalog == nil {
 		c.PeerCatalog = []Peer{}
 	}
+	return migrated
 }
 
 // NewCamp returns a zero-valued Camp with non-nil slices, ready to
 // populate and save.
 func NewCamp(id, name string) *Camp {
-	c := &Camp{CampID: id, Name: name}
+	c := &Camp{CampID: id, Identity: Identity{Name: name}}
 	normaliseCamp(c, id)
 	return c
 }

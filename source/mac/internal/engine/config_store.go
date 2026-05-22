@@ -41,7 +41,7 @@ func (e *Engine) loadOrCreateCamp(id, name string) (*config.Camp, error) {
 		return config.NewCamp(id, name), nil
 	}
 	if name != "" {
-		c.Name = name
+		c.Identity.Name = name
 	}
 	return c, nil
 }
@@ -259,7 +259,7 @@ func (e *Engine) StartLastCamp() error {
 	if err != nil {
 		return err
 	}
-	if camp == nil || camp.Name == "" {
+	if camp == nil || camp.Identity.Name == "" {
 		log.Printf("autostart: skipping camp %s (no config or missing name)", st.LastCampID)
 		return nil
 	}
@@ -269,11 +269,11 @@ func (e *Engine) StartLastCamp() error {
 		Camp: &CampConfig{
 			URL:      "wss://f2f-camp.fly.dev/ws",
 			StunAddr: "f2f-camp.fly.dev:3478",
-			Name:     camp.Name,
+			Name:     camp.Identity.Name,
 			ID:       camp.CampID,
 		},
 	}
-	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Name)
+	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Identity.Name)
 	return e.Start(cfg)
 }
 

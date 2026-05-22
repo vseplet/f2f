@@ -1113,7 +1113,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	name := req.CampName
 	if name == "" {
 		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
-			name = existing.Name
+			name = existing.Identity.Name
 		}
 	}
 	if name == "" {

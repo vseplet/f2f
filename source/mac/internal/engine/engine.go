@@ -414,10 +414,12 @@ func (e *Engine) Start(cfg Config) error {
 		// Mirror pub/fingerprint into camp config so the UI can show
 		// it offline. Private key stays under /var/lib/f2f/identity/.
 		// Only writes when the pub changes (avoids touching the file
-		// on every Start once the keypair is stable).
-		want := &config.Identity{Pub: id.PubHex(), Fingerprint: id.Fingerprint()}
-		if c.Identity == nil || c.Identity.Pub != want.Pub {
-			c.Identity = want
+		// on every Start once the keypair is stable). Name is left
+		// alone — it was set by loadOrCreateCamp.
+		pub, fp := id.PubHex(), id.Fingerprint()
+		if c.Identity.Pub != pub || c.Identity.Fingerprint != fp {
+			c.Identity.Pub = pub
+			c.Identity.Fingerprint = fp
 			if err := e.store.SaveCamp(c.CampID, c); err != nil {
 				log.Printf("identity: persist into camp config: %v", err)
 			}
@@ -589,7 +591,7 @@ func (e *Engine) Start(cfg Config) error {
 	// guards on it). Failures are logged inside the helper.
 	if e.camp != nil {
 		e.restoreInterceptsFromCamp()
-		e.upsertKnownCamp(e.camp.CampID, e.camp.Name)
+		e.upsertKnownCamp(e.camp.CampID, e.camp.Identity.Name)
 	}
 
 	e.workers.Add(1)
