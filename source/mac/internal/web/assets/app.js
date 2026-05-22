@@ -171,6 +171,18 @@ $(function () {
     $('#identity-picker').removeClass('hidden');
     $('#camp-picker').val('').trigger('focus');
   });
+  // Click the pub-key cell to copy its full hex to the clipboard.
+  // No alert — flash the cell colour for half a second as feedback.
+  $('#identity-pub').on('click', function () {
+    const $el = $(this);
+    const pub = $el.data('pub');
+    if (!pub) return;
+    navigator.clipboard.writeText(pub).then(() => {
+      const prev = $el.css('color');
+      $el.css('color', '#7fc474');
+      setTimeout(() => $el.css('color', prev), 500);
+    }).catch(() => {});
+  });
 
   // Auto-start fires once after the first /api/status response that says
   // the engine is stopped *and* we have a camp identity stored. After
@@ -205,11 +217,17 @@ $(function () {
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';
-      // Running: collapse the picker and form into a one-line readout.
+      // Running: collapse the picker and form into a key:value readout.
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
       $('#identity-name').text(s.camp_name || '?');
       $('#identity-camp').text(s.camp_id || '?');
+      $('#identity-ip').text(s.local_ip || '—');
+      $('#identity-reflex').text(s.camp_reflex || '—');
+      const pub = s.identity_pub || '';
+      const fp = s.identity_fp || '';
+      $('#identity-pub').text(pub || '—').data('pub', pub);
+      $('#identity-fp').text(fp ? '· fp ' + fp : '');
       $('#identity-status').removeClass('hidden');
       $('#identity-picker').addClass('hidden');
       $('#new-camp-form').addClass('hidden');

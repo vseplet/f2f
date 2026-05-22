@@ -232,6 +232,51 @@ func (e *Engine) ListCamps() (*config.State, error) {
 	return e.store.LoadState()
 }
 
+// StartLastCamp loads state.json, picks last_camp_id, reads that
+// camp's config for the name, and calls Start with the same defaults
+// /api/start would use. Used by main.go to auto-start the engine as
+// the binary boots — no UI interaction needed.
+//
+// Returns nil silently when:
+//   - state.json doesn't exist yet (fresh install)
+//   - last_camp_id is empty
+//   - no per-camp config exists for the last id (config wiped)
+//   - the camp config has no name (would require user input to start)
+//
+// Real errors (filesystem failures, Start errors) bubble up.
+func (e *Engine) StartLastCamp() error {
+	if err := e.ensureStore(); err != nil {
+		return err
+	}
+	st, err := e.store.LoadState()
+	if err != nil {
+		return err
+	}
+	if st == nil || st.LastCampID == "" {
+		return nil
+	}
+	camp, err := e.store.LoadCamp(st.LastCampID)
+	if err != nil {
+		return err
+	}
+	if camp == nil || camp.Name == "" {
+		log.Printf("autostart: skipping camp %s (no config or missing name)", st.LastCampID)
+		return nil
+	}
+	cfg := Config{
+		LocalIP: "10.99.0.1", // placeholder; camp announce overrides
+		Listen:  ":9000",
+		Camp: &CampConfig{
+			URL:      "wss://f2f-camp.fly.dev/ws",
+			StunAddr: "f2f-camp.fly.dev:3478",
+			Name:     camp.Name,
+			ID:       camp.CampID,
+		},
+	}
+	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Name)
+	return e.Start(cfg)
+}
+
 // RemoveTrustedPeer drops one peer CA — deletes the on-disk PEM, the
 // keychain entry, the in-memory cache, and the camp config entry.
 // Idempotent: missing pieces are skipped without error. Engine must

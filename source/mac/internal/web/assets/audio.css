@@ -505,6 +505,28 @@ details.ax-advanced > .ax-advanced-body {
 
 .ax-section-actions { margin-top: 14px; display: flex; gap: 8px; }
 
+.ax-kv {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.ax-kv td {
+  padding: 4px 24px 4px 0;
+  vertical-align: top;
+}
+.ax-kv td:first-child {
+  color: #7a6e5a;
+  width: 110px;
+  white-space: nowrap;
+}
+.ax-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+  cursor: pointer;
+}
+.ax-mono:hover { color: #c4a554; }
+.muted { color: #7a6e5a; }
+
 /* Camp tab — peers table with reachability dot and active selection. */
 .ax-frame .ax-peers { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
 .ax-frame .ax-peers th {

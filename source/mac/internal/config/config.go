@@ -52,11 +52,21 @@ type KnownCamp struct {
 type Camp struct {
 	CampID       string        `json:"camp_id"`
 	Name         string        `json:"name"`
+	Identity     *Identity     `json:"identity,omitempty"`
 	Intercepts   []Intercept   `json:"intercepts"`
 	MyDomains    []Domain      `json:"my_domains"`
 	Firewall     []Firewall    `json:"firewall"`
 	TrustedPeers []TrustedPeer `json:"trusted_peers"`
 	PeerCatalog  []Peer        `json:"peer_catalog"`
+}
+
+// Identity is the public side of the per-camp Ed25519 keypair. Mirrored
+// here so the UI can show it without going to /var/lib/f2f/identity/.
+// The matching private key never appears in this file — it lives only
+// under /var/lib/f2f/identity/<camp_id>/priv.key (mode 0600, root).
+type Identity struct {
+	Pub         string `json:"pub"`         // 64-hex Ed25519 public key
+	Fingerprint string `json:"fingerprint"` // first 16 hex of SHA-256(pub)
 }
 
 type Intercept struct {

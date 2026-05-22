@@ -37,12 +37,21 @@
           <div class="ax-section-title">
             <span>— identity</span>
           </div>
-          <!-- Running: text-only readout, no inputs. Hidden while
+          <!-- Running: key:value readout, no inputs. Hidden while
                stopped — see applyStatus. -->
-          <div id="identity-status" class="ax-section-status hidden">
-            running as <strong id="identity-name"></strong>
-            in camp <strong id="identity-camp"></strong>
-            · <a id="identity-switch" href="#">switch</a>
+          <div id="identity-status" class="hidden">
+            <table class="ax-kv">
+              <tbody>
+                <tr><td>name</td>       <td id="identity-name"></td></tr>
+                <tr><td>camp id</td>    <td id="identity-camp"></td></tr>
+                <tr><td>tunnel ip</td>  <td id="identity-ip"></td></tr>
+                <tr><td>endpoint</td>   <td id="identity-reflex" class="muted">—</td></tr>
+                <tr><td>public key</td> <td><code id="identity-pub" class="ax-mono" title="click to copy"></code> <span id="identity-fp" class="muted"></span></td></tr>
+              </tbody>
+            </table>
+            <div class="ax-section-status">
+              <a id="identity-switch" href="#">switch camp →</a>
+            </div>
           </div>
           <!-- Stopped: single dropdown of known camps + "new camp"
                sentinel at the bottom. Selecting a known camp auto-

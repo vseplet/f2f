@@ -34,6 +34,7 @@ import (
 	internaldns "github.com/vseplet/f2f/source/mac/internal/dns"
 	"github.com/vseplet/f2f/source/mac/internal/egress"
 	"github.com/vseplet/f2f/source/mac/internal/firewall"
+	"github.com/vseplet/f2f/source/mac/internal/identity"
 	"github.com/vseplet/f2f/source/mac/internal/keychain"
 	internaltorrent "github.com/vseplet/f2f/source/mac/internal/torrent"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
@@ -85,6 +86,11 @@ type Status struct {
 	CampID       string `json:"camp_id,omitempty"`
 	CampPeerName string `json:"camp_peer_name,omitempty"` // active peer's name (display alias)
 	CampReflex   string `json:"camp_reflex,omitempty"`    // our own external endpoint per STUN
+	// Identity (Ed25519) for the running camp. Pub is the full 32-byte
+	// public key in hex; Fingerprint is the short SHA-256 prefix the
+	// UI shows. Empty in static --peer mode.
+	IdentityPub string `json:"identity_pub,omitempty"`
+	IdentityFP  string `json:"identity_fp,omitempty"`
 	// ActivePeerTunnelIP is the user-selected peer the tunnel routes
 	// catch-all traffic through. Empty when no one has been selected.
 	ActivePeerTunnelIP string             `json:"active_peer_tunnel_ip,omitempty"`
@@ -288,6 +294,13 @@ type Engine struct {
 	// running camp. nil when engine is stopped or in static mode.
 	// Mutations under e.mu are followed by persistCampLocked.
 	camp *config.Camp
+	// identity is the per-camp Ed25519 keypair under
+	// /var/lib/f2f/identity/<camp_id>/. Loaded (or generated) on Start
+	// in camp mode; nil otherwise. Identifier the camp server will use
+	// for sticky bindings and invite-signing once we wire it through
+	// the protocol — for now it's just persisted so the keys exist
+	// when we need them.
+	identity *identity.Identity
 }
 
 // TrustedPeerCA is one row in the UI's trusted-peers panel.
@@ -386,6 +399,29 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("config load %s: %w", cfg.Camp.ID, err)
 		}
 		e.camp = c
+		// Per-camp Ed25519 keypair. Lives under /var/lib/f2f/ (root,
+		// 0700) so different camps can't correlate and "leaving" a
+		// camp is rm -rf of that one subdir. Failures here are fatal
+		// — without an identity we can't prove tunnel_ip ownership
+		// to the camp server once that path is wired through.
+		idDir := filepath.Join("/var/lib/f2f/identity", cfg.Camp.ID)
+		id, err := identity.LoadOrGenerate(idDir)
+		if err != nil {
+			return fmt.Errorf("identity %s: %w", cfg.Camp.ID, err)
+		}
+		e.identity = id
+		log.Printf("identity: camp %s pub=%s fp=%s", cfg.Camp.ID, id.PubHex(), id.Fingerprint())
+		// Mirror pub/fingerprint into camp config so the UI can show
+		// it offline. Private key stays under /var/lib/f2f/identity/.
+		// Only writes when the pub changes (avoids touching the file
+		// on every Start once the keypair is stable).
+		want := &config.Identity{Pub: id.PubHex(), Fingerprint: id.Fingerprint()}
+		if c.Identity == nil || c.Identity.Pub != want.Pub {
+			c.Identity = want
+			if err := e.store.SaveCamp(c.CampID, c); err != nil {
+				log.Printf("identity: persist into camp config: %v", err)
+			}
+		}
 	}
 
 	// Egress goes first so its rollback runs last on the way down.
@@ -2003,6 +2039,7 @@ func (e *Engine) Stop() error {
 	e.lastStaticPingMs.Store(0)
 	e.intercepts = map[string]*InterceptInfo{}
 	e.camp = nil
+	e.identity = nil
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
@@ -2051,6 +2088,10 @@ func (e *Engine) Status() Status {
 			st.CampName = e.cfg.Camp.Name
 			st.CampID = e.cfg.Camp.ID
 			st.CampReflex = e.currentReflex()
+			if e.identity != nil {
+				st.IdentityPub = e.identity.PubHex()
+				st.IdentityFP = e.identity.Fingerprint()
+			}
 			if active := e.activeTunnelIP.Load(); active != nil {
 				st.ActivePeerTunnelIP = *active
 				if p, ok := e.peers[*active]; ok {

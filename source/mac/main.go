@@ -177,6 +177,19 @@ func uiCmd(args []string) error {
 		}
 	}()
 
+	// Auto-start with the last camp_id from $HOME/.f2f/state.json so
+	// users don't have to open the browser to bring the tunnel up.
+	// Runs in a goroutine — engine.Start blocks for several seconds
+	// (utun, UDP, camp announce), and the UI should be reachable
+	// during that window so users can watch / cancel. A non-nil error
+	// here is non-fatal: leaves the engine stopped, user can start
+	// manually from the UI.
+	go func() {
+		if err := eng.StartLastCamp(); err != nil {
+			log.Printf("autostart: %v", err)
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		log.Println("shutting down…")

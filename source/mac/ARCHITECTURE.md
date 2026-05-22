@@ -1244,9 +1244,12 @@ SSH только Bob'у, но не Carol'у). Это требует identity-lay
 firewall **на интерфейсе целиком**, без per-peer rules. Каждый
 открытый порт открыт для **всех** членов camp'а одинаково.
 
-Per-peer ACL отложен до Identity Phase 1 (см. TODO.md) — когда у
-каждого peer'а появится user_pub, можно будет добавить дополнительный
-matching по source-IP с привязкой к pubkey.
+Per-peer ACL отложен до Identity Phase 1 (см. TODO.md). Сами keypair'ы
+уже генерятся per-camp под `/var/lib/f2f/identity/<camp_id>/` и pub
+зеркалится в `<camp_id>.config.json`, но протокол announce / peer-list
+их пока не использует. Когда подвяжем подпись announce-пакетов — у
+каждого peer'а в roster'е появится верифицируемый `user_pub`, и можно
+будет добавить matching по source-IP с привязкой к pubkey.
 
 ### Built-in порты — read-only, не редактируются юзером
 
