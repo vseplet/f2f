@@ -576,18 +576,41 @@ $(function () {
     $campBody.empty();
     for (const p of peers) {
       const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
-      let dotClass;
-      if (p.self) dotClass = 'self';
-      else if (p.online === false) dotClass = 'offline';
-      else if (p.reachable) dotClass = 'reachable';
-      else dotClass = 'unreachable';
+      // Online = we received UDP from peer recently (local truth).
+      // InCamp = camp server sees peer's announce (camp roster).
+      // Color encodes the matrix:
+      //   self                          → yellow
+      //   online                        → green (we have a working tunnel)
+      //   in_camp without online        → red   (camp sees them, we can't reach)
+      //   neither                       → gray  (gone from camp's view too)
+      let dotClass, dotTitle;
+      if (p.self) {
+        dotClass = 'self';
+        dotTitle = 'you';
+      } else if (p.online) {
+        dotClass = 'reachable';
+        dotTitle = 'online — receiving packets';
+      } else if (p.in_camp) {
+        dotClass = 'unreachable';
+        dotTitle = 'in camp roster but no packets received yet (NAT / hole-punch issue?)';
+      } else {
+        dotClass = 'offline';
+        dotTitle = 'not in camp roster';
+      }
       const $row = $('<tr>')
         .addClass(p.self ? 'is-self' : '')
-        .addClass(p.online === false ? 'is-offline' : '')
+        .addClass(!p.online && !p.self ? 'is-offline' : '')
         .attr('data-tunnel-ip', p.tunnel_ip || '');
+      // Optional "in camp" badge next to the name — purely informational,
+      // shown when camp sees the peer regardless of our local view.
+      const $name = $('<td>');
+      $name.append(document.createTextNode(p.name + (p.self ? ' (you)' : '')));
+      if (!p.self && p.in_camp) {
+        $name.append($('<span class="ax-pill ax-pill-peer" style="margin-left:6px">').text('in camp'));
+      }
       $row.append(
-        $('<td>').append($('<span>').addClass('ax-dot ' + dotClass)),
-        $('<td>').text(p.name + (p.self ? ' (you)' : '')),
+        $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
+        $name,
         $('<td>').text(p.tunnel_ip || '—'),
         $('<td>').text(endpoint || '—'),
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),

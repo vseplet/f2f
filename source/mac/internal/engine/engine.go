@@ -125,6 +125,11 @@ type PeerStatusInfo struct {
 	// Firewall lists the peer's user-published open ports (without
 	// built-ins). Polled from their tunnel-side /api/firewall.
 	Firewall []FirewallPort `json:"firewall,omitempty"`
+	// InCamp = camp server confirms peer is alive in its roster
+	// (sent announce within ~60s). This is independent of whether
+	// we can reach the peer ourselves — the Online flag above is the
+	// local reachability view (we received UDP from them recently).
+	InCamp bool `json:"in_camp"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -192,15 +197,40 @@ type peerState struct {
 	UDPPort     int
 	UDPEndpoint string
 	JoinedAt    int64
-	Online      bool
-	LastSeenAt  int64
-	Domains     []DomainEntry
-	Files       []PeerFile     // populated by filesPollLoop
-	Firewall    []FirewallPort // populated by peerFirewallPollLoop
+	// InCamp = camp server sees this peer in the roster with a recent
+	// announce. Set from rendezvous PeerInfo.Online on each camp HTTP
+	// poll. Does NOT imply we can reach the peer ourselves — the
+	// "online" semantic for that lives in IsOnline() below.
+	InCamp     bool
+	LastSeenAt int64
+	Domains    []DomainEntry
+	Files      []PeerFile     // populated by filesPollLoop
+	Firewall   []FirewallPort // populated by peerFirewallPollLoop
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
 	LastPingMs   atomic.Int64 // epoch ms of last punch/keepalive we sent
+}
+
+// peerOnlineWindowMs is how long we consider a peer "online" after the
+// last UDP packet from them. Roughly 1× hole-punch keepalive period
+// plus slack — peers we expect to hear from punch us every 25s, so 30s
+// avoids flapping on a single missed packet.
+const peerOnlineWindowMs = 30000
+
+// IsOnline reports whether we've received any UDP from the peer
+// recently — our local view of reachability, independent of what
+// camp says. Used by everything that actually has to send TCP / poll
+// over the tunnel.
+func (p *peerState) IsOnline() bool {
+	if p == nil {
+		return false
+	}
+	seen := p.LastSeenMs.Load()
+	if seen == 0 {
+		return false
+	}
+	return time.Now().UnixMilli()-seen < peerOnlineWindowMs
 }
 
 // Engine is the long-lived tunnel runtime.
@@ -1443,7 +1473,7 @@ func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 	var targets []target
 	e.mu.Lock()
 	for tip, p := range e.peers {
-		if !p.Online {
+		if !p.IsOnline() {
 			continue
 		}
 		targets = append(targets, target{tunnelIP: tip, name: p.Name})
@@ -1610,15 +1640,15 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				UDPPort:     p.UDPPort,
 				UDPEndpoint: p.UDPEndpoint,
 				JoinedAt:    p.JoinedAt,
-				Online:      p.Online,
+				InCamp:      p.Online,
 				LastSeenAt:  p.LastSeenAt,
 				UDPAddr:     addr,
 			}
 			e.peers[p.TunnelIP] = st
 			if p.Online {
-				log.Printf("camp: peer %s @ %s joined (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
+				log.Printf("camp: peer %s @ %s entered roster (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
 			} else {
-				log.Printf("camp: peer %s known offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				log.Printf("camp: peer %s in roster but stale (tunnel_ip=%s)", p.Name, p.TunnelIP)
 			}
 		} else {
 			existing.Name = p.Name
@@ -1630,24 +1660,23 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				if addr != nil && !sameUDPAddr(existing.UDPAddr, addr) {
 					existing.UDPAddr = addr
 				}
-				if !existing.Online {
-					log.Printf("camp: peer %s back online (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				if !existing.InCamp {
+					log.Printf("camp: peer %s back in roster (tunnel_ip=%s)", p.Name, p.TunnelIP)
 				}
 			} else {
-				// Peer went offline (or stayed offline). Clear the stale
-				// endpoint so tunToPeerLoop / holePunchLoop stop firing
-				// packets at an address camp no longer vouches for. The
-				// reverse — going online — is handled above; we always
-				// re-resolve from the fresh UDPEndpoint string.
+				// Camp evicted the peer (no announce in ~60s) but kept
+				// the sticky binding. Drop the endpoint we cached for
+				// punch/forwarding — when peer comes back, camp will
+				// publish a fresh UDPEndpoint and we'll resolve again.
 				existing.UDPAddr = nil
 				existing.UDPEndpoint = ""
 				existing.PublicIP = ""
 				existing.UDPPort = 0
-				if existing.Online {
-					log.Printf("camp: peer %s went offline (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				if existing.InCamp {
+					log.Printf("camp: peer %s left roster (tunnel_ip=%s)", p.Name, p.TunnelIP)
 				}
 			}
-			existing.Online = p.Online
+			existing.InCamp = p.Online
 		}
 		seen[p.TunnelIP] = struct{}{}
 	}
@@ -1661,10 +1690,10 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		if _, alive := seen[tip]; alive {
 			continue
 		}
-		if st.Online || st.UDPAddr != nil {
-			log.Printf("camp: peer %s @ %s no longer in roster (kept as offline)", st.Name, st.UDPAddr)
+		if st.InCamp || st.UDPAddr != nil {
+			log.Printf("camp: peer %s @ %s no longer in roster", st.Name, st.UDPAddr)
 		}
-		st.Online = false
+		st.InCamp = false
 		st.UDPAddr = nil
 		st.UDPEndpoint = ""
 		st.PublicIP = ""
@@ -1735,7 +1764,7 @@ func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 	var targets []target
 	e.mu.Lock()
 	for tip, p := range e.peers {
-		if !p.Online {
+		if !p.IsOnline() {
 			continue
 		}
 		targets = append(targets, target{tunnelIP: tip, name: p.Name})
@@ -1803,7 +1832,7 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 	var targets []target
 	e.mu.Lock()
 	for tip, p := range e.peers {
-		if !p.Online {
+		if !p.IsOnline() {
 			continue
 		}
 		targets = append(targets, target{tunnelIP: tip, name: p.Name})
@@ -1936,7 +1965,7 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 	var targets []target
 	e.mu.Lock()
 	for tip, p := range e.peers {
-		if !p.Online {
+		if !p.IsOnline() {
 			continue
 		}
 		targets = append(targets, target{tunnelIP: tip, name: p.Name})
@@ -2250,8 +2279,6 @@ func (e *Engine) Status() Status {
 // the UI proxy. Includes a Self=true entry up front so the UI doesn't
 // have to fabricate one.
 func (e *Engine) peersStatusLocked() []PeerStatusInfo {
-	const reachableWindowMs = 30000
-	now := time.Now().UnixMilli()
 	active := ""
 	if a := e.activeTunnelIP.Load(); a != nil {
 		active = *a
@@ -2264,6 +2291,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			TunnelIP:    e.cfg.LocalIP,
 			UDPEndpoint: selfEndpoint,
 			JoinedAt:    e.started.UnixMilli(),
+			InCamp:      true,
 			Online:      true,
 			Reachable:   true,
 			Self:        true,
@@ -2281,6 +2309,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	for _, k := range keys {
 		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
+		online := p.IsOnline()
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			TunnelIP:    p.TunnelIP,
@@ -2289,8 +2318,9 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			UDPEndpoint: p.UDPEndpoint,
 			JoinedAt:    p.JoinedAt,
 			LastSeenMs:  seen,
-			Online:      p.Online,
-			Reachable:   p.Online && seen != 0 && now-seen < reachableWindowMs,
+			Online:      online,
+			Reachable:   online, // kept as alias for backward compat; same semantic now
+			InCamp:      p.InCamp,
 			Active:      p.TunnelIP == active,
 			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
@@ -2416,7 +2446,7 @@ func (e *Engine) PeerDomains() map[string][]internaldns.DomainEntry {
 		// the kernel would then route the apps' SYNs into utun and
 		// tunToPeerLoop would dump them with "drop-no-route". Better
 		// the browser get NXDOMAIN and fail fast.
-		if !p.Online || p.UDPAddr == nil {
+		if !p.IsOnline() || p.UDPAddr == nil {
 			continue
 		}
 		out[tip] = toDNSEntries(p.Domains)
