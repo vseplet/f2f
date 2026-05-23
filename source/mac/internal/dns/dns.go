@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -38,6 +39,37 @@ type Server struct {
 	srv    *dns.Server
 	suffix string // ".<camp_id>.f2f." — lowercase, trailing dot
 	res    Resolver
+
+	// Per-rcode query counters and last-query timestamp, for the UI's
+	// diagnostics tab. Atomic — read concurrently with handle().
+	totalQueries atomic.Int64
+	noerrCount   atomic.Int64
+	nxdomCount   atomic.Int64
+	refusedCount atomic.Int64
+	lastQueryMs  atomic.Int64
+}
+
+// Stats is a snapshot of DNS-server activity.
+type Stats struct {
+	Total       int64 `json:"total"`
+	NoError     int64 `json:"noerror"`
+	NXDomain    int64 `json:"nxdomain"`
+	Refused     int64 `json:"refused"`
+	LastQueryMs int64 `json:"last_query_ms"`
+}
+
+// Stats returns a snapshot of query counters. Safe for concurrent use.
+func (s *Server) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	return Stats{
+		Total:       s.totalQueries.Load(),
+		NoError:     s.noerrCount.Load(),
+		NXDomain:    s.nxdomCount.Load(),
+		Refused:     s.refusedCount.Load(),
+		LastQueryMs: s.lastQueryMs.Load(),
+	}
 }
 
 // Open binds to bindAddr (typically "127.0.0.1:5353") and starts
@@ -91,6 +123,18 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(req)
 	m.Authoritative = true
+	s.totalQueries.Add(1)
+	s.lastQueryMs.Store(time.Now().UnixMilli())
+	defer func() {
+		switch m.Rcode {
+		case dns.RcodeSuccess:
+			s.noerrCount.Add(1)
+		case dns.RcodeNameError:
+			s.nxdomCount.Add(1)
+		case dns.RcodeRefused:
+			s.refusedCount.Add(1)
+		}
+	}()
 	if len(req.Question) == 0 {
 		m.Rcode = dns.RcodeServerFailure
 		_ = w.WriteMsg(m)

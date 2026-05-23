@@ -556,6 +556,17 @@ details.ax-advanced > .ax-advanced-body {
 .ax-frame .ax-dot.offline { background: #555; }
 .ax-dot.unknown { background: #4a4030; }
 
+/* Camp-link health table: udp + http rows with dot/label/rtt/meta. */
+.ax-frame .ax-health {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.ax-frame .ax-health td { padding: 4px 8px; vertical-align: middle; }
+.ax-frame .ax-health-label { width: 140px; }
+.ax-frame .ax-health-rtt { width: 80px; font-variant-numeric: tabular-nums; }
+.ax-frame .ax-health-meta { color: #888; }
+
 /* drop-tab dropzone */
 .ax-dropzone {
   border: 1px dashed #3a3024;

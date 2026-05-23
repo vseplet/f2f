@@ -253,6 +253,153 @@ $(function () {
     $('#rx-packets').text(s.rx_packets || 0);
     $('#tx-bytes').text(fmtBytes(s.tx_bytes || 0));
     $('#rx-bytes').text(fmtBytes(s.rx_bytes || 0));
+
+    renderCampHealth(s);
+    renderDiagnostics(s);
+  }
+
+  // Last status sample used to compute tx/rx rates. We poll /api/status
+  // every 3s (see setInterval below), so the delta is the per-window
+  // throughput; UI converts to per-second.
+  let lastDiagSample = null;
+
+  // renderDiagnostics fills the diagnostics tab from Status.diagnostics
+  // and a couple of top-level fields. Safe to call even when engine is
+  // stopped — we just paint dashes.
+  function renderDiagnostics(s) {
+    const d = (s && s.diagnostics) || null;
+    if (!s || !s.running || !d) {
+      $('#diag-uptime,#diag-goroutines,#diag-udp-addr,#diag-utun,#diag-tx-rate,#diag-rx-rate,#diag-dns-resolver,#diag-dns-queries,#diag-dns-last').text('—');
+      $('#diag-dns-dot').attr('class', 'ax-dot offline').attr('title', 'engine not running');
+      lastDiagSample = null;
+      return;
+    }
+    $('#diag-uptime').text(fmtDuration(d.uptime_seconds || 0));
+    $('#diag-goroutines').text(d.goroutines || 0);
+    $('#diag-udp-addr').text(d.udp_local_addr || '—');
+    $('#diag-utun').text(s.utun_name || '—');
+
+    // Rate: compare to last sample's tx_bytes / rx_bytes.
+    const now = Date.now();
+    const tx = s.tx_bytes || 0, rx = s.rx_bytes || 0;
+    if (lastDiagSample && now > lastDiagSample.t) {
+      const dt = (now - lastDiagSample.t) / 1000;
+      const txRate = Math.max(0, (tx - lastDiagSample.tx) / dt);
+      const rxRate = Math.max(0, (rx - lastDiagSample.rx) / dt);
+      $('#diag-tx-rate').text(fmtBytes(Math.round(txRate)) + '/s');
+      $('#diag-rx-rate').text(fmtBytes(Math.round(rxRate)) + '/s');
+    } else {
+      $('#diag-tx-rate').text('—');
+      $('#diag-rx-rate').text('—');
+    }
+    lastDiagSample = { t: now, tx, rx };
+
+    // DNS row. The dot encodes a single question: "is macOS even
+    // routing queries to us?" — green when the /etc/resolver file is
+    // present AND we've seen a query in the last few minutes.
+    const resolverOK = !!d.dns_resolver_ok;
+    const lastQ = d.dns_last_query_ms ? (now - d.dns_last_query_ms) : -1;
+    let dnsDot = 'offline', dnsTitle = 'no /etc/resolver file';
+    if (!resolverOK) {
+      dnsDot = 'unreachable';
+      dnsTitle = '/etc/resolver missing — macOS not pointed at us';
+    } else if (lastQ >= 0 && lastQ < 300000) {
+      dnsDot = 'reachable';
+      dnsTitle = 'resolver file present, queries arriving';
+    } else if (lastQ >= 0) {
+      dnsDot = 'degraded';
+      dnsTitle = 'resolver file present, last query stale';
+    } else {
+      dnsDot = 'degraded';
+      dnsTitle = 'resolver file present, no queries yet';
+    }
+    $('#diag-dns-dot').attr('class', 'ax-dot ' + dnsDot).attr('title', dnsTitle);
+    $('#diag-dns-resolver').text(resolverOK ? 'present' : 'missing');
+    const total = d.dns_total || 0;
+    const ok = d.dns_noerror || 0;
+    const nx = d.dns_nxdomain || 0;
+    const rf = d.dns_refused || 0;
+    $('#diag-dns-queries').text(total + ' total · ' + ok + ' ok · ' + nx + ' nxdomain · ' + rf + ' refused');
+    $('#diag-dns-last').text(lastQ < 0 ? 'never' : (Math.floor(lastQ / 1000) + 's ago'));
+  }
+
+  function fmtDuration(seconds) {
+    if (seconds < 60) return seconds + 's';
+    const m = Math.floor(seconds / 60);
+    if (m < 60) return m + 'm ' + (seconds % 60) + 's';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ' + (m % 60) + 'm';
+    const d = Math.floor(h / 24);
+    return d + 'd ' + (h % 24) + 'h';
+  }
+
+  // renderCampHealth fills the "— camp link" section from Status.camp_health.
+  // Two independent rows: UDP announce/reply and HTTP peer-list poll. They
+  // travel different transports, so a single side can be wedged while the
+  // other is fine — surfacing them separately makes that visible.
+  function renderCampHealth(s) {
+    const $tbl = $('#camp-health-table');
+    const $msg = $('#camp-health-status');
+    if (!s || !s.running || !s.camp_health) {
+      $tbl.addClass('hidden');
+      $msg.text(s && s.running ? 'no camp data yet' : 'engine not running').show();
+      return;
+    }
+    $msg.hide();
+    $tbl.removeClass('hidden');
+    const h = s.camp_health;
+    const now = Date.now();
+
+    // UDP row. Healthy threshold: announce cadence is 20s, so a reply in
+    // the last 60s means we're comfortably alive. Beyond 180s call it dead.
+    const udpReplyAge = h.udp_last_reply_ms ? (now - h.udp_last_reply_ms) : -1;
+    const udpSentAge = h.udp_last_sent_ms ? (now - h.udp_last_sent_ms) : -1;
+    let udpDot = 'offline', udpTitle = 'no announce reply ever';
+    if (udpReplyAge >= 0 && udpReplyAge < 60000) {
+      udpDot = 'reachable'; udpTitle = 'recent reply';
+    } else if (udpReplyAge >= 0 && udpReplyAge < 180000) {
+      udpDot = 'degraded'; udpTitle = 'reply getting stale';
+    } else if (udpReplyAge >= 0) {
+      udpDot = 'unreachable'; udpTitle = 'no reply for too long';
+    }
+    $('#camp-udp-dot').attr('class', 'ax-dot ' + udpDot).attr('title', udpTitle);
+    $('#camp-udp-rtt').text(h.udp_rtt_ms ? h.udp_rtt_ms + 'ms' : '—');
+    let udpMeta;
+    if (udpReplyAge < 0) {
+      udpMeta = udpSentAge >= 0 ? 'sent ' + Math.floor(udpSentAge / 1000) + 's ago, no reply' : 'idle';
+    } else {
+      udpMeta = 'reply ' + Math.floor(udpReplyAge / 1000) + 's ago';
+    }
+    $('#camp-udp-meta').text(udpMeta);
+
+    // HTTP row. Poll cadence is 30s; healthy if last success < 90s.
+    const httpSuccessAge = h.http_last_success_ms ? (now - h.http_last_success_ms) : -1;
+    const httpPollAge = h.http_last_poll_ms ? (now - h.http_last_poll_ms) : -1;
+    const lastErr = h.http_last_err || '';
+    let httpDot = 'offline', httpTitle = 'no poll yet';
+    if (lastErr && httpSuccessAge < 0) {
+      httpDot = 'unreachable'; httpTitle = 'failing: ' + lastErr;
+    } else if (lastErr) {
+      httpDot = 'degraded'; httpTitle = 'last attempt failed: ' + lastErr;
+    } else if (httpSuccessAge >= 0 && httpSuccessAge < 90000) {
+      httpDot = 'reachable'; httpTitle = 'recent success';
+    } else if (httpSuccessAge >= 0) {
+      httpDot = 'degraded'; httpTitle = 'last success getting stale';
+    }
+    $('#camp-http-dot').attr('class', 'ax-dot ' + httpDot).attr('title', httpTitle);
+    $('#camp-http-rtt').text(h.http_rtt_ms ? h.http_rtt_ms + 'ms' : '—');
+    let httpMeta;
+    if (lastErr) {
+      httpMeta = 'err: ' + lastErr;
+    } else if (httpSuccessAge >= 0) {
+      const peers = h.http_peers_count || 0;
+      httpMeta = peers + ' peer' + (peers === 1 ? '' : 's') + ' · ' + Math.floor(httpSuccessAge / 1000) + 's ago';
+    } else if (httpPollAge >= 0) {
+      httpMeta = 'polled ' + Math.floor(httpPollAge / 1000) + 's ago, no data';
+    } else {
+      httpMeta = 'idle';
+    }
+    $('#camp-http-meta').text(httpMeta);
   }
 
   function renderIntercepts() {

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,19 @@ type PeerListPoller struct {
 	base       string // http://… or https://…
 	campID     string
 	onUpdate   func([]PeerInfo)
+
+	mu    sync.Mutex
+	stats PollerStats
+}
+
+// PollerStats is a snapshot of the poller's recent activity, exposed
+// for the UI's camp-health section.
+type PollerStats struct {
+	LastPollMs    int64  // wall-clock ms of last attempt (success or fail)
+	LastSuccessMs int64  // wall-clock ms of last successful response
+	LastRTTMs     int64  // duration of last poll request (success or fail)
+	LastErr       string // text of most recent failure; cleared on success
+	PeersCount    int    // peers reported in last successful response
 }
 
 // NewPeerListPoller wires up the poller. `base` is the http(s) origin
@@ -52,6 +66,7 @@ func (p *PeerListPoller) Run(ctx context.Context, every time.Duration) {
 }
 
 func (p *PeerListPoller) pollOnce(ctx context.Context) {
+	start := time.Now()
 	target := p.base + "/api/id/" + url.PathEscape(p.campID)
 	req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 	if err != nil {
@@ -62,11 +77,13 @@ func (p *PeerListPoller) pollOnce(ctx context.Context) {
 		if ctx.Err() == nil {
 			log.Printf("camp: poll: %v", err)
 		}
+		p.recordErr(start, err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		log.Printf("camp: poll: %s", resp.Status)
+		p.recordErr(start, resp.Status)
 		return
 	}
 	var body struct {
@@ -76,9 +93,38 @@ func (p *PeerListPoller) pollOnce(ctx context.Context) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		log.Printf("camp: poll decode: %v", err)
+		p.recordErr(start, "decode: "+err.Error())
 		return
 	}
+	p.recordSuccess(start, len(body.Peers))
 	p.onUpdate(body.Peers)
+}
+
+func (p *PeerListPoller) recordSuccess(start time.Time, peers int) {
+	now := time.Now()
+	p.mu.Lock()
+	p.stats.LastPollMs = now.UnixMilli()
+	p.stats.LastSuccessMs = now.UnixMilli()
+	p.stats.LastRTTMs = now.Sub(start).Milliseconds()
+	p.stats.LastErr = ""
+	p.stats.PeersCount = peers
+	p.mu.Unlock()
+}
+
+func (p *PeerListPoller) recordErr(start time.Time, msg string) {
+	now := time.Now()
+	p.mu.Lock()
+	p.stats.LastPollMs = now.UnixMilli()
+	p.stats.LastRTTMs = now.Sub(start).Milliseconds()
+	p.stats.LastErr = msg
+	p.mu.Unlock()
+}
+
+// Stats returns a snapshot of poller activity. Safe for concurrent use.
+func (p *PeerListPoller) Stats() PollerStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stats
 }
 
 // CampHTTPBase converts a camp WebSocket URL (ws[s]://host[:port]/ws)

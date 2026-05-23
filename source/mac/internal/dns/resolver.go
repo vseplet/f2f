@@ -49,6 +49,17 @@ func WriteResolver(campID, bindAddr string) error {
 	return os.WriteFile(resolverPath(campID), []byte(body), 0o644)
 }
 
+// ResolverFileExists reports whether /etc/resolver/<camp_id>.f2f is
+// currently in place. Cheap (one os.Stat) and used by the UI to flag
+// "macOS doesn't actually route our zone here" scenarios.
+func ResolverFileExists(campID string) bool {
+	if campID == "" {
+		return false
+	}
+	_, err := os.Stat(resolverPath(campID))
+	return err == nil
+}
+
 // RemoveResolver deletes the file. No-op if it doesn't exist.
 func RemoveResolver(campID string) error {
 	err := os.Remove(resolverPath(campID))
