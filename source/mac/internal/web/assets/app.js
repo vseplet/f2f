@@ -615,11 +615,23 @@ $(function () {
       if (!p.self && p.in_camp) {
         $name.append($('<span class="ax-pill ax-pill-peer" style="margin-left:6px">').text('in camp'));
       }
+      // RTT: show the latest measurement when we have one. Muted when
+      // the pong is stale (peer marked degraded above) so the number
+      // doesn't pretend to be current.
+      let rttText = '—';
+      let rttTitle = '';
+      if (p.rtt_ms && p.last_pong_ms) {
+        rttText = p.rtt_ms + 'ms';
+        rttTitle = 'last pong ' + humanAgo(p.last_pong_ms) + ' ago';
+      }
+      const $rtt = $('<td>').text(rttText).attr('title', rttTitle);
+      if (!p.verified) $rtt.addClass('muted');
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
         $name,
         $('<td>').text(p.tunnel_ip || '—'),
         $('<td>').text(endpoint || '—'),
+        $rtt,
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
       );
       $campBody.append($row);
