@@ -2408,6 +2408,17 @@ func (e *Engine) PeerDomains() map[string][]internaldns.DomainEntry {
 		if len(p.Domains) == 0 {
 			continue
 		}
+		// Only resolve names of peers we can actually reach right now.
+		// peer.Domains is kept across reconnects (cache survives camp
+		// polls and engine restarts so the UI can show last-known
+		// state for offline peers), but the resolver itself should
+		// not hand out an IP that the engine has no UDP target for —
+		// the kernel would then route the apps' SYNs into utun and
+		// tunToPeerLoop would dump them with "drop-no-route". Better
+		// the browser get NXDOMAIN and fail fast.
+		if !p.Online || p.UDPAddr == nil {
+			continue
+		}
 		out[tip] = toDNSEntries(p.Domains)
 	}
 	if mine := e.MyDomains(); len(mine) > 0 {
