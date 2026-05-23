@@ -332,6 +332,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/my-domains", s.handleListMyDomains)
 	mux.HandleFunc("PUT /api/my-domains", s.handleSetMyDomains)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
+	mux.HandleFunc("DELETE /api/peer-domains/{peer}/{name}", s.handleRemovePeerDomain)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
@@ -709,6 +710,23 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 // installed locally — fingerprint, common name, install timestamp.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+}
+
+// handleRemovePeerDomain drops one (peer, domain) entry from the
+// peer-catalog in camp config and from the live peer's Domains. If
+// the peer is still publishing the name, next poll re-adds it.
+func (s *Server) handleRemovePeerDomain(w http.ResponseWriter, r *http.Request) {
+	peer := r.PathValue("peer")
+	name := r.PathValue("name")
+	if peer == "" || name == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("peer and name required"))
+		return
+	}
+	if err := s.engine.RemovePeerDomain(peer, name); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRemoveTrustedPeer drops one peer CA by fingerprint — file on

@@ -119,6 +119,12 @@ type Peer struct {
 	JoinedAt    int64  `json:"joined_at,omitempty"`
 	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
 	Online      bool   `json:"online"`
+	// Domains is the last successful snapshot of names this peer was
+	// publishing via /api/domains. Kept across poll failures so the
+	// UI doesn't flicker, and across engine restarts so we know what
+	// to expect from this peer before the first poll lands. Refreshed
+	// only on a successful poll — never reset on transient errors.
+	Domains []Domain `json:"domains,omitempty"`
 }
 
 // NewStore resolves $HOME/.f2f/, creates it if missing, chowns to

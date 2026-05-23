@@ -1853,13 +1853,13 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			// Network blip; clear stale list so we don't keep resolving
-			// names the peer might have already removed.
-			e.mu.Lock()
-			if p, ok := e.peers[t.tunnelIP]; ok {
-				p.Domains = nil
-			}
-			e.mu.Unlock()
+			// Transient network failure (handshake didn't complete,
+			// peer momentarily unreachable, etc.) — keep the previously
+			// seen list as-is so the UI doesn't flicker. The peer-online
+			// flag from /api/status already tells the user the peer is
+			// having trouble; we surface "service down vs peer down" via
+			// the gray (offline) / red (online + health=fail) / green
+			// (online + health=ok) tri-state on the UI side.
 			continue
 		}
 		var list []DomainEntry
@@ -1872,7 +1872,35 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 		if p, ok := e.peers[t.tunnelIP]; ok {
 			p.Domains = list
 		}
+		e.persistPeerDomainsLocked(t.tunnelIP, list)
 		e.mu.Unlock()
+	}
+}
+
+// persistPeerDomainsLocked mirrors a peer's published domain list into
+// camp config so we keep it across engine restarts. Called with e.mu
+// held. Upserts by peer tunnel_ip; appends a fresh Peer row if the
+// catalog doesn't have one yet (shouldn't normally happen — applyPeerList
+// makes the catalog entry first — but be defensive).
+func (e *Engine) persistPeerDomainsLocked(tunnelIP string, domains []DomainEntry) {
+	if e.camp == nil {
+		return
+	}
+	out := make([]config.Domain, 0, len(domains))
+	for _, d := range domains {
+		out = append(out, config.Domain{
+			Name:  d.Name,
+			Host:  d.Host,
+			Port:  d.Port,
+			Proto: d.Proto,
+		})
+	}
+	for i := range e.camp.PeerCatalog {
+		if e.camp.PeerCatalog[i].TunnelIP == tunnelIP {
+			e.camp.PeerCatalog[i].Domains = out
+			e.persistCampLocked()
+			return
+		}
 	}
 }
 

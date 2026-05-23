@@ -727,10 +727,39 @@ $(function () {
     $('#my-domain-port').val('');
   });
 
+  // makePeerDomainDot renders a tri-state dot for the known-domains panel:
+  //   green  — peer online + peer's own health probe reports ok
+  //   red    — peer online + peer reports its service is down
+  //   gray   — peer offline (we can't even verify the service); also used
+  //            when the peer just came online but health hasn't been
+  //            checked yet (health is empty)
+  function makePeerDomainDot(entry) {
+    let cls, title;
+    if (!entry.online) {
+      cls = 'unknown';
+      title = 'peer is offline — can\'t verify service';
+    } else if (entry.health === 'ok') {
+      cls = 'reachable';
+      title = 'service is up';
+    } else if (entry.health === 'fail') {
+      cls = 'unreachable';
+      title = 'peer reachable but service is down';
+    } else {
+      cls = 'unknown';
+      title = 'health not checked yet';
+    }
+    return $('<span class="ax-dot">').addClass(cls).attr('title', title).css({
+      'display': 'inline-block', 'width': '8px', 'height': '8px', 'border-radius': '50%',
+      'margin-right': '8px',
+    });
+  }
+
   function renderKnownDomains() {
     const $list = $('#known-domains-list');
     $list.empty();
-    // Collect from livePeers (all online & offline peers we know).
+    // Collect from livePeers — includes peers persisted in the
+    // catalog with their last-known domains, even when currently
+    // offline. Backend doesn't reset the list on poll failure.
     const rows = [];
     livePeers.forEach((p) => {
       if (p.self) return;
@@ -748,7 +777,7 @@ $(function () {
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append(makeHealthDot(r));
+      $head.append(makePeerDomainDot(r));
       const $link = $('<a class="ax-intercept-spec ax-domain-link" target="_blank">')
         .attr('href', 'https://' + fqdn + '/')
         .text(fqdn);
@@ -758,6 +787,21 @@ $(function () {
       if (r.port) $head.append($('<span class="ax-pill ax-pill-peer">').text(':' + r.port));
       if (!r.online) $head.append($('<span class="ax-pill ax-pill-pending">').text('offline'));
       $head.append($('<span class="ax-intercept-meta">').text(r.peerTunnel));
+      // Remove from local catalog. Two-click confirm. If the peer is
+      // online and still publishes the name, the next poll re-adds it
+      // — this is intentional (keeps live state in sync). For stale
+      // entries from peers that are offline / no longer publish, this
+      // is how you clean up.
+      const $rm = $('<button class="ax-list-remove">');
+      armRemove($rm, () => {
+        $.ajax({
+          url: '/api/peer-domains/' + encodeURIComponent(r.peer) + '/' + encodeURIComponent(r.name),
+          method: 'DELETE',
+        })
+          .done(() => refreshStatus())
+          .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
+      });
+      $head.append($rm);
       $row.append($head);
       $list.append($row);
     });

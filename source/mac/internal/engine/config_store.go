@@ -196,7 +196,7 @@ func (e *Engine) hydratePeersFromCatalog() {
 		if _, dup := e.peers[p.TunnelIP]; dup {
 			continue
 		}
-		e.peers[p.TunnelIP] = &peerState{
+		st := &peerState{
 			Name:        p.Name,
 			TunnelIP:    p.TunnelIP,
 			PublicIP:    p.PublicIP,
@@ -208,6 +208,14 @@ func (e *Engine) hydratePeersFromCatalog() {
 			// confirms the peer is back online (and we resolve a fresh
 			// UDPAddr) or leaves them dormant.
 		}
+		if len(p.Domains) > 0 {
+			dup := make([]DomainEntry, len(p.Domains))
+			for i, d := range p.Domains {
+				dup[i] = DomainEntry{Name: d.Name, Host: d.Host, Port: d.Port, Proto: d.Proto}
+			}
+			st.Domains = dup
+		}
+		e.peers[p.TunnelIP] = st
 	}
 }
 
@@ -275,6 +283,55 @@ func (e *Engine) StartLastCamp() error {
 	}
 	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Identity.Name)
 	return e.Start(cfg)
+}
+
+// RemovePeerDomain drops one (peer, domain) entry from the persisted
+// catalog AND from the live peer's Domains slice. If the peer is
+// currently online and still publishing that name, the next successful
+// poll will re-add it — that's intentional: removal is for stale
+// entries where the peer is offline or no longer publishes.
+func (e *Engine) RemovePeerDomain(peerName, domainName string) error {
+	if peerName == "" || domainName == "" {
+		return errors.New("peer_name and domain_name required")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// In-memory: peers are keyed by tunnel_ip; find by name.
+	for _, p := range e.peers {
+		if p.Name != peerName {
+			continue
+		}
+		kept := p.Domains[:0]
+		for _, d := range p.Domains {
+			if d.Name == domainName {
+				continue
+			}
+			kept = append(kept, d)
+		}
+		p.Domains = kept
+	}
+	if e.camp == nil {
+		return nil
+	}
+	changed := false
+	for i := range e.camp.PeerCatalog {
+		if e.camp.PeerCatalog[i].Name != peerName {
+			continue
+		}
+		kept := e.camp.PeerCatalog[i].Domains[:0]
+		for _, d := range e.camp.PeerCatalog[i].Domains {
+			if d.Name == domainName {
+				changed = true
+				continue
+			}
+			kept = append(kept, d)
+		}
+		e.camp.PeerCatalog[i].Domains = kept
+	}
+	if changed {
+		e.persistCampLocked()
+	}
+	return nil
 }
 
 // RemoveTrustedPeer drops one peer CA — deletes the on-disk PEM, the
