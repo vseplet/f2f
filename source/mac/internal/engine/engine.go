@@ -148,7 +148,15 @@ type Diagnostics struct {
 // with Self=true represents us so the UI can render a single uniform
 // table.
 type PeerStatusInfo struct {
-	Name        string        `json:"name"`
+	Name string `json:"name"`
+	// Pub is the peer's Ed25519 pubkey in hex (64 chars). Empty for
+	// peers that haven't announced one yet. Stable identity across
+	// nickname changes — UI shows a fingerprint derived from it.
+	Pub         string        `json:"pub,omitempty"`
+	// Fp is the short SHA-256 fingerprint (16 hex chars) of Pub —
+	// what the UI shows. Computed server-side so the browser doesn't
+	// have to do crypto. Empty when Pub is empty.
+	Fp          string        `json:"fp,omitempty"`
 	TunnelIP    string        `json:"tunnel_ip"`
 	PublicIP    string        `json:"public_ip,omitempty"`
 	UDPPort     int           `json:"udp_port,omitempty"`
@@ -238,7 +246,11 @@ func (d DomainEntry) upstreamHost() string {
 // /api/domains over the tunnel. Stale (failed poll) → cleared; offline
 // (camp says) → kept stale until next refresh.
 type peerState struct {
-	Name        string
+	Name string
+	// Pub is the peer's Ed25519 hex pubkey — stable identity across
+	// renames. Empty for peers we haven't yet seen with a pub (legacy
+	// transitional window).
+	Pub         string
 	TunnelIP    string
 	PublicIP    string
 	UDPPort     int
@@ -564,7 +576,11 @@ func (e *Engine) Start(cfg Config) error {
 		peerIP  = cfg.PeerIP
 	)
 	if cfg.Camp != nil {
-		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID)
+		pub := ""
+		if e.identity != nil {
+			pub = e.identity.PubHex()
+		}
+		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID, pub)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("camp announce client: %w", err)
@@ -1692,6 +1708,7 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		if !ok {
 			st := &peerState{
 				Name:        p.Name,
+				Pub:         p.Pub,
 				TunnelIP:    p.TunnelIP,
 				PublicIP:    p.PublicIP,
 				UDPPort:     p.UDPPort,
@@ -1709,6 +1726,12 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 			}
 		} else {
 			existing.Name = p.Name
+			// Once a peer announces a pub we trust the camp-provided value
+			// and remember it across subsequent polls (camp may omit pub
+			// for offline-only entries).
+			if p.Pub != "" {
+				existing.Pub = p.Pub
+			}
 			existing.LastSeenAt = p.LastSeenAt
 			if p.Online {
 				existing.PublicIP = p.PublicIP
@@ -2413,8 +2436,15 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
 		selfEndpoint := e.currentReflex()
+		selfPub, selfFp := "", ""
+		if e.identity != nil {
+			selfPub = e.identity.PubHex()
+			selfFp = e.identity.Fingerprint()
+		}
 		out = append(out, PeerStatusInfo{
 			Name:        e.cfg.Camp.Name,
+			Pub:         selfPub,
+			Fp:          selfFp,
 			TunnelIP:    e.cfg.LocalIP,
 			UDPEndpoint: selfEndpoint,
 			JoinedAt:    e.started.UnixMilli(),
@@ -2449,6 +2479,8 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		}
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
+			Pub:         p.Pub,
+			Fp:          identity.FingerprintHex(p.Pub),
 			TunnelIP:    p.TunnelIP,
 			PublicIP:    p.PublicIP,
 			UDPPort:     p.UDPPort,

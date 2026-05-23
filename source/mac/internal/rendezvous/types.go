@@ -14,7 +14,11 @@ package rendezvous
 // Online == false means the peer is in the sticky-binding catalog but
 // hasn't announced recently — PublicIP/UDPEndpoint may be empty.
 type PeerInfo struct {
-	Name        string `json:"name"`
+	Name string `json:"name"`
+	// Pub is the peer's Ed25519 public key in hex (64 chars). Stable
+	// identity across renames; empty for legacy peers that haven't
+	// announced one yet (transitional, will become required).
+	Pub         string `json:"pub,omitempty"`
 	PublicIP    string `json:"public_ip"`
 	UDPPort     int    `json:"udp_port,omitempty"`
 	UDPEndpoint string `json:"udp_endpoint,omitempty"`
@@ -33,6 +37,9 @@ type announceReq struct {
 	T      string `json:"t"` // "announce"
 	Name   string `json:"name"`
 	CampID string `json:"camp_id"`
+	// Pub is the local Ed25519 public key in hex. Empty in static --peer
+	// mode (no identity); always set in camp mode now.
+	Pub string `json:"pub,omitempty"`
 }
 
 // announceResp is what camp sends back. Same shape parsed inline in

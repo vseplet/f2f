@@ -25,6 +25,7 @@ type AnnounceClient struct {
 	campAddr *net.UDPAddr // resolved camp UDP endpoint
 	name     string
 	campID   string
+	pub      string // local ed25519 pubkey in hex, "" in static --peer mode
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
@@ -40,8 +41,9 @@ type AnnounceClient struct {
 
 // NewAnnounceClient resolves campAddrStr and prepares the client. The
 // underlying UDP socket is shared — no exclusive ownership beyond the
-// brief AnnounceOnce bootstrap.
-func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID string) (*AnnounceClient, error) {
+// brief AnnounceOnce bootstrap. pub is the local ed25519 pubkey in hex,
+// empty if not available.
+func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub string) (*AnnounceClient, error) {
 	addr, err := net.ResolveUDPAddr("udp4", campAddrStr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve camp addr %q: %w", campAddrStr, err)
@@ -51,6 +53,7 @@ func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID string) (*An
 		campAddr: addr,
 		name:     name,
 		campID:   campID,
+		pub:      pub,
 	}, nil
 }
 
@@ -199,6 +202,7 @@ func (a *AnnounceClient) sendAnnounce() error {
 		T:      "announce",
 		Name:   a.name,
 		CampID: a.campID,
+		Pub:    a.pub,
 	})
 	if err != nil {
 		return err

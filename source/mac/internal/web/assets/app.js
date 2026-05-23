@@ -757,8 +757,15 @@ $(function () {
         .attr('data-tunnel-ip', p.tunnel_ip || '');
       // Optional "in camp" badge next to the name — purely informational,
       // shown when camp sees the peer regardless of our local view.
+      // Fingerprint pill renders the SHA-256(pub) prefix as the peer's
+      // stable identity — name is just a mutable alias.
       const $name = $('<td>');
       $name.append(document.createTextNode(p.name + (p.self ? ' (you)' : '')));
+      if (p.fp) {
+        $name.append($('<span class="ax-pill ax-pill-fp" style="margin-left:6px">')
+          .text('fp ' + p.fp)
+          .attr('title', p.pub ? 'pub ' + p.pub : 'fingerprint of ed25519 pub'));
+      }
       if (!p.self && p.in_camp) {
         $name.append($('<span class="ax-pill ax-pill-peer" style="margin-left:6px">').text('in camp'));
       }
