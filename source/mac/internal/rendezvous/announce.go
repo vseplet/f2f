@@ -25,14 +25,25 @@ type AnnounceClient struct {
 	campAddr *net.UDPAddr // resolved camp UDP endpoint
 	name     string
 	campID   string
+	pub      string // local ed25519 pubkey in hex, "" in static --peer mode
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
+
+	// Liveness counters for the UI's camp-health section. lastSentMs is
+	// stamped right before WriteToUDP; lastReplyMs is stamped when a
+	// recognised reply arrives via HandlePacket. RTT = reply-time minus
+	// the most recent send-time at parse time (best-effort: with our
+	// 20s announce cadence multiple sends almost never overlap).
+	lastSentMs  atomic.Int64
+	lastReplyMs atomic.Int64
+	lastRTTMs   atomic.Int64
 }
 
 // NewAnnounceClient resolves campAddrStr and prepares the client. The
 // underlying UDP socket is shared — no exclusive ownership beyond the
-// brief AnnounceOnce bootstrap.
-func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID string) (*AnnounceClient, error) {
+// brief AnnounceOnce bootstrap. pub is the local ed25519 pubkey in hex,
+// empty if not available.
+func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub string) (*AnnounceClient, error) {
 	addr, err := net.ResolveUDPAddr("udp4", campAddrStr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve camp addr %q: %w", campAddrStr, err)
@@ -42,6 +53,7 @@ func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID string) (*An
 		campAddr: addr,
 		name:     name,
 		campID:   campID,
+		pub:      pub,
 	}, nil
 }
 
@@ -52,6 +64,12 @@ func (a *AnnounceClient) CampAddr() *net.UDPAddr { return a.campAddr }
 // Self returns the latest PeerInfo camp gave us, or nil if we haven't
 // received any reply yet.
 func (a *AnnounceClient) Self() *PeerInfo { return a.self.Load() }
+
+// LastSentMs / LastReplyMs / LastRTTMs report the UDP-side liveness
+// timestamps. Zero means "never". Read concurrently from the UI.
+func (a *AnnounceClient) LastSentMs() int64  { return a.lastSentMs.Load() }
+func (a *AnnounceClient) LastReplyMs() int64 { return a.lastReplyMs.Load() }
+func (a *AnnounceClient) LastRTTMs() int64   { return a.lastRTTMs.Load() }
 
 // AnnounceOnce sends an announce and synchronously reads from conn
 // until a matching reply arrives or the timeout expires. Used at
@@ -93,6 +111,11 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 			}
 			if perr != nil {
 				return PeerInfo{}, perr
+			}
+			now := time.Now().UnixMilli()
+			a.lastReplyMs.Store(now)
+			if sent := a.lastSentMs.Load(); sent > 0 && now >= sent {
+				a.lastRTTMs.Store(now - sent)
 			}
 			a.self.Store(&info)
 			return info, nil
@@ -136,6 +159,11 @@ func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
 		log.Printf("camp: announce reply: %v", perr)
 		return true
 	}
+	now := time.Now().UnixMilli()
+	a.lastReplyMs.Store(now)
+	if sent := a.lastSentMs.Load(); sent > 0 && now >= sent {
+		a.lastRTTMs.Store(now - sent)
+	}
 	a.self.Store(&info)
 	return true
 }
@@ -174,10 +202,12 @@ func (a *AnnounceClient) sendAnnounce() error {
 		T:      "announce",
 		Name:   a.name,
 		CampID: a.campID,
+		Pub:    a.pub,
 	})
 	if err != nil {
 		return err
 	}
+	a.lastSentMs.Store(time.Now().UnixMilli())
 	if _, err := a.conn.WriteToUDP(data, a.campAddr); err != nil {
 		return fmt.Errorf("send announce: %w", err)
 	}

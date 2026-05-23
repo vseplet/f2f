@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,6 +103,43 @@ type Status struct {
 	RxBytes            uint64             `json:"rx_bytes"`
 	TxPackets          uint64             `json:"tx_packets"`
 	RxPackets          uint64             `json:"rx_packets"`
+	// CampHealth surfaces UDP + HTTP liveness with the camp server,
+	// used by the UI's camp-health section. Nil when camp mode is off.
+	CampHealth *CampHealth `json:"camp_health,omitempty"`
+	// Diagnostics is the runtime info dump for the diagnostics tab —
+	// DNS counters, goroutines, etc. Always populated when Running.
+	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
+}
+
+// CampHealth aggregates the UDP-announce and HTTP-poll signals against
+// the camp server. UDP and HTTP travel different paths (different
+// sockets, different transport), so split health makes asymmetric
+// failures visible — e.g. HTTP fine + UDP wedged after sleep.
+type CampHealth struct {
+	UDPLastSentMs     int64  `json:"udp_last_sent_ms,omitempty"`
+	UDPLastReplyMs    int64  `json:"udp_last_reply_ms,omitempty"`
+	UDPRTTMs          int64  `json:"udp_rtt_ms,omitempty"`
+	HTTPLastPollMs    int64  `json:"http_last_poll_ms,omitempty"`
+	HTTPLastSuccessMs int64  `json:"http_last_success_ms,omitempty"`
+	HTTPRTTMs         int64  `json:"http_rtt_ms,omitempty"`
+	HTTPLastErr       string `json:"http_last_err,omitempty"`
+	HTTPPeersCount    int    `json:"http_peers_count,omitempty"`
+}
+
+// Diagnostics is the catch-all runtime info displayed in the UI's
+// diagnostics tab. Keep additions here purely additive — JSON omitempty
+// means older UIs ignore unknown fields gracefully.
+type Diagnostics struct {
+	Goroutines    int    `json:"goroutines"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	UDPLocalAddr  string `json:"udp_local_addr,omitempty"`
+
+	DNSTotal       int64 `json:"dns_total"`
+	DNSNoError     int64 `json:"dns_noerror"`
+	DNSNXDomain    int64 `json:"dns_nxdomain"`
+	DNSRefused     int64 `json:"dns_refused"`
+	DNSLastQueryMs int64 `json:"dns_last_query_ms,omitempty"`
+	DNSResolverOK  bool  `json:"dns_resolver_ok"` // /etc/resolver/<id>.f2f present
 }
 
 // PeerStatusInfo augments rendezvous.PeerInfo with our local reachability
@@ -110,7 +148,15 @@ type Status struct {
 // with Self=true represents us so the UI can render a single uniform
 // table.
 type PeerStatusInfo struct {
-	Name        string        `json:"name"`
+	Name string `json:"name"`
+	// Pub is the peer's Ed25519 pubkey in hex (64 chars). Empty for
+	// peers that haven't announced one yet. Stable identity across
+	// nickname changes — UI shows a fingerprint derived from it.
+	Pub         string        `json:"pub,omitempty"`
+	// Fp is the short SHA-256 fingerprint (16 hex chars) of Pub —
+	// what the UI shows. Computed server-side so the browser doesn't
+	// have to do crypto. Empty when Pub is empty.
+	Fp          string        `json:"fp,omitempty"`
 	TunnelIP    string        `json:"tunnel_ip"`
 	PublicIP    string        `json:"public_ip,omitempty"`
 	UDPPort     int           `json:"udp_port,omitempty"`
@@ -200,7 +246,11 @@ func (d DomainEntry) upstreamHost() string {
 // /api/domains over the tunnel. Stale (failed poll) → cleared; offline
 // (camp says) → kept stale until next refresh.
 type peerState struct {
-	Name        string
+	Name string
+	// Pub is the peer's Ed25519 hex pubkey — stable identity across
+	// renames. Empty for peers we haven't yet seen with a pub (legacy
+	// transitional window).
+	Pub         string
 	TunnelIP    string
 	PublicIP    string
 	UDPPort     int
@@ -258,6 +308,7 @@ type Engine struct {
 	ca       *ca.CA                  // local CA for the current camp_id
 	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
+	poller   *rendezvous.PeerListPoller // periodic HTTP peer-list poll
 	pinger   *peerping.Pinger           // round-trip ping/pong per peer
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
@@ -525,7 +576,11 @@ func (e *Engine) Start(cfg Config) error {
 		peerIP  = cfg.PeerIP
 	)
 	if cfg.Camp != nil {
-		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID)
+		pub := ""
+		if e.identity != nil {
+			pub = e.identity.PubHex()
+		}
+		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID, pub)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("camp announce client: %w", err)
@@ -659,11 +714,11 @@ func (e *Engine) Start(cfg Config) error {
 		if err != nil {
 			log.Printf("camp: %v (peer list disabled)", err)
 		} else {
-			poller := rendezvous.NewPeerListPoller(base, cfg.Camp.ID, e.applyPeerList)
+			e.poller = rendezvous.NewPeerListPoller(base, cfg.Camp.ID, e.applyPeerList)
 			e.workers.Add(1)
 			go func() {
 				defer e.workers.Done()
-				poller.Run(ctx, 30*time.Second)
+				e.poller.Run(ctx, 30*time.Second)
 			}()
 		}
 	}
@@ -1653,6 +1708,7 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		if !ok {
 			st := &peerState{
 				Name:        p.Name,
+				Pub:         p.Pub,
 				TunnelIP:    p.TunnelIP,
 				PublicIP:    p.PublicIP,
 				UDPPort:     p.UDPPort,
@@ -1670,6 +1726,12 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 			}
 		} else {
 			existing.Name = p.Name
+			// Once a peer announces a pub we trust the camp-provided value
+			// and remember it across subsequent polls (camp may omit pub
+			// for offline-only entries).
+			if p.Pub != "" {
+				existing.Pub = p.Pub
+			}
 			existing.LastSeenAt = p.LastSeenAt
 			if p.Online {
 				existing.PublicIP = p.PublicIP
@@ -2127,6 +2189,52 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 	}
 }
 
+// diagnosticsLocked builds the Diagnostics snapshot from various
+// subsystems. Caller must hold e.mu.
+func (e *Engine) diagnosticsLocked() *Diagnostics {
+	d := &Diagnostics{
+		Goroutines: runtime.NumGoroutine(),
+	}
+	if !e.started.IsZero() {
+		d.UptimeSeconds = int64(time.Since(e.started).Seconds())
+	}
+	if e.udp != nil {
+		d.UDPLocalAddr = e.udp.LocalAddr().String()
+	}
+	if e.dnsSrv != nil {
+		s := e.dnsSrv.Stats()
+		d.DNSTotal = s.Total
+		d.DNSNoError = s.NoError
+		d.DNSNXDomain = s.NXDomain
+		d.DNSRefused = s.Refused
+		d.DNSLastQueryMs = s.LastQueryMs
+	}
+	if e.cfg.Camp != nil {
+		d.DNSResolverOK = internaldns.ResolverFileExists(e.cfg.Camp.ID)
+	}
+	return d
+}
+
+// campHealthLocked builds the CampHealth snapshot from the announce
+// client and the HTTP poller. Caller must hold e.mu.
+func (e *Engine) campHealthLocked() *CampHealth {
+	h := &CampHealth{}
+	if e.announce != nil {
+		h.UDPLastSentMs = e.announce.LastSentMs()
+		h.UDPLastReplyMs = e.announce.LastReplyMs()
+		h.UDPRTTMs = e.announce.LastRTTMs()
+	}
+	if e.poller != nil {
+		s := e.poller.Stats()
+		h.HTTPLastPollMs = s.LastPollMs
+		h.HTTPLastSuccessMs = s.LastSuccessMs
+		h.HTTPRTTMs = s.LastRTTMs
+		h.HTTPLastErr = s.LastErr
+		h.HTTPPeersCount = s.PeersCount
+	}
+	return h
+}
+
 // pingerTargets snapshots the current peers with a known UDP endpoint.
 // Called from the Pinger goroutine on every tick.
 func (e *Engine) pingerTargets() []peerping.Target {
@@ -2225,6 +2333,7 @@ func (e *Engine) Stop() error {
 	e.ca = nil
 	e.torrent = nil
 	e.announce = nil
+	e.poller = nil
 	e.pinger = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
@@ -2299,7 +2408,9 @@ func (e *Engine) Status() Status {
 				}
 			}
 			st.Peers = e.peersStatusLocked()
+			st.CampHealth = e.campHealthLocked()
 		}
+		st.Diagnostics = e.diagnosticsLocked()
 	}
 	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
 	for _, info := range e.intercepts {
@@ -2325,8 +2436,15 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
 		selfEndpoint := e.currentReflex()
+		selfPub, selfFp := "", ""
+		if e.identity != nil {
+			selfPub = e.identity.PubHex()
+			selfFp = e.identity.Fingerprint()
+		}
 		out = append(out, PeerStatusInfo{
 			Name:        e.cfg.Camp.Name,
+			Pub:         selfPub,
+			Fp:          selfFp,
 			TunnelIP:    e.cfg.LocalIP,
 			UDPEndpoint: selfEndpoint,
 			JoinedAt:    e.started.UnixMilli(),
@@ -2361,6 +2479,8 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		}
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
+			Pub:         p.Pub,
+			Fp:          identity.FingerprintHex(p.Pub),
 			TunnelIP:    p.TunnelIP,
 			PublicIP:    p.PublicIP,
 			UDPPort:     p.UDPPort,
@@ -3011,6 +3131,7 @@ func (e *Engine) rollbackPartial() {
 		e.egr = nil
 	}
 	e.announce = nil
+	e.poller = nil
 	e.pinger = nil
 }
 

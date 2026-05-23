@@ -97,6 +97,21 @@ func (i *Identity) Fingerprint() string {
 	return hex.EncodeToString(h[:8])
 }
 
+// FingerprintHex computes the same fingerprint from a hex-encoded
+// pubkey. Used to render peer identities the engine only knows by
+// pub hex (e.g. via camp's PeerInfo). Returns "" on bad input.
+func FingerprintHex(pubHex string) string {
+	if pubHex == "" {
+		return ""
+	}
+	raw, err := hex.DecodeString(pubHex)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(raw)
+	return hex.EncodeToString(h[:8])
+}
+
 // Sign returns an Ed25519 signature over msg.
 func (i *Identity) Sign(msg []byte) []byte {
 	return ed25519.Sign(i.priv, msg)

@@ -4,6 +4,10 @@
 
 export type PeerInfo = {
   name: string;
+  // Ed25519 public key in hex (64 chars) — the stable, cryptographically
+  // unique identity of the peer. `name` is just a display alias. Empty
+  // for legacy peers that haven't announced a pub yet (transitional).
+  pub?: string;
   public_ip: string;
   // Advertised UDP port the peer is reachable on, derived from the
   // source address of its announce packet. Combined with public_ip this
@@ -32,6 +36,10 @@ export type AnnounceReq = {
   t: "announce";
   name: string;
   camp_id: string;
+  // Ed25519 public key in hex (64 chars). Optional during the transition
+  // — legacy clients without one are accepted as-is. Once a peer
+  // announces with a pub, the server records it alongside name.
+  pub?: string;
 };
 
 // Server's reply on success.

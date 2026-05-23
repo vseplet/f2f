@@ -556,6 +556,17 @@ details.ax-advanced > .ax-advanced-body {
 .ax-frame .ax-dot.offline { background: #555; }
 .ax-dot.unknown { background: #4a4030; }
 
+/* Camp-link health table: udp + http rows with dot/label/rtt/meta. */
+.ax-frame .ax-health {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.ax-frame .ax-health td { padding: 4px 8px; vertical-align: middle; }
+.ax-frame .ax-health-label { width: 140px; }
+.ax-frame .ax-health-rtt { width: 80px; font-variant-numeric: tabular-nums; }
+.ax-frame .ax-health-meta { color: #888; }
+
 /* drop-tab dropzone */
 .ax-dropzone {
   border: 1px dashed #3a3024;
@@ -627,6 +638,19 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
 .ax-pill-active { color: #86b86b; border-color: #3a5a30; background: rgba(134, 184, 107, 0.06); }
 .ax-pill-pending { color: #c4a554; border-color: #6a5030; background: rgba(196, 165, 84, 0.06); }
 .ax-pill-peer    { color: #8aa8c8; border-color: #355068; background: rgba(138, 168, 200, 0.06); }
+/* Fingerprint pill — used in the peers table next to nicknames. Has its
+   own padding/border because the base .ax-pill rule is scoped to
+   .ax-intercept and we render outside that context. */
+.ax-pill-fp {
+  display: inline-block;
+  font-size: 10px;
+  font-family: monospace;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid #555044;
+  color: #888070;
+  background: rgba(136, 128, 112, 0.06);
+}
 
 .ax-intercept-body { padding: 8px 12px 12px 30px; }
 .ax-intercept-empty { color: #6a5e4a; font-size: 12px; }

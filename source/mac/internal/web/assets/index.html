@@ -22,6 +22,8 @@
           <button type="button" data-tab="audio" class="ax-tab">meet</button>
           <span class="ax-sep">·</span>
           <button type="button" data-tab="drop" class="ax-tab">drop</button>
+          <span class="ax-sep">·</span>
+          <button type="button" data-tab="diagnostics" class="ax-tab">diagnostics</button>
         </div>
         <button id="btn-engine" type="button" class="ax-engine-btn state-loading" title="loading…">
           <span class="ax-engine-state">⋯</span>
@@ -79,6 +81,29 @@
               <button id="btn-new-camp-cancel" class="ax-btn">cancel</button>
             </div>
           </div>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— camp link</span>
+          </div>
+          <table id="camp-health-table" class="ax-health hidden">
+            <tbody>
+              <tr>
+                <td class="ax-peers-dot"><span id="camp-udp-dot" class="ax-dot offline"></span></td>
+                <td class="ax-health-label">udp announce</td>
+                <td id="camp-udp-rtt" class="ax-health-rtt">—</td>
+                <td id="camp-udp-meta" class="ax-health-meta muted">—</td>
+              </tr>
+              <tr>
+                <td class="ax-peers-dot"><span id="camp-http-dot" class="ax-dot offline"></span></td>
+                <td class="ax-health-label">http peer list</td>
+                <td id="camp-http-rtt" class="ax-health-rtt">—</td>
+                <td id="camp-http-meta" class="ax-health-meta muted">—</td>
+              </tr>
+            </tbody>
+          </table>
+          <div id="camp-health-status" class="ax-section-status muted">engine not running</div>
         </div>
 
         <div class="ax-section">
@@ -154,22 +179,6 @@
           <div id="peer-firewall-list" class="ax-list" style="margin-top:8px"></div>
         </div>
 
-        <div class="ax-section">
-          <div class="ax-counters">
-            <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
-            <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
-            <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
-            <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
-          </div>
-        </div>
-
-        <div class="ax-section">
-          <div class="ax-section-title">
-            <span>— log</span>
-            <button id="btn-clear-log" class="ax-list-remove" style="margin:0">clear</button>
-          </div>
-          <pre id="log" style="height:280px;overflow-y:auto;white-space:pre-wrap;margin:0"></pre>
-        </div>
       </div>
     </div><!-- /#tab-tunnel -->
 
@@ -360,6 +369,93 @@
         </div>
       </div>
     </div><!-- /#tab-drop -->
+
+    <div id="tab-diagnostics" class="tab-panel hidden">
+      <div class="ax-frame">
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— runtime</span>
+          </div>
+          <table class="ax-health">
+            <tbody>
+              <tr>
+                <td class="ax-health-label">uptime</td>
+                <td id="diag-uptime" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td class="ax-health-label">goroutines</td>
+                <td id="diag-goroutines" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td class="ax-health-label">udp local addr</td>
+                <td id="diag-udp-addr" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td class="ax-health-label">utun</td>
+                <td id="diag-utun" class="ax-health-meta">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— traffic</span>
+          </div>
+          <div class="ax-counters">
+            <div class="ax-counter"><div class="ax-counter-label">tx packets</div><div class="ax-counter-value" id="tx-packets">0</div></div>
+            <div class="ax-counter"><div class="ax-counter-label">tx bytes</div><div class="ax-counter-value" id="tx-bytes">0</div></div>
+            <div class="ax-counter"><div class="ax-counter-label">rx packets</div><div class="ax-counter-value" id="rx-packets">0</div></div>
+            <div class="ax-counter"><div class="ax-counter-label">rx bytes</div><div class="ax-counter-value" id="rx-bytes">0</div></div>
+          </div>
+          <table class="ax-health" style="margin-top:8px">
+            <tbody>
+              <tr>
+                <td class="ax-health-label">tx rate</td>
+                <td id="diag-tx-rate" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td class="ax-health-label">rx rate</td>
+                <td id="diag-rx-rate" class="ax-health-meta">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— dns server</span>
+          </div>
+          <table id="diag-dns-table" class="ax-health">
+            <tbody>
+              <tr>
+                <td class="ax-peers-dot"><span id="diag-dns-dot" class="ax-dot offline"></span></td>
+                <td class="ax-health-label">/etc/resolver</td>
+                <td id="diag-dns-resolver" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="ax-health-label">queries</td>
+                <td id="diag-dns-queries" class="ax-health-meta">—</td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="ax-health-label">last query</td>
+                <td id="diag-dns-last" class="ax-health-meta">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— log</span>
+            <button id="btn-clear-log" class="ax-list-remove" style="margin:0">clear</button>
+          </div>
+          <pre id="log" style="height:280px;overflow-y:auto;white-space:pre-wrap;margin:0"></pre>
+        </div>
+      </div>
+    </div><!-- /#tab-diagnostics -->
   </div>
 
   <script src="/app.js"></script>

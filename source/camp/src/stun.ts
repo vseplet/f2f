@@ -17,17 +17,20 @@ import type { Hub } from "./hub";
 import type { AnnouncedResp, AnnounceErr, AnnounceReq } from "./types";
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const PUB_RE = /^[a-f0-9]{64}$/;
 const MAX_NAME_LEN = 64;
 const MAX_CAMP_ID_LEN = 128;
 
 function isValidAnnounce(x: unknown): x is AnnounceReq {
   if (typeof x !== "object" || x === null) return false;
   const m = x as Record<string, unknown>;
-  return (
-    m.t === "announce" &&
-    typeof m.name === "string" &&
-    typeof m.camp_id === "string"
-  );
+  if (m.t !== "announce") return false;
+  if (typeof m.name !== "string") return false;
+  if (typeof m.camp_id !== "string") return false;
+  // pub is optional; if present must be a string. Format check happens
+  // in the handler so we can return a structured error.
+  if (m.pub !== undefined && typeof m.pub !== "string") return false;
+  return true;
 }
 
 // On fly.io UDP packets only reach a Machine if you bind to the special
@@ -66,6 +69,7 @@ export async function startUDP(port: number, hub: Hub) {
 
         const name = msg.name;
         const campID = msg.camp_id;
+        const pub = msg.pub ?? "";
         if (!name || name.length > MAX_NAME_LEN || !NAME_RE.test(name)) {
           sendErr(sock, srcAddr, srcPort, "bad_name", `invalid name`);
           return;
@@ -74,18 +78,29 @@ export async function startUDP(port: number, hub: Hub) {
           sendErr(sock, srcAddr, srcPort, "bad_camp_id", `invalid camp_id`);
           return;
         }
+        // pub became the primary identity. Reject clients that don't
+        // send one — at this point in the rollout every supported
+        // client (mac, eventually win) generates an ed25519 keypair.
+        if (!pub) {
+          sendErr(sock, srcAddr, srcPort, "pub_required", "client must announce ed25519 pub");
+          return;
+        }
+        if (!PUB_RE.test(pub)) {
+          sendErr(sock, srcAddr, srcPort, "bad_pub", `invalid pub (expect 64 hex)`);
+          return;
+        }
 
-        const wasNew = !hub.has(campID, name);
+        const wasNew = !hub.has(campID, pub);
         let info;
         try {
-          info = await hub.upsert(campID, name, srcAddr, srcPort);
+          info = await hub.upsert(campID, pub, name, srcAddr, srcPort);
         } catch (err) {
           sendErr(sock, srcAddr, srcPort, "camp_full", (err as Error).message);
           return;
         }
         if (wasNew) {
           console.log(
-            `join: ${name}@${campID} ${info.tunnel_ip} from ${srcAddr}:${srcPort}`,
+            `join: ${name}@${campID} ${info.tunnel_ip} pub=${pub.slice(0, 16)} from ${srcAddr}:${srcPort}`,
           );
         }
 

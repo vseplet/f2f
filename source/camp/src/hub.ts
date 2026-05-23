@@ -1,4 +1,4 @@
-import { loadBindings, saveBinding, touchBinding } from "./db";
+import { loadBindings, saveBinding, touchBinding, type BindingRow } from "./db";
 import type { PeerInfo } from "./types";
 
 // Peer is the live state for a registered peer.
@@ -9,17 +9,18 @@ export type Peer = {
 };
 
 // Each camp is its own /24 overlay (10.99.0.0/24). The mapping
-// name → octet is sticky across leave/rejoin: Hub holds it in
+// pub → {name, octet} is sticky across leave/rejoin: Hub holds it in
 // `bindings` in-memory (write-through to Turso), so a peer that
-// reconnects gets back the same tunnel_ip they had before.
+// reconnects gets back the same tunnel_ip they had before. Name is
+// just a mutable alias stored alongside.
 const SUBNET_PREFIX = "10.99.0";
 const FIRST_HOST = 1;
 const LAST_HOST = 254;
 
 type Camp = {
-  peers: Map<string, Peer>;
-  bindings: Map<string, number>; // name → octet, sticky
-  loaded: boolean;               // bindings have been hydrated from db
+  peers: Map<string, Peer>;          // keyed by pub
+  bindings: Map<string, BindingRow>; // keyed by pub
+  loaded: boolean;                   // bindings have been hydrated from db
 };
 
 export class Hub {
@@ -37,8 +38,8 @@ export class Hub {
       const persisted = await loadBindings(campID);
       // If we already had in-memory entries (from concurrent upserts
       // racing the load), keep ours and merge.
-      for (const [name, octet] of persisted) {
-        if (!c.bindings.has(name)) c.bindings.set(name, octet);
+      for (const [pub, row] of persisted) {
+        if (!c.bindings.has(pub)) c.bindings.set(pub, row);
       }
       c.loaded = true;
     }
@@ -47,42 +48,51 @@ export class Hub {
 
   // Upsert is the announce-driven path: refresh an existing peer or
   // welcome a new one. The peer's octet is sticky via `bindings` —
-  // same name in same camp → same tunnel_ip across sessions. Throws
-  // if the camp's /24 pool is exhausted on a fresh allocation.
-  async upsert(campID: string, name: string, publicIP: string, udpPort: number): Promise<PeerInfo> {
+  // same pub in same camp → same tunnel_ip across sessions. Name is
+  // just stored alongside; renames are free. Throws if the camp's /24
+  // pool is exhausted on a fresh allocation.
+  async upsert(campID: string, pub: string, name: string, publicIP: string, udpPort: number): Promise<PeerInfo> {
     const c = await this.ensureLoaded(campID);
     const now = Date.now();
-    const existing = c.peers.get(name);
+    const existing = c.peers.get(pub);
     if (existing) {
+      existing.info.name = name;
       existing.info.public_ip = publicIP;
       existing.info.udp_port = udpPort;
       existing.info.udp_endpoint = `${publicIP}:${udpPort}`;
       existing.info.online = true;
       existing.info.last_seen_at = now;
       existing.lastSeen = now;
-      void touchBinding(campID, name);
+      const row = c.bindings.get(pub);
+      if (row && row.name !== name) row.name = name;
+      void touchBinding(campID, pub, name);
       return existing.info;
     }
-    // First time we see this name in this camp's live state — figure
+    // First time we see this pub in this camp's live state — figure
     // out which octet they get.
-    let octet = c.bindings.get(name) ?? -1;
-    if (octet < 0 || c.bindings.size === 0) {
+    const prior = c.bindings.get(pub);
+    let octet = prior ? prior.octet : -1;
+    if (octet < 0) {
       // No prior binding (in-memory or db). Allocate next free.
       octet = this.nextFreeOctet(c);
       if (octet < 0) throw new Error(`camp ${campID} is full`);
-      c.bindings.set(name, octet);
-    } else if (!isOctetTaken(c, octet, name)) {
-      // Prior binding is still ours to use.
+      c.bindings.set(pub, { name, octet });
+    } else if (!isOctetTaken(c, octet, pub)) {
+      // Prior binding is still ours to use; update name if changed.
+      if (prior && prior.name !== name) {
+        c.bindings.set(pub, { name, octet });
+      }
     } else {
       // Octet is taken by someone else currently (unusual: only
-      // happens if a name was reassigned out-of-band, or a long-dead
+      // happens if a binding was reassigned out-of-band, or a long-dead
       // entry never got cleaned). Reallocate.
       octet = this.nextFreeOctet(c);
       if (octet < 0) throw new Error(`camp ${campID} is full`);
-      c.bindings.set(name, octet);
+      c.bindings.set(pub, { name, octet });
     }
     const info: PeerInfo = {
       name,
+      pub,
       public_ip: publicIP,
       udp_port: udpPort,
       udp_endpoint: `${publicIP}:${udpPort}`,
@@ -91,11 +101,11 @@ export class Hub {
       online: true,
       last_seen_at: now,
     };
-    c.peers.set(name, { campID, info, lastSeen: now });
+    c.peers.set(pub, { campID, info, lastSeen: now });
 
     // Write-through to Turso. Tolerate failures (we still have the
     // binding in-memory for this session).
-    saveBinding(campID, name, octet).catch((err) => {
+    saveBinding(campID, pub, name, octet).catch((err) => {
       console.error(`db: saveBinding(${campID},${name}) failed: ${(err as Error).message}`);
     });
     return info;
@@ -108,7 +118,7 @@ export class Hub {
       if (o >= 0) taken.add(o);
     }
     // Also avoid octets that have a binding (sticky for absent peers).
-    for (const o of c.bindings.values()) taken.add(o);
+    for (const row of c.bindings.values()) taken.add(row.octet);
     for (let i = FIRST_HOST; i <= LAST_HOST; i++) {
       if (!taken.has(i)) return i;
     }
@@ -116,13 +126,13 @@ export class Hub {
   }
 
   // Find a specific peer (live) in a camp.
-  get(campID: string, name: string): Peer | undefined {
-    return this.camps.get(campID)?.peers.get(name);
+  get(campID: string, pub: string): Peer | undefined {
+    return this.camps.get(campID)?.peers.get(pub);
   }
 
-  // True if a peer with this name is currently in the camp.
-  has(campID: string, name: string): boolean {
-    return this.camps.get(campID)?.peers.has(name) ?? false;
+  // True if a peer with this pub is currently in the camp.
+  has(campID: string, pub: string): boolean {
+    return this.camps.get(campID)?.peers.has(pub) ?? false;
   }
 
   // Snapshot of every peer in a camp — online (currently announcing)
@@ -134,12 +144,13 @@ export class Hub {
     if (!c) return [];
     const out: PeerInfo[] = [];
     for (const p of c.peers.values()) out.push(p.info);
-    for (const [name, octet] of c.bindings) {
-      if (c.peers.has(name)) continue;
+    for (const [pub, row] of c.bindings) {
+      if (c.peers.has(pub)) continue;
       out.push({
-        name,
+        name: row.name,
+        pub,
         public_ip: "",
-        tunnel_ip: `${SUBNET_PREFIX}.${octet}`,
+        tunnel_ip: `${SUBNET_PREFIX}.${row.octet}`,
         joined_at: 0,
         online: false,
         last_seen_at: 0,
@@ -149,18 +160,18 @@ export class Hub {
   }
 
   // Evict peers whose lastSeen is older than threshold. The binding
-  // stays (so the same name returns to the same tunnel_ip on next
+  // stays (so the same pub returns to the same tunnel_ip on next
   // announce) — only the live-peer entry is removed. The camp itself
   // is kept around as long as it has bindings; empty camps are
   // dropped purely from the live map.
   evictStale(threshold: number): number {
     let removed = 0;
     for (const [campID, c] of this.camps) {
-      for (const [name, p] of c.peers) {
+      for (const [pub, p] of c.peers) {
         if (p.lastSeen < threshold) {
-          c.peers.delete(name);
+          c.peers.delete(pub);
           removed++;
-          console.log(`evict: ${name}@${campID} (idle)`);
+          console.log(`evict: ${p.info.name}@${campID} pub=${pub.slice(0, 16)} (idle)`);
         }
       }
       // Drop the camp object if it has neither live peers nor any
@@ -172,20 +183,22 @@ export class Hub {
     return removed;
   }
 
-  // Stats — kept in sync with the previous shape so external callers
-  // don't break.
+  // Stats — names of live peers per camp. Kept in the same shape as
+  // before so dashboards don't break.
   stats() {
     const camps: Array<{ id: string; peers: string[] }> = [];
     for (const [id, camp] of this.camps.entries()) {
-      camps.push({ id, peers: Array.from(camp.peers.keys()) });
+      const names: string[] = [];
+      for (const p of camp.peers.values()) names.push(p.info.name);
+      camps.push({ id, peers: names });
     }
     return { camps, total_peers: camps.reduce((s, c) => s + c.peers.length, 0) };
   }
 }
 
-function isOctetTaken(c: Camp, octet: number, exceptName: string): boolean {
-  for (const [name, o] of c.bindings) {
-    if (name !== exceptName && o === octet) return true;
+function isOctetTaken(c: Camp, octet: number, exceptPub: string): boolean {
+  for (const [pub, row] of c.bindings) {
+    if (pub !== exceptPub && row.octet === octet) return true;
   }
   return false;
 }
