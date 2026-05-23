@@ -125,6 +125,11 @@ type Peer struct {
 	// to expect from this peer before the first poll lands. Refreshed
 	// only on a successful poll — never reset on transient errors.
 	Domains []Domain `json:"domains,omitempty"`
+	// Firewall is the last successful snapshot of the peer's
+	// user-configured open-port list (from their /api/firewall). Same
+	// persistence semantics as Domains. Built-in ports aren't stored —
+	// every f2f peer has the same built-ins implicitly.
+	Firewall []Firewall `json:"firewall,omitempty"`
 }
 
 // NewStore resolves $HOME/.f2f/, creates it if missing, chowns to

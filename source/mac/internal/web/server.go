@@ -120,6 +120,7 @@ func (s *Server) BindTunnel(ip string) error {
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
+	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,

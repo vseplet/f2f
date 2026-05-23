@@ -122,6 +122,9 @@ type PeerStatusInfo struct {
 	Self        bool          `json:"self,omitempty"`
 	Domains     []DomainEntry `json:"domains,omitempty"`
 	Files       []PeerFile    `json:"files,omitempty"`
+	// Firewall lists the peer's user-published open ports (without
+	// built-ins). Polled from their tunnel-side /api/firewall.
+	Firewall []FirewallPort `json:"firewall,omitempty"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -192,7 +195,8 @@ type peerState struct {
 	Online      bool
 	LastSeenAt  int64
 	Domains     []DomainEntry
-	Files       []PeerFile   // populated by filesPollLoop
+	Files       []PeerFile     // populated by filesPollLoop
+	Firewall    []FirewallPort // populated by peerFirewallPollLoop
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -634,6 +638,8 @@ func (e *Engine) Start(cfg Config) error {
 		go e.domainHealthLoop(ctx)
 		e.workers.Add(1)
 		go e.filesPollLoop(ctx)
+		e.workers.Add(1)
+		go e.peerFirewallPollLoop(ctx)
 	}
 	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
 	// — 5353 is contended on macOS by mDNSResponder and any running
@@ -1764,6 +1770,103 @@ func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 	}
 }
 
+// peerFirewallPollLoop walks online peers every 30s and pulls their
+// /api/firewall (we only keep the user-configured allow list — the
+// built-in list is identical for every f2f peer). Cached on
+// peerState.Firewall and mirrored into the catalog so it survives
+// engine restart.
+func (e *Engine) peerFirewallPollLoop(ctx context.Context) {
+	defer e.workers.Done()
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(9 * time.Second): // small jitter vs files/domain loops
+	}
+	e.pollAllPeerFirewall(ctx)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		e.pollAllPeerFirewall(ctx)
+	}
+}
+
+func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
+	type target struct {
+		tunnelIP string
+		name     string
+	}
+	var targets []target
+	e.mu.Lock()
+	for tip, p := range e.peers {
+		if !p.Online {
+			continue
+		}
+		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+	}
+	port := e.tunnelHTTPPort
+	e.mu.Unlock()
+	if port == "" {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, t := range targets {
+		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/firewall"
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			// Same policy as domain poll: keep stale list on transient
+			// failure, the UI's peer-online flag conveys "we lost touch".
+			continue
+		}
+		var body struct {
+			User []FirewallPort `json:"user"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		e.mu.Lock()
+		if p, ok := e.peers[t.tunnelIP]; ok {
+			p.Firewall = body.User
+		}
+		e.persistPeerFirewallLocked(t.tunnelIP, body.User)
+		e.mu.Unlock()
+	}
+}
+
+// persistPeerFirewallLocked mirrors a peer's published firewall list
+// into the camp catalog. Caller holds e.mu.
+func (e *Engine) persistPeerFirewallLocked(tunnelIP string, fw []FirewallPort) {
+	if e.camp == nil {
+		return
+	}
+	out := make([]config.Firewall, 0, len(fw))
+	for _, p := range fw {
+		out = append(out, config.Firewall{
+			Port:        p.Port,
+			Protocol:    p.Protocol,
+			Description: p.Description,
+			Enabled:     p.Enabled,
+		})
+	}
+	for i := range e.camp.PeerCatalog {
+		if e.camp.PeerCatalog[i].TunnelIP == tunnelIP {
+			e.camp.PeerCatalog[i].Firewall = out
+			e.persistCampLocked()
+			return
+		}
+	}
+}
+
 // domainHealthLoop TCP-dials each published domain on 127.0.0.1:<port>
 // every few seconds and stamps the result onto myDomainHealth. The
 // status flows out through MyDomains() — into /api/my-domains for the
@@ -2191,6 +2294,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Active:      p.TunnelIP == active,
 			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
+			Firewall:    append([]FirewallPort(nil), p.Firewall...),
 		})
 	}
 	return out

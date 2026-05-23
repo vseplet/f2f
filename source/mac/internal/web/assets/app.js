@@ -807,6 +807,52 @@ $(function () {
     });
   }
 
+  // renderPeerFirewall walks livePeers, lists each peer's user-published
+  // open ports under the tunnel tab. Dot semantics same as tri-state on
+  // known-domains: green = peer online, red unused (no per-port health
+  // signal yet — we just know the rule is in effect on their side),
+  // gray = peer offline.
+  function renderPeerFirewall() {
+    const $list = $('#peer-firewall-list');
+    $list.empty();
+    const rows = [];
+    livePeers.forEach((p) => {
+      if (p.self) return;
+      const ports = Array.isArray(p.firewall) ? p.firewall : [];
+      ports.forEach((fp) => rows.push({
+        peer: p.name, peerTunnel: p.tunnel_ip, online: p.online !== false, ...fp,
+      }));
+    });
+    $('#peer-firewall-meta').text(rows.length);
+    if (rows.length === 0) {
+      $list.append('<div class="ax-list-empty">no peer-published ports yet.</div>');
+      return;
+    }
+    // Stable order: peer name, then port.
+    rows.sort((a, b) => (a.peer || '').localeCompare(b.peer || '') || a.port - b.port);
+    rows.forEach((r) => {
+      const $row = $('<div class="ax-intercept">');
+      const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+      const dotCls = !r.online ? 'unknown' : (r.enabled ? 'reachable' : 'unreachable');
+      const dotTitle = !r.online
+        ? 'peer is offline'
+        : (r.enabled ? 'port is open' : 'rule kept but disabled by peer');
+      $head.append($('<span class="ax-dot">').addClass(dotCls).attr('title', dotTitle).css({
+        'display': 'inline-block', 'width': '8px', 'height': '8px', 'border-radius': '50%', 'margin-right': '8px',
+      }));
+      $head.append($('<span class="ax-intercept-spec">').text(r.port + '/' + r.protocol));
+      $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + r.peer));
+      if (!r.online) $head.append($('<span class="ax-pill ax-pill-pending">').text('offline'));
+      if (r.description) {
+        $head.append($('<span class="ax-intercept-meta">').text(r.description));
+      } else {
+        $head.append($('<span class="ax-intercept-meta">').text(r.peerTunnel));
+      }
+      $row.append($head);
+      $list.append($row);
+    });
+  }
+
   // ---- firewall (tunnel tab: open ports) ----
   // Built-in entries are read-only — f2f's own ports must stay open
   // or the engine breaks. User entries support toggle on/off (without
@@ -1213,5 +1259,6 @@ $(function () {
   // Known-domains panel reads from livePeers, which is updated in
   // applyStatus. Trigger a render on each status refresh.
   setInterval(renderKnownDomains, 3000);
+  setInterval(renderPeerFirewall, 3000);
   startLogStream();
 });
