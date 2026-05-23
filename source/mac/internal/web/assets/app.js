@@ -576,20 +576,27 @@ $(function () {
     $campBody.empty();
     for (const p of peers) {
       const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
-      // Online = we received UDP from peer recently (local truth).
-      // InCamp = camp server sees peer's announce (camp roster).
-      // Color encodes the matrix:
-      //   self                          → yellow
-      //   online                        → green (we have a working tunnel)
-      //   in_camp without online        → red   (camp sees them, we can't reach)
-      //   neither                       → gray  (gone from camp's view too)
+      // Online   = we received any UDP from peer recently (one-way truth).
+      // Verified = we got a pong recently → round-trip works (two-way truth).
+      // InCamp   = camp server sees peer's announce.
+      // Color matrix:
+      //   self                                  → yellow
+      //   online + verified                     → green (true bidirectional)
+      //   online without verified               → orange (asymmetric: peer
+      //                                                   reaches us, our
+      //                                                   pings unanswered)
+      //   in_camp without online                → red   (camp sees them, we can't reach)
+      //   neither                               → gray
       let dotClass, dotTitle;
       if (p.self) {
         dotClass = 'self';
         dotTitle = 'you';
-      } else if (p.online) {
+      } else if (p.verified) {
         dotClass = 'reachable';
-        dotTitle = 'online — receiving packets';
+        dotTitle = 'verified bidirectional' + (p.rtt_ms ? ' — rtt ' + p.rtt_ms + 'ms' : '');
+      } else if (p.online) {
+        dotClass = 'degraded';
+        dotTitle = 'one-way only — peer sends to us but our pings unanswered (peer outdated, or our send-path blocked)';
       } else if (p.in_camp) {
         dotClass = 'unreachable';
         dotTitle = 'in camp roster but no packets received yet (NAT / hole-punch issue?)';
