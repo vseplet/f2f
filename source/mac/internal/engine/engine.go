@@ -38,6 +38,7 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/keychain"
 	internaltorrent "github.com/vseplet/f2f/source/mac/internal/torrent"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
+	"github.com/vseplet/f2f/source/mac/internal/peerping"
 	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
 	"github.com/vseplet/f2f/source/mac/internal/route"
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
@@ -130,6 +131,14 @@ type PeerStatusInfo struct {
 	// we can reach the peer ourselves — the Online flag above is the
 	// local reachability view (we received UDP from them recently).
 	InCamp bool `json:"in_camp"`
+	// LastPongMs is the wall-clock ms of the most recent pong we got
+	// from this peer (0 = never). Verified=true means we've had a pong
+	// recently enough to trust the round-trip path is alive in BOTH
+	// directions, distinct from Online which only tells us the peer
+	// sends something our way.
+	LastPongMs int64 `json:"last_pong_ms,omitempty"`
+	RTTMs      int64 `json:"rtt_ms,omitempty"`
+	Verified   bool  `json:"verified"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -249,6 +258,7 @@ type Engine struct {
 	ca       *ca.CA                  // local CA for the current camp_id
 	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
+	pinger   *peerping.Pinger           // round-trip ping/pong per peer
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
 	// can dispatch announce replies before they hit IP-version parsing.
@@ -660,6 +670,14 @@ func (e *Engine) Start(cfg Config) error {
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
+	}
+	if e.udp != nil {
+		e.pinger = peerping.New(e.udp, e.pingerTargets)
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			e.pinger.Run(ctx)
+		}()
 	}
 	if e.cfg.Camp != nil {
 		e.workers.Add(1)
@@ -2109,6 +2127,21 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 	}
 }
 
+// pingerTargets snapshots the current peers with a known UDP endpoint.
+// Called from the Pinger goroutine on every tick.
+func (e *Engine) pingerTargets() []peerping.Target {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]peerping.Target, 0, len(e.peers))
+	for tunnelIP, p := range e.peers {
+		if p.UDPAddr == nil {
+			continue
+		}
+		out = append(out, peerping.Target{Key: tunnelIP, Addr: p.UDPAddr})
+	}
+	return out
+}
+
 // Stop tears everything down in reverse order. Idempotent.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
@@ -2192,6 +2225,7 @@ func (e *Engine) Stop() error {
 	e.ca = nil
 	e.torrent = nil
 	e.announce = nil
+	e.pinger = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
 	e.campReflex.Store(nil)
@@ -2283,6 +2317,11 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	if a := e.activeTunnelIP.Load(); a != nil {
 		active = *a
 	}
+	var pingResults map[string]peerping.Result
+	if e.pinger != nil {
+		pingResults = e.pinger.All()
+	}
+	now := time.Now().UnixMilli()
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
 		selfEndpoint := e.currentReflex()
@@ -2294,6 +2333,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			InCamp:      true,
 			Online:      true,
 			Reachable:   true,
+			Verified:    true,
 			Self:        true,
 			Domains:     e.MyDomains(),
 		})
@@ -2310,6 +2350,15 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
 		online := p.IsOnline()
+		var lastPong, rtt int64
+		var verified bool
+		if r, ok := pingResults[p.TunnelIP]; ok {
+			lastPong = r.LastPongMs
+			rtt = r.LastRTTMs
+			// Verified = round-trip confirmed within the online window
+			// (same 30s threshold so the two signals line up).
+			verified = lastPong > 0 && now-lastPong < peerOnlineWindowMs
+		}
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			TunnelIP:    p.TunnelIP,
@@ -2325,6 +2374,9 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
 			Firewall:    append([]FirewallPort(nil), p.Firewall...),
+			LastPongMs:  lastPong,
+			RTTMs:       rtt,
+			Verified:    verified,
 		})
 	}
 	return out
@@ -2892,6 +2944,14 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			}
 		}
 
+		// Round-trip ping/pong with peers. Handled before the IP-shape
+		// filter so its JSON payload (first byte '{', "version"=0x7)
+		// doesn't trip the drop log below. Counts as a LastSeen signal
+		// because we ran the identification above first.
+		if e.pinger != nil && e.pinger.HandlePacket(pkt, from) {
+			continue
+		}
+
 		// Anything not shaped like an IPv4/IPv6 packet — hole-punch
 		// markers, random scans, our own keepalives reflected — gets
 		// dropped here before it can fail utun.Write.
@@ -2951,6 +3011,7 @@ func (e *Engine) rollbackPartial() {
 		e.egr = nil
 	}
 	e.announce = nil
+	e.pinger = nil
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {

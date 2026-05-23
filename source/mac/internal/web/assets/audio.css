@@ -550,6 +550,7 @@ details.ax-advanced > .ax-advanced-body {
   background: #4a4234;
 }
 .ax-frame .ax-dot.reachable { background: #86b86b; box-shadow: 0 0 4px rgba(134, 184, 107, 0.5); }
+.ax-frame .ax-dot.degraded { background: #d97a3a; box-shadow: 0 0 4px rgba(217, 122, 58, 0.5); }
 .ax-frame .ax-dot.unreachable { background: #c25656; }
 .ax-frame .ax-dot.self { background: #c4a554; }
 .ax-frame .ax-dot.offline { background: #555; }
