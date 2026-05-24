@@ -2826,6 +2826,27 @@ func (e *Engine) PeerDomains() map[string][]internaldns.DomainEntry {
 	return out
 }
 
+// PeerOverlayV6 returns the per-camp overlay IPv6 for the peer whose
+// v4 tunnel_ip equals tip. Implements internaldns.Resolver. Empty
+// when there's no camp, no matching peer, or the peer has no pub yet
+// (legacy announce-without-pub window).
+func (e *Engine) PeerOverlayV6(tip string) string {
+	if e.cfg.Camp == nil || tip == "" {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p, ok := e.peers[tip]
+	if !ok || p.Pub == "" {
+		return ""
+	}
+	addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
+	if err != nil {
+		return ""
+	}
+	return addr.String()
+}
+
 func toDNSEntries(in []DomainEntry) []internaldns.DomainEntry {
 	out := make([]internaldns.DomainEntry, len(in))
 	for i, e := range in {

@@ -24,6 +24,11 @@ import (
 // this package doesn't depend on the engine package.
 type Resolver interface {
 	PeerDomains() map[string][]DomainEntry
+	// PeerOverlayV6 returns the per-camp overlay IPv6 address for the
+	// peer whose v4 tunnel_ip equals tip. Empty when no v6 is known
+	// (legacy peer without pub, or self when tip="127.0.0.1" — then
+	// callers fall back to ::1 / A only).
+	PeerOverlayV6(tip string) string
 }
 
 // DomainEntry mirrors engine.DomainEntry so the two packages don't share
@@ -177,11 +182,28 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 			})
 		}
 	}
-	// For AAAA queries we deliberately respond NOERROR with empty answer
-	// (no v6 in our overlay). Apps then fall back to A. Attach SOA so
-	// the negative response is cached for one second only — peers can
-	// register new names at any time and we don't want minutes of
-	// "doesn't exist" served from cache.
+	if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY {
+		// Overlay v6: pub-derived, lives under the per-camp /48 ULA
+		// and routes through our utun. For our own names (loopback v4
+		// "127.0.0.1") emit ::1 so a v6-only app stays on lo0.
+		var v6 string
+		if ip == "127.0.0.1" {
+			v6 = "::1"
+		} else {
+			v6 = s.res.PeerOverlayV6(ip)
+		}
+		if v6 != "" {
+			if addr6 := net.ParseIP(v6).To16(); addr6 != nil {
+				m.Answer = append(m.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+					AAAA: addr6,
+				})
+			}
+		}
+	}
+	// Empty answer (e.g. AAAA query on a legacy peer with no overlay v6,
+	// or any non-A/AAAA qtype) is a NOERROR negative response; attach
+	// SOA so RFC 2308 negative cache stays at one second.
 	if len(m.Answer) == 0 {
 		s.attachSOA(m)
 	}
