@@ -2152,24 +2152,18 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
 			// Wake-from-sleep detection: a tick that lands >wakeJumpMs
-			// after the previous one means the host suspended. Force
-			// every peer back into burst cadence by clearing their
-			// LastSeen/LastPing timers, and kick an out-of-band camp
-			// announce so our upstream NAT binding reopens before peers
-			// keep blasting the stale port.
+			// after the previous one means the host suspended. The
+			// upstream NAT binding tied to our current local port is
+			// almost certainly stale on the outbound side — rebinding
+			// the same port wouldn't refresh it. Easiest reliable cure
+			// is a full Stop/Start cycle on an ephemeral local port,
+			// which forces a brand-new 5-tuple at the provider's NAT
+			// and a fresh reflex in camp; peers pick up the new endpoint
+			// on their next camp poll.
 			if prevTickMs != 0 && now-prevTickMs > wakeJumpMs {
-				log.Printf("wake: clock jumped %ds, resetting hole-punch state and re-announcing", (now-prevTickMs)/1000)
-				e.mu.Lock()
-				for _, p := range e.peers {
-					p.LastSeenMs.Store(0)
-					p.LastPingMs.Store(0)
-				}
-				e.mu.Unlock()
-				if e.announce != nil {
-					if err := e.announce.Refresh(); err != nil {
-						log.Printf("wake: announce refresh: %v", err)
-					}
-				}
+				log.Printf("wake: clock jumped %ds, restarting on a fresh ephemeral port", (now-prevTickMs)/1000)
+				go e.restartOnEphemeralPort()
+				return
 			}
 			prevTickMs = now
 			e.mu.Lock()
@@ -2227,6 +2221,25 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+// restartOnEphemeralPort tears the engine down and brings it back up
+// with Listen=":0". Used by the wake-from-sleep detector in
+// holePunchLoop. Must run in its own goroutine — Stop() waits on the
+// worker pool that holePunchLoop is part of, so a synchronous call
+// would deadlock.
+func (e *Engine) restartOnEphemeralPort() {
+	e.mu.Lock()
+	cfg := e.cfg
+	e.mu.Unlock()
+	cfg.Listen = ":0"
+	if err := e.Stop(); err != nil {
+		log.Printf("wake: stop: %v", err)
+		return
+	}
+	if err := e.Start(cfg); err != nil {
+		log.Printf("wake: start: %v", err)
 	}
 }
 
