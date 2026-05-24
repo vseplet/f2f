@@ -109,17 +109,24 @@ func New(opts Options) (*Client, error) {
 	cfg.NoDHT = true
 	cfg.DisableTrackers = true
 	cfg.DisablePEX = true
-	// utun now has both v4 alias (tunnel_ip) and overlay v6; allow
-	// anacrolix to use whichever family the ListenAddr resolves to.
-	cfg.DisableIPv6 = false
 	cfg.NoUpload = false
 	cfg.Seed = true
 	cfg.DefaultStorage = storage.NewFile(opts.DownloadsDir)
 
-	// Parse listen addr into host + port for anacrolix's separate fields.
+	// Anacrolix opens listeners on BOTH tcp4 and tcp6 with the same
+	// host string — passing a v6 host would fail tcp4 bind and vice
+	// versa. Force the family that matches the host: v6 host → disable
+	// v4, v4 host → disable v6.
 	host, port, err := splitHostPort(opts.ListenAddr)
 	if err != nil {
 		return nil, err
+	}
+	if strings.Contains(host, ":") {
+		cfg.DisableIPv4 = true
+		cfg.DisableIPv6 = false
+	} else {
+		cfg.DisableIPv4 = false
+		cfg.DisableIPv6 = true
 	}
 	cfg.SetListenAddr(net.JoinHostPort(host, port))
 
