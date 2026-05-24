@@ -171,6 +171,10 @@ func ifconfigUp(ifname, localIP, peerIP string) error {
 }
 
 func routeAddSubnet(subnet, ifname string) error {
+	// Delete first: a stale route from a prior crashed process on a
+	// different utun would shadow our add and silently send traffic
+	// to the zombie interface.
+	_ = exec.Command("/sbin/route", "-n", "delete", "-inet", "-net", subnet).Run()
 	cmd := exec.Command("/sbin/route", "-n", "add", "-inet", "-net", subnet, "-interface", ifname)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("route add %s -interface %s: %w: %s", subnet, ifname, err, out)
@@ -194,6 +198,7 @@ func (t *Tunnel) AddIPv6(addr string, prefixLen int) error {
 // make the whole per-camp ULA prefix reachable through the interface
 // (every peer in the camp lives somewhere under that prefix).
 func (t *Tunnel) RouteSubnet6(prefix string) error {
+	_ = exec.Command("/sbin/route", "-n", "delete", "-inet6", "-net", prefix).Run()
 	cmd := exec.Command("/sbin/route", "-n", "add", "-inet6", "-net", prefix, "-interface", t.name)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("route add -inet6 %s -interface %s: %w: %s", prefix, t.name, err, out)
