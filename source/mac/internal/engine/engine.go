@@ -654,6 +654,27 @@ func (e *Engine) Start(cfg Config) error {
 		}
 		tun = t
 		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, tunnel.MTU)
+		// Dual-stack: bring up the overlay v6 alias and route the whole
+		// per-camp /48 ULA at this utun. v4 keeps doing all real work;
+		// v6 is here as observation + manual ping6 target during
+		// migration. Failure is non-fatal — v4 already works.
+		if e.identity != nil {
+			ourV6, err := overlay.PubToAddr(cfg.Camp.ID, e.identity.PubHex())
+			if err == nil {
+				if err := tun.AddIPv6(ourV6.String(), 64); err != nil {
+					log.Printf("tunnel: v6 alias: %v", err)
+				} else {
+					prefix := overlay.CampPrefix(cfg.Camp.ID).String()
+					if err := tun.RouteSubnet6(prefix); err != nil {
+						log.Printf("tunnel: v6 route %s: %v", prefix, err)
+					} else {
+						log.Printf("opened %s (v6=%s prefix=%s)", tun.Name(), ourV6, prefix)
+					}
+				}
+			} else {
+				log.Printf("tunnel: v6 derive: %v", err)
+			}
+		}
 	} else {
 		t, err := tunnel.Open(localIP, peerIP)
 		if err != nil {
@@ -3146,8 +3167,25 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if p, ok := e.peers[dst.String()]; ok && p.UDPAddr != nil {
-		return p.UDPAddr
+	// v4 lookup: peers map is keyed by tunnel_ip string, which is v4.
+	if dst.Is4() {
+		if p, ok := e.peers[dst.String()]; ok && p.UDPAddr != nil {
+			return p.UDPAddr
+		}
+	} else {
+		// v6 lookup: every peer's overlay v6 = sha256-derived from
+		// (camp_id, pub). Walk peers and compute; cheap because peers
+		// are O(camp size) and sha256 is fast. No persistent index
+		// yet — we add one if/when this becomes the hot path.
+		for _, p := range e.peers {
+			if p.Pub == "" || p.UDPAddr == nil {
+				continue
+			}
+			addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
+			if err == nil && addr == dst {
+				return p.UDPAddr
+			}
+		}
 	}
 	target := e.interceptPeerForLocked(dst)
 	if target == "" {
