@@ -38,6 +38,7 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/identity"
 	"github.com/vseplet/f2f/source/mac/internal/keychain"
 	internaltorrent "github.com/vseplet/f2f/source/mac/internal/torrent"
+	"github.com/vseplet/f2f/source/mac/internal/overlay"
 	"github.com/vseplet/f2f/source/mac/internal/packet"
 	"github.com/vseplet/f2f/source/mac/internal/peerping"
 	"github.com/vseplet/f2f/source/mac/internal/rendezvous"
@@ -56,7 +57,8 @@ const tunnelSubnetCIDR = "10.99.0.0/24"
 type CampConfig struct {
 	URL      string // wss://f2f-camp.fly.dev/ws
 	Name     string // our identity within the camp
-	ID       string // shared camp id (was previously called "room")
+	ID       string // shared camp id; empty triggers the "create new camp" path (Label required)
+	Label    string // human-friendly camp label, used only when ID is empty to derive ID = <pub>_<label>
 	StunAddr string // host:port for the UDP STUN probe (e.g. f2f-camp.fly.dev:3478)
 }
 
@@ -86,6 +88,11 @@ type Status struct {
 	CampURL      string `json:"camp_url,omitempty"`
 	CampName     string `json:"camp_name,omitempty"`
 	CampID       string `json:"camp_id,omitempty"`
+	// CampLabel is the human-friendly suffix of CampID — what we use
+	// as the DNS zone (`<label>.f2f`) and what the UI shows. For new
+	// camps CampID is `<creator_pub_hex>_<label>`; for legacy free-form
+	// camps it equals CampID itself.
+	CampLabel    string `json:"camp_label,omitempty"`
 	CampPeerName string `json:"camp_peer_name,omitempty"` // active peer's name (display alias)
 	CampReflex   string `json:"camp_reflex,omitempty"`    // our own external endpoint per STUN
 	// Identity (Ed25519) for the running camp. Pub is the full 32-byte
@@ -185,6 +192,11 @@ type PeerStatusInfo struct {
 	LastPongMs int64 `json:"last_pong_ms,omitempty"`
 	RTTMs      int64 `json:"rtt_ms,omitempty"`
 	Verified   bool  `json:"verified"`
+	// OverlayV6 is the per-camp ULA address derived from (camp_id, pub).
+	// Present for any peer whose Pub is known; empty for legacy peers
+	// announced without a pub. Display-only at this stage — utun still
+	// runs v4 — but emitted now so the UI can sanity-check the scheme.
+	OverlayV6 string `json:"overlay_v6,omitempty"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -476,8 +488,32 @@ func (e *Engine) Start(cfg Config) error {
 		if cfg.Listen == "" {
 			return errors.New("Camp mode requires Listen")
 		}
-		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.ID == "" || cfg.Camp.StunAddr == "" {
-			return errors.New("Camp.{URL,Name,ID,StunAddr} all required")
+		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.StunAddr == "" {
+			return errors.New("Camp.{URL,Name,StunAddr} all required")
+		}
+		// camp_id is optional iff we have a label — empty id means
+		// "create a new camp": generate identity first, derive id from
+		// the pub. ID populated here so the rest of Start sees a normal
+		// fully-formed CampConfig.
+		if cfg.Camp.ID == "" {
+			label := strings.TrimSpace(cfg.Camp.Label)
+			if label == "" {
+				return errors.New("camp create: Camp.Label required when ID is empty")
+			}
+			if !validCampLabel(label) {
+				return errors.New("camp create: Label must match [A-Za-z0-9_.-]+")
+			}
+			id, err := identity.Generate()
+			if err != nil {
+				return fmt.Errorf("camp create: identity: %w", err)
+			}
+			cfg.Camp.ID = id.PubHex() + "_" + label
+			idDir := filepath.Join("/var/lib/f2f/identity", cfg.Camp.ID)
+			if err := id.Save(idDir); err != nil {
+				return fmt.Errorf("camp create: save identity: %w", err)
+			}
+			e.identity = id
+			log.Printf("camp create: new camp id=%s pub=%s", cfg.Camp.ID, id.PubHex())
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
@@ -499,6 +535,8 @@ func (e *Engine) Start(cfg Config) error {
 		// camp is rm -rf of that one subdir. Failures here are fatal
 		// — without an identity we can't prove tunnel_ip ownership
 		// to the camp server once that path is wired through.
+		// If we already created+saved one above (camp-create path),
+		// LoadOrGenerate finds it on disk and returns it.
 		idDir := filepath.Join("/var/lib/f2f/identity", cfg.Camp.ID)
 		id, err := identity.LoadOrGenerate(idDir)
 		if err != nil {
@@ -751,15 +789,16 @@ func (e *Engine) Start(cfg Config) error {
 	// of the engine works without DNS.
 	if e.cfg.Camp != nil {
 		const dnsAddr = "127.0.0.1:5354"
-		srv, err := internaldns.Open(dnsAddr, e.cfg.Camp.ID, e)
+		zone := identity.CampLabel(e.cfg.Camp.ID)
+		srv, err := internaldns.Open(dnsAddr, zone, e)
 		if err != nil {
 			log.Printf("dns: %v (resolver disabled)", err)
 		} else {
 			e.dnsSrv = srv
-			if rerr := internaldns.WriteResolver(e.cfg.Camp.ID, dnsAddr); rerr != nil {
+			if rerr := internaldns.WriteResolver(zone, dnsAddr); rerr != nil {
 				log.Printf("dns: write resolver: %v", rerr)
 			} else {
-				log.Printf("dns: serving %s.f2f on %s", e.cfg.Camp.ID, dnsAddr)
+				log.Printf("dns: serving %s.f2f on %s", zone, dnsAddr)
 				// Flush macOS's resolver cache so any stale NXDOMAIN
 				// pinned before our DNS was up gets dropped immediately.
 				internaldns.FlushCache()
@@ -814,13 +853,13 @@ func (e *Engine) ensureCA() error {
 		log.Printf("ca: load: %v (will regenerate)", err)
 		loaded = nil
 	}
-	if loaded != nil && !loaded.MatchesZone(e.cfg.Camp.ID) {
+	if loaded != nil && !loaded.MatchesZone(identity.CampLabel(e.cfg.Camp.ID)) {
 		log.Printf("ca: existing CA pinned to a different camp_id; rotating")
 		_ = keychain.RemoveByCommonName(loaded.CommonName())
 		loaded = nil
 	}
 	if loaded == nil {
-		fresh, err := ca.Generate(e.cfg.Camp.ID)
+		fresh, err := ca.Generate(identity.CampLabel(e.cfg.Camp.ID))
 		if err != nil {
 			return fmt.Errorf("generate: %w", err)
 		}
@@ -851,18 +890,49 @@ func (e *Engine) CA() *ca.CA {
 }
 
 // torrentSharedDir / torrentDownloadsDir are the on-disk locations the
-// BT client uses. The shared dir is per-user (engine runs as root via
-// sudo, so we put it under $SUDO_USER's home so the UI can drag files
-// into it). DownloadsDir we put under ~/Downloads/f2f-drops/ — peers
-// sort into subfolders per sender at write time.
+// BT client uses. Both are per-camp: a torrent only makes sense in the
+// camp it was added to (peer tunnel_ips are camp-local), and mixing
+// state across camps causes stale-peer dial loops after switching.
+//
+// shared lives under the internal app-support path (under camp_id, so
+// new-format ids with a 64-hex prefix get full isolation). downloads
+// goes to a user-visible ~/Downloads/f2f-drops/<short> so people can
+// open it from Finder without staring at hex.
 func (e *Engine) torrentSharedDir() string {
 	home := userHome()
-	return filepath.Join(home, "Library", "Application Support", "f2f", "shared")
+	return filepath.Join(home, "Library", "Application Support", "f2f", e.campStateDirSegment(), "shared")
 }
 
 func (e *Engine) torrentDownloadsDir() string {
 	home := userHome()
-	return filepath.Join(home, "Downloads", "f2f-drops")
+	return filepath.Join(home, "Downloads", "f2f-drops", e.campUserVisibleSegment())
+}
+
+// campStateDirSegment returns the camp_id used as a directory segment
+// for internal state. Empty (legacy --peer mode) falls back to "_root"
+// so we never write to the bare app-support root.
+func (e *Engine) campStateDirSegment() string {
+	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
+		return "_root"
+	}
+	return e.cfg.Camp.ID
+}
+
+// campUserVisibleSegment returns a human-friendly directory segment
+// for user-visible paths (~/Downloads/f2f-drops/...). For new-format
+// camp_ids "<64hex>_<label>" we return "<label>_<8hex>" — readable, but
+// disambiguated when two camps share a label. Legacy ids are used
+// as-is.
+func (e *Engine) campUserVisibleSegment() string {
+	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
+		return "_root"
+	}
+	id := e.cfg.Camp.ID
+	label := identity.CampLabel(id)
+	if label == id {
+		return label // legacy free-form id
+	}
+	return label + "_" + id[:8]
 }
 
 // userHome returns the home of the invoking (non-root) user. Engine runs
@@ -1015,7 +1085,7 @@ func (e *Engine) pruneOnce(c *internaltorrent.Client) {
 	// done and renames on completion, so the final path is absent
 	// mid-flight. Pruning then would kill active transfers.
 	removed := false
-	saved := loadSavedDownloads()
+	saved := e.loadSavedDownloads()
 	keep := saved[:0]
 	for _, s := range saved {
 		var d *internaltorrent.Download
@@ -1053,7 +1123,7 @@ func (e *Engine) pruneOnce(c *internaltorrent.Client) {
 		keep = append(keep, s)
 	}
 	if removed {
-		if err := saveDownloads(keep); err != nil {
+		if err := e.saveDownloads(keep); err != nil {
 			log.Printf("downloads: persist after prune: %v", err)
 		}
 	}
@@ -1145,25 +1215,26 @@ type savedDownload struct {
 	Peers    []string `json:"peers,omitempty"`
 }
 
-func downloadsStatePath() string {
-	return filepath.Join(userHome(), "Library", "Application Support", "f2f", "downloads.json")
+func (e *Engine) downloadsStatePath() string {
+	return filepath.Join(userHome(), "Library", "Application Support", "f2f", e.campStateDirSegment(), "downloads.json")
 }
 
-func loadSavedDownloads() []savedDownload {
-	data, err := os.ReadFile(downloadsStatePath())
+func (e *Engine) loadSavedDownloads() []savedDownload {
+	path := e.downloadsStatePath()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 	var out []savedDownload
 	if err := json.Unmarshal(data, &out); err != nil {
-		log.Printf("downloads: parse %s: %v", downloadsStatePath(), err)
+		log.Printf("downloads: parse %s: %v", path, err)
 		return nil
 	}
 	return out
 }
 
-func saveDownloads(list []savedDownload) error {
-	path := downloadsStatePath()
+func (e *Engine) saveDownloads(list []savedDownload) error {
+	path := e.downloadsStatePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -1187,7 +1258,7 @@ func (e *Engine) AddDownload(magnet string, peers []string) (*internaltorrent.Do
 	if err != nil {
 		return nil, err
 	}
-	saved := loadSavedDownloads()
+	saved := e.loadSavedDownloads()
 	for _, s := range saved {
 		if s.InfoHash == d.InfoHash {
 			return d, nil // already remembered
@@ -1196,7 +1267,7 @@ func (e *Engine) AddDownload(magnet string, peers []string) (*internaltorrent.Do
 	saved = append(saved, savedDownload{
 		Magnet: magnet, InfoHash: d.InfoHash, Peers: peers,
 	})
-	if err := saveDownloads(saved); err != nil {
+	if err := e.saveDownloads(saved); err != nil {
 		log.Printf("downloads: persist: %v", err)
 	}
 	return d, nil
@@ -1214,7 +1285,7 @@ func (e *Engine) RemoveDownload(infoHash string) bool {
 	if t != nil {
 		removed = t.RemoveDownload(infoHash)
 	}
-	saved := loadSavedDownloads()
+	saved := e.loadSavedDownloads()
 	kept := saved[:0]
 	for _, s := range saved {
 		if s.InfoHash == infoHash {
@@ -1223,7 +1294,7 @@ func (e *Engine) RemoveDownload(infoHash string) bool {
 		kept = append(kept, s)
 	}
 	if len(kept) != len(saved) {
-		if err := saveDownloads(kept); err != nil {
+		if err := e.saveDownloads(kept); err != nil {
 			log.Printf("downloads: persist after remove: %v", err)
 		}
 	}
@@ -1235,7 +1306,7 @@ func (e *Engine) RemoveDownload(infoHash string) bool {
 // become available for seeding immediately and appear in /api/files/
 // downloads with `complete=true` so the UI shows them.
 func (e *Engine) restoreDownloads(c *internaltorrent.Client) {
-	saved := loadSavedDownloads()
+	saved := e.loadSavedDownloads()
 	if len(saved) == 0 {
 		return
 	}
@@ -1277,9 +1348,19 @@ func (e *Engine) currentReflex() string {
 	return ""
 }
 
-// trustedPeersDir is where we cache peer CA certs (one file per peer)
-// to recognise them across engine restarts without re-prompting.
-const trustedPeersDir = "/var/lib/f2f/trusted-peers"
+// trustedPeersRootDir is the parent under which per-camp peer-CA caches
+// live. Each camp gets its own subdir keyed by camp_id so CAs from
+// camp A don't leak into camp B's "trusted peer CAs" UI panel.
+const trustedPeersRootDir = "/var/lib/f2f/trusted-peers"
+
+// trustedPeersDir returns the per-camp cache dir. Empty cfg.Camp falls
+// back to the root path (static --peer legacy mode, no notion of camp).
+func (e *Engine) trustedPeersDir() string {
+	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
+		return trustedPeersRootDir
+	}
+	return filepath.Join(trustedPeersRootDir, e.cfg.Camp.ID)
+}
 
 // builtinFirewallPorts are the ports f2f's own engine listens on over
 // the tunnel — always allowed, regardless of user settings. Keep in
@@ -1466,7 +1547,8 @@ func countEnabled(list []FirewallPort) int {
 // already installed (so we don't keychain-install them again on every
 // engine restart). Called once at engine.Start under camp mode.
 func (e *Engine) loadTrustedPeerCAs() {
-	entries, err := os.ReadDir(trustedPeersDir)
+	dir := e.trustedPeersDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
@@ -1476,7 +1558,7 @@ func (e *Engine) loadTrustedPeerCAs() {
 		if en.IsDir() || !strings.HasSuffix(en.Name(), ".crt") {
 			continue
 		}
-		full := filepath.Join(trustedPeersDir, en.Name())
+		full := filepath.Join(dir, en.Name())
 		body, err := os.ReadFile(full)
 		if err != nil {
 			continue
@@ -1604,11 +1686,12 @@ func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
 	}
 	e.trustedPeerCAsMu.Unlock()
 
-	if err := os.MkdirAll(trustedPeersDir, 0o755); err != nil {
-		log.Printf("ca: mkdir %s: %v", trustedPeersDir, err)
+	dir := e.trustedPeersDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("ca: mkdir %s: %v", dir, err)
 		return
 	}
-	certPath := filepath.Join(trustedPeersDir, peerName+".crt")
+	certPath := filepath.Join(dir, peerName+".crt")
 	if err := os.WriteFile(certPath, pem, 0o644); err != nil {
 		log.Printf("ca: write %s: %v", certPath, err)
 		return
@@ -2264,7 +2347,7 @@ func (e *Engine) diagnosticsLocked() *Diagnostics {
 		d.DNSLastQueryMs = s.LastQueryMs
 	}
 	if e.cfg.Camp != nil {
-		d.DNSResolverOK = internaldns.ResolverFileExists(e.cfg.Camp.ID)
+		d.DNSResolverOK = internaldns.ResolverFileExists(identity.CampLabel(e.cfg.Camp.ID))
 	}
 	return d
 }
@@ -2318,17 +2401,17 @@ func (e *Engine) Stop() error {
 	egr := e.egr
 	fw := e.fw
 	dnsSrv := e.dnsSrv
-	var dnsCampID string
+	var dnsZone string
 	if e.cfg.Camp != nil {
-		dnsCampID = e.cfg.Camp.ID
+		dnsZone = identity.CampLabel(e.cfg.Camp.ID)
 	}
 	e.mu.Unlock()
 
 	// Local DNS first — drop the /etc/resolver file so macOS stops
 	// routing queries our way as soon as Stop begins, then shut the
 	// listener down. Failures here are advisory.
-	if dnsCampID != "" {
-		if err := internaldns.RemoveResolver(dnsCampID); err != nil {
+	if dnsZone != "" {
+		if err := internaldns.RemoveResolver(dnsZone); err != nil {
 			log.Printf("dns: remove resolver: %v", err)
 		}
 	}
@@ -2446,6 +2529,7 @@ func (e *Engine) Status() Status {
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
 			st.CampID = e.cfg.Camp.ID
+			st.CampLabel = identity.CampLabel(e.cfg.Camp.ID)
 			st.CampReflex = e.currentReflex()
 			if e.identity != nil {
 				st.IdentityPub = e.identity.PubHex()
@@ -2508,6 +2592,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Verified:    true,
 			Self:        true,
 			Domains:     e.MyDomains(),
+			OverlayV6:   overlayAddrOrEmpty(e.cfg.Camp.ID, selfPub),
 		})
 	}
 	// Sort peer-keys so the UI list is stable across refreshes —
@@ -2531,6 +2616,10 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			// (same 30s threshold so the two signals line up).
 			verified = lastPong > 0 && now-lastPong < peerOnlineWindowMs
 		}
+		campID := ""
+		if e.cfg.Camp != nil {
+			campID = e.cfg.Camp.ID
+		}
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			Pub:         p.Pub,
@@ -2551,9 +2640,42 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			LastPongMs:  lastPong,
 			RTTMs:       rtt,
 			Verified:    verified,
+			OverlayV6:   overlayAddrOrEmpty(campID, p.Pub),
 		})
 	}
 	return out
+}
+
+// validCampLabel returns true iff label only uses chars the camp
+// server's NAME_RE accepts. The same character set we constrain camp
+// labels to so the derived camp_id = <pub>_<label> stays acceptable.
+func validCampLabel(label string) bool {
+	if label == "" {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// overlayAddrOrEmpty wraps overlay.PubToAddr for the status path: any
+// missing input (no camp, no pub, malformed pub) silently yields "" so
+// the JSON omits the field rather than returning an error to the UI.
+func overlayAddrOrEmpty(campID, pubHex string) string {
+	if campID == "" || pubHex == "" {
+		return ""
+	}
+	addr, err := overlay.PubToAddr(campID, pubHex)
+	if err != nil {
+		return ""
+	}
+	return addr.String()
 }
 
 func sortedDomains(in []DomainEntry) []DomainEntry {

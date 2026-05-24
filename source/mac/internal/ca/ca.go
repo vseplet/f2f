@@ -51,8 +51,11 @@ type CA struct {
 }
 
 // Generate creates a new CA whose only permitted DNS subtree is
-// "<campID>.f2f" (i.e. it can sign any "*.foo.<campID>.f2f").
-func Generate(campID string) (*CA, error) {
+// "<zone>.f2f" (i.e. it can sign any "*.foo.<zone>.f2f"). zone is the
+// human-friendly camp label — pass identity.CampLabel(camp_id) so the
+// full pub-prefixed camp_id doesn't blow past the DNS-label 63-byte
+// limit.
+func Generate(zone string) (*CA, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("ca: keygen: %w", err)
@@ -63,11 +66,11 @@ func Generate(campID string) (*CA, error) {
 	}
 	// Leading dot makes this a subtree: e.g. ".beer.f2f" matches
 	// "gitlab.beer.f2f", "x.gitlab.beer.f2f", etc.
-	zone := "." + strings.ToLower(strings.TrimSpace(campID)) + ".f2f"
+	zoneSubtree := "." + strings.ToLower(strings.TrimSpace(zone)) + ".f2f"
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "f2f Local CA · " + campID,
+			CommonName:   "f2f Local CA · " + zone,
 			Organization: []string{"f2f"},
 		},
 		NotBefore:                   time.Now().Add(-time.Hour),
@@ -79,7 +82,7 @@ func Generate(campID string) (*CA, error) {
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         []string{zone},
+		PermittedDNSDomains:         []string{zoneSubtree},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
 	if err != nil {
@@ -214,12 +217,12 @@ func Load(dir string) (*CA, error) {
 }
 
 // MatchesZone returns true iff this CA's permittedDNSDomains contains
-// exactly ".<campID>.f2f". Used to detect "user changed camp_id, CA
-// needs to be regenerated".
-func (ca *CA) MatchesZone(campID string) bool {
-	zone := "." + strings.ToLower(strings.TrimSpace(campID)) + ".f2f"
+// exactly ".<zone>.f2f". Used to detect "user switched camp, CA needs
+// to be regenerated".
+func (ca *CA) MatchesZone(zone string) bool {
+	subtree := "." + strings.ToLower(strings.TrimSpace(zone)) + ".f2f"
 	for _, d := range ca.Cert.PermittedDNSDomains {
-		if d == zone {
+		if d == subtree {
 			return true
 		}
 	}

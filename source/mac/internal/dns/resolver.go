@@ -26,17 +26,19 @@ func FlushCache() {
 const resolverDir = "/etc/resolver"
 
 // resolverPath returns the path of the per-zone resolver file for
-// <camp_id>.f2f. macOS picks the file up automatically when present.
-func resolverPath(campID string) string {
-	return filepath.Join(resolverDir, campID+".f2f")
+// <zone>.f2f. macOS picks the file up automatically when present.
+// zone is the human-friendly camp label (post-CampLabel split), kept
+// under 63 chars so it fits a DNS label.
+func resolverPath(zone string) string {
+	return filepath.Join(resolverDir, zone+".f2f")
 }
 
 // WriteResolver drops a resolver file pointing at our local DNS server.
 // Idempotent — overwrites if the file already exists. Needs the engine
 // to be running as root (we do).
-func WriteResolver(campID, bindAddr string) error {
-	if campID == "" {
-		return fmt.Errorf("empty camp id")
+func WriteResolver(zone, bindAddr string) error {
+	if zone == "" {
+		return fmt.Errorf("empty zone")
 	}
 	host, port, err := splitHostPort(bindAddr)
 	if err != nil {
@@ -46,23 +48,23 @@ func WriteResolver(campID, bindAddr string) error {
 		return fmt.Errorf("mkdir %s: %w", resolverDir, err)
 	}
 	body := fmt.Sprintf("nameserver %s\nport %s\nsearch_order 1\n", host, port)
-	return os.WriteFile(resolverPath(campID), []byte(body), 0o644)
+	return os.WriteFile(resolverPath(zone), []byte(body), 0o644)
 }
 
 // ResolverFileExists reports whether /etc/resolver/<camp_id>.f2f is
 // currently in place. Cheap (one os.Stat) and used by the UI to flag
 // "macOS doesn't actually route our zone here" scenarios.
-func ResolverFileExists(campID string) bool {
-	if campID == "" {
+func ResolverFileExists(zone string) bool {
+	if zone == "" {
 		return false
 	}
-	_, err := os.Stat(resolverPath(campID))
+	_, err := os.Stat(resolverPath(zone))
 	return err == nil
 }
 
 // RemoveResolver deletes the file. No-op if it doesn't exist.
-func RemoveResolver(campID string) error {
-	err := os.Remove(resolverPath(campID))
+func RemoveResolver(zone string) error {
+	err := os.Remove(resolverPath(zone))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

@@ -128,8 +128,13 @@ $(function () {
     $sel.empty();
     $sel.append($('<option>').val('').text('— pick a camp —'));
     knownCamps.forEach((c) => {
-      const label = c.name ? `${c.id} (${c.name})` : c.id;
-      $sel.append($('<option>').val(c.id).text(label));
+      // Display: <camp_label> · fp <8hex> (<nickname>) — keeps the
+      // dropdown readable even when c.id is a 64-hex-prefixed string.
+      const label = campLabelFromID(c.id);
+      const fp = campShortFP(c.id);
+      const fpPart = fp ? ` · fp ${fp}` : '';
+      const namePart = c.name ? ` (${c.name})` : '';
+      $sel.append($('<option>').val(c.id).text(`${label}${fpPart}${namePart}`));
     });
     $sel.append($('<option>').val('__new__').text('+ new camp'));
     if (cur) $sel.val(cur);
@@ -154,7 +159,7 @@ $(function () {
     const id = ($('#camp-id').val() || '').trim();
     const name = ($('#camp-name').val() || '').trim();
     if (!id || !name) {
-      alert('camp_id and name are required for a new camp');
+      alert('camp and name are required');
       return;
     }
     triggerStart();
@@ -206,9 +211,35 @@ $(function () {
   // now only filled on the "+ new camp" path, so we can't read it
   // there anymore. Falls back to the picker value if status hasn't
   // arrived yet (page-load → first refreshStatus is a brief window).
+  // campLabelFromID mirrors identity.CampLabel in Go: new-format camp_ids
+  // look like "<64-hex-pub>_<label>", legacy ones are free-form. Split
+  // only when the prefix is exactly 64 hex chars; otherwise return the
+  // whole id as the label.
+  function campLabelFromID(id) {
+    if (!id) return '';
+    if (id.length > 65 && id[64] === '_' && /^[0-9a-f]{64}$/i.test(id.slice(0, 64))) {
+      return id.slice(65);
+    }
+    return id;
+  }
+  // campShortFP extracts the first 8 hex of pub from a new-format camp_id
+  // for UI disambiguation. Empty for legacy camps.
+  function campShortFP(id) {
+    if (!id || id.length <= 65 || id[64] !== '_') return '';
+    if (!/^[0-9a-f]{64}$/i.test(id.slice(0, 64))) return '';
+    return id.slice(0, 8);
+  }
   let currentCampID = '';
+  let currentCampLabel = '';
   function campIDOrPlaceholder() {
     return currentCampID || ($('#camp-picker').val() || '').trim().replace(/^__new__$/, '') || '<camp_id>';
+  }
+  // campLabelOrPlaceholder picks the DNS-zone-safe label (post-CampLabel
+  // split server-side). Falls back to the same picker value as the id
+  // placeholder when status hasn't arrived yet — for the legacy case
+  // (no '_'), id and label are identical, so the placeholder is fine.
+  function campLabelOrPlaceholder() {
+    return currentCampLabel || campIDOrPlaceholder();
   }
 
   function applyStatus(s) {
@@ -217,12 +248,30 @@ $(function () {
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';
+      currentCampLabel = s.camp_label || s.camp_id || '';
       // Running: collapse the picker and form into a key:value readout.
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
       $('#identity-name').text(s.camp_name || '?');
-      $('#identity-camp').text(s.camp_id || '?');
-      $('#identity-ip').text(s.local_ip || '—');
+      // identity-camp shows the readable label; full camp_id sits in
+      // the title so you can copy it from the tooltip.
+      {
+        const id = s.camp_id || '';
+        const lbl = s.camp_label || campLabelFromID(id) || '?';
+        const fp = campShortFP(id);
+        const display = fp ? `${lbl} · fp ${fp}` : lbl;
+        $('#identity-camp').text(display).attr('title', id || '');
+      }
+      const selfPeer = Array.isArray(s.peers) ? s.peers.find((p) => p.self) : null;
+      const selfV6 = selfPeer && selfPeer.overlay_v6 ? selfPeer.overlay_v6 : '';
+      $('#identity-ip').empty().append(document.createTextNode(s.local_ip || '—'));
+      if (selfV6) {
+        $('#identity-ip').append(
+          $('<div class="muted" style="font-size:11px;font-family:monospace">')
+            .text(selfV6)
+            .attr('title', 'overlay IPv6 derived from sha256(camp_id) + sha256(pub); display only'),
+        );
+      }
       $('#identity-reflex').text(s.camp_reflex || '—');
       const pub = s.identity_pub || '';
       const fp = s.identity_fp || '';
@@ -526,30 +575,46 @@ $(function () {
   }
 
   function triggerStart() {
-    // Source of truth is the picker. Two paths:
+    // Source of truth is the picker. Three paths:
     //   - picker = known camp id → use it directly, name from
     //     knownCamps entry (camp config on disk already has the name).
-    //   - picker = "__new__" → user is creating a fresh camp, read
-    //     name + id from the join form below.
+    //   - picker = "__new__" → user is creating or joining via the
+    //     form below. The "camp" input takes either a full <pub>_<label>
+    //     id (join existing) or a short label (create fresh).
     //   - picker = "" → nothing selected, surface it.
     const pick = ($('#camp-picker').val() || '').trim();
-    let id = '';
-    let name = '';
+    const cfg = {};
+    let needName = false;
     if (pick && pick !== '__new__') {
-      id = pick;
+      cfg.camp_id = pick;
       const entry = knownCamps.find((c) => c.id === pick);
-      if (entry && entry.name) name = entry.name;
+      if (entry && entry.name) cfg.camp_name = entry.name;
     } else if (pick === '__new__') {
-      id = ($('#camp-id').val() || '').trim();
-      name = ($('#camp-name').val() || '').trim();
+      const raw = ($('#camp-id').val() || '').trim();
+      const name = ($('#camp-name').val() || '').trim();
+      if (!raw) {
+        $('#camp-id').trigger('focus');
+        return;
+      }
+      // Full <64hex>_<label> shape → join existing. Otherwise treat
+      // input as a label for a brand-new camp.
+      if (/^[0-9a-f]{64}_.+$/i.test(raw)) {
+        cfg.camp_id = raw;
+      } else {
+        cfg.camp_label = raw;
+      }
+      if (name) cfg.camp_name = name;
+      needName = true;
     }
-    if (!id) {
+    if (!cfg.camp_id && !cfg.camp_label) {
       $('#identity-picker').removeClass('hidden');
       $('#camp-picker').trigger('focus');
       return;
     }
-    const cfg = { camp_id: id };
-    if (name) cfg.camp_name = name;
+    if (needName && !cfg.camp_name) {
+      $('#camp-name').trigger('focus');
+      return;
+    }
     pendingOp = 'starting';
     setEngineState('loading', 'starting…', '');
     $.ajax({
@@ -780,10 +845,21 @@ $(function () {
       }
       const $rtt = $('<td>').text(rttText).attr('title', rttTitle);
       if (!p.verified) $rtt.addClass('muted');
+      // tunnel-ip cell: v4 on top, derived overlay v6 below in muted
+      // mono. The v6 is sha256-derived from (camp_id, pub) and shown
+      // for sanity-check only; routing is still v4.
+      const $tipCell = $('<td>').text(p.tunnel_ip || '—');
+      if (p.overlay_v6) {
+        $tipCell.append(
+          $('<div class="muted" style="font-size:11px;font-family:monospace">')
+            .text(p.overlay_v6)
+            .attr('title', 'overlay IPv6 derived from sha256(camp_id) + sha256(pub); display only'),
+        );
+      }
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
         $name,
-        $('<td>').text(p.tunnel_ip || '—'),
+        $tipCell,
         $('<td>').text(endpoint || '—'),
         $rtt,
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
@@ -869,7 +945,7 @@ $(function () {
       return;
     }
     myDomains.forEach((d) => {
-      const fqdn = d.name + '.' + campIDOrPlaceholder() + '.f2f';
+      const fqdn = d.name + '.' + campLabelOrPlaceholder() + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
@@ -967,9 +1043,9 @@ $(function () {
       $list.append('<div class="ax-list-empty">no domains published by any peer yet.</div>');
       return;
     }
-    const campID = campIDOrPlaceholder();
+    const campLabel = campLabelOrPlaceholder();
     rows.forEach((r) => {
-      const fqdn = r.name + '.' + campID + '.f2f';
+      const fqdn = r.name + '.' + campLabel + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));

@@ -73,10 +73,10 @@ func (s *Server) Stats() Stats {
 }
 
 // Open binds to bindAddr (typically "127.0.0.1:5353") and starts
-// answering. campID is the camp identifier used as the second-level
-// label under .f2f.
-func Open(bindAddr, campID string, res Resolver) (*Server, error) {
-	suffix := "." + strings.ToLower(campID) + ".f2f."
+// answering. zone is the second-level label under .f2f — typically
+// identity.CampLabel(camp_id), kept short enough to fit a DNS label.
+func Open(bindAddr, zone string, res Resolver) (*Server, error) {
+	suffix := "." + strings.ToLower(zone) + ".f2f."
 	s := &Server{
 		srv:    &dns.Server{Net: "udp", Addr: bindAddr},
 		suffix: suffix,

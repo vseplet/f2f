@@ -358,7 +358,7 @@ func (e *Engine) RemoveTrustedPeer(fingerprint string) error {
 	if !ok {
 		return nil
 	}
-	certPath := filepath.Join(trustedPeersDir, entry.PeerName+".crt")
+	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
 	if err := os.Remove(certPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("ca: remove %s: %v", certPath, err)
 	}

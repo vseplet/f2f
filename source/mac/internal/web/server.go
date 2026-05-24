@@ -30,6 +30,7 @@ import (
 
 	"github.com/vseplet/f2f/source/mac/internal/config"
 	"github.com/vseplet/f2f/source/mac/internal/engine"
+	"github.com/vseplet/f2f/source/mac/internal/identity"
 )
 
 //go:embed assets
@@ -262,7 +263,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
 		return
 	}
-	suffix := "." + campID + ".f2f"
+	zone := identity.CampLabel(campID)
+	suffix := "." + zone + ".f2f"
 
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
@@ -1094,8 +1096,9 @@ func isLoopback(remoteAddr string) bool {
 }
 
 type startRequest struct {
-	CampName string `json:"camp_name,omitempty"`
-	CampID   string `json:"camp_id"`
+	CampName  string `json:"camp_name,omitempty"`
+	CampID    string `json:"camp_id"`
+	CampLabel string `json:"camp_label,omitempty"`
 }
 
 // handleStart accepts only camp identity from the UI now; everything else
@@ -1115,12 +1118,18 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.CampID == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id is required"))
+	// Two flows in one endpoint:
+	//   - join/resume: req.CampID populated (a known camp on disk or a
+	//     full <pub>_<label> id pasted from an invite).
+	//   - create: req.CampID empty, req.CampLabel populated → engine
+	//     generates identity and derives ID = <pub>_<label>.
+	// req.CampName is the user's nickname inside the camp either way.
+	if req.CampID == "" && req.CampLabel == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id or camp_label is required"))
 		return
 	}
 	if cur := s.engine.Status(); cur.Running {
-		if cur.CampID == req.CampID {
+		if req.CampID != "" && cur.CampID == req.CampID {
 			writeJSON(w, http.StatusOK, cur)
 			return
 		}
@@ -1130,13 +1139,13 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name := req.CampName
-	if name == "" {
+	if name == "" && req.CampID != "" {
 		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
 			name = existing.Identity.Name
 		}
 	}
 	if name == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required for new camp %s", req.CampID))
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required"))
 		return
 	}
 	cfg := engine.Config{
@@ -1147,6 +1156,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			StunAddr: "f2f-camp.fly.dev:3478",
 			Name:     name,
 			ID:       req.CampID,
+			Label:    req.CampLabel,
 		},
 	}
 	if err := s.engine.Start(cfg); err != nil {

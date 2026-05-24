@@ -7,6 +7,7 @@ package tunnel
 
 import (
 	"fmt"
+	"log"
 	"net/netip"
 	"os/exec"
 
@@ -155,6 +156,16 @@ func ifconfigUp(ifname, localIP, peerIP string) error {
 	cmd := exec.Command("/sbin/ifconfig", ifname, "inet", localIP, peerIP, "up")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("ifconfig %s: %w: %s", ifname, err, out)
+	}
+	// Drop the MULTICAST flag: macOS otherwise picks every multicast-
+	// capable interface for SSDP/mDNS/UPnP broadcast destinations
+	// (239.255.255.250 et al) and our utun gets a copy of every local
+	// service-discovery query. We can't deliver multicast to overlay
+	// peers anyway — they're routed via per-peer UDP, no group state.
+	// Failure is logged but non-fatal: worst case the log gets noisier.
+	off := exec.Command("/sbin/ifconfig", ifname, "-multicast")
+	if out, err := off.CombinedOutput(); err != nil {
+		log.Printf("tunnel: ifconfig %s -multicast: %v: %s", ifname, err, out)
 	}
 	return nil
 }
