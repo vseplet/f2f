@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,8 +109,9 @@ func Generate(zone string) (*CA, error) {
 	}, nil
 }
 
-// IssueLeaf returns a tls.Certificate for hostname, signed by this CA.
-// Calls are idempotent — same hostname returns the same cached cert.
+// IssueLeaf returns a tls.Certificate for hostname (or IP literal),
+// signed by this CA. Calls are idempotent — same key returns the
+// same cached cert.
 func (ca *CA) IssueLeaf(hostname string) (*tls.Certificate, error) {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
 	ca.mu.Lock()
@@ -134,7 +136,11 @@ func (ca *CA) IssueLeaf(hostname string) (*tls.Certificate, error) {
 		NotAfter:     time.Now().Add(leafValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{hostname},
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{hostname}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, &priv.PublicKey, ca.Key)
 	if err != nil {
