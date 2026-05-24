@@ -148,11 +148,11 @@ func uiCmd(args []string) error {
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.
-	eng.OnStarted = func(localIP string) {
-		if err := srv.BindTunnel(localIP); err != nil {
+	eng.OnStarted = func(localIP, localV6 string) {
+		if err := srv.BindTunnel(localIP, localV6); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
-		if err := srv.BindProxies(localIP); err != nil {
+		if err := srv.BindProxies(localIP, localV6); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
 	}

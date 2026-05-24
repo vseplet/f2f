@@ -47,10 +47,9 @@ type Server struct {
 	addr   string
 	srv    *http.Server
 
-	mu        sync.Mutex
-	tunnelSrv *http.Server   // signaling/domain listener on <tunnel_ip>:<port>
-	proxySrvs []*http.Server // HTTP-only reverse proxies on :80
-	                         // (tunnel_ip and 127.0.0.1)
+	mu         sync.Mutex
+	tunnelSrvs []*http.Server // signal/domain listeners (one per tunnel addr: v4 + v6)
+	proxySrvs  []*http.Server // HTTP/HTTPS reverse proxies on :80/:443 (loopback + tunnel v4/v6)
 
 	signals    *signalHub
 	signalHTTP *http.Client
@@ -93,66 +92,58 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
-// The mux it serves is intentionally tiny — only POST /api/signal/inbox.
-// Everything else 404s, so a LAN attacker who somehow reaches the tunnel
-// listener can't drive Start/Stop or read state. Safe to call multiple
-// times; subsequent calls with a different IP rebind.
-func (s *Server) BindTunnel(ip string) error {
-	if ip == "" {
-		return nil
-	}
+// BindTunnel starts the tunnel-side listener on every passed ip
+// (typically v4 tunnel_ip + overlay v6). The mux is intentionally
+// tiny — only the few endpoints other peers poll. Safe to call
+// multiple times: subsequent calls rebind from scratch.
+func (s *Server) BindTunnel(ips ...string) error {
+	_ = s.UnbindTunnel()
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
 	}
-	addr := net.JoinHostPort(ip, port)
-
-	s.mu.Lock()
-	if s.tunnelSrv != nil && s.tunnelSrv.Addr == addr {
-		s.mu.Unlock()
-		return nil // already bound there
-	}
-	s.mu.Unlock()
-	_ = s.UnbindTunnel()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	s.mu.Lock()
-	s.tunnelSrv = srv
-	s.mu.Unlock()
-	go func() {
-		log.Printf("tunnel inbox listening on http://%s", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("WARN: tunnel inbox listener: %v", err)
+	for _, ip := range ips {
+		if ip == "" {
+			continue
 		}
-	}()
+		addr := net.JoinHostPort(ip, port)
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		s.mu.Lock()
+		s.tunnelSrvs = append(s.tunnelSrvs, srv)
+		s.mu.Unlock()
+		go func(srv *http.Server, addr string) {
+			log.Printf("tunnel inbox listening on http://%s", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("WARN: tunnel inbox listener %s: %v", addr, err)
+			}
+		}(srv, addr)
+	}
 	return nil
 }
 
-// UnbindTunnel stops the tunnel-side listener if it's running. No-op if
-// nothing was bound.
+// UnbindTunnel stops every tunnel-side listener.
 func (s *Server) UnbindTunnel() error {
 	s.mu.Lock()
-	srv := s.tunnelSrv
-	s.tunnelSrv = nil
+	srvs := s.tunnelSrvs
+	s.tunnelSrvs = nil
 	s.mu.Unlock()
-	if srv == nil {
-		return nil
+	for _, srv := range srvs {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		log.Printf("tunnel inbox stopped (%s)", srv.Addr)
+		_ = srv.Shutdown(ctx)
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
-	return srv.Shutdown(ctx)
+	return nil
 }
 
 // BindProxies starts reverse-proxy listeners for the local published
@@ -166,12 +157,15 @@ func (s *Server) UnbindTunnel() error {
 // to 127.0.0.1:<configured port> over plain HTTP. Bind failures (port
 // busy, no CA) are logged but not fatal — users can keep typing
 // explicit ports.
-func (s *Server) BindProxies(tunnelIP string) error {
+func (s *Server) BindProxies(tunnelIPs ...string) error {
 	_ = s.UnbindProxies()
-	// HTTP listeners: 127.0.0.1:80 (self traffic) + tunnel_ip:80 (peer traffic).
-	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
-	if tunnelIP != "" {
-		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
+	// HTTP listeners: 127.0.0.1 + every passed tunnel addr (typically
+	// v4 tunnel_ip and overlay v6).
+	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80"), net.JoinHostPort("::1", "80")}
+	for _, ip := range tunnelIPs {
+		if ip != "" {
+			httpAddrs = append(httpAddrs, net.JoinHostPort(ip, "80"))
+		}
 	}
 	for _, a := range httpAddrs {
 		s.startProxyListener(a, nil)
@@ -188,9 +182,11 @@ func (s *Server) BindProxies(tunnelIP string) error {
 				return ca.IssueLeaf(host)
 			},
 		}
-		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443")}
-		if tunnelIP != "" {
-			tlsAddrs = append(tlsAddrs, net.JoinHostPort(tunnelIP, "443"))
+		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443"), net.JoinHostPort("::1", "443")}
+		for _, ip := range tunnelIPs {
+			if ip != "" {
+				tlsAddrs = append(tlsAddrs, net.JoinHostPort(ip, "443"))
+			}
 		}
 		for _, a := range tlsAddrs {
 			s.startProxyListener(a, tlsCfg)

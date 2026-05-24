@@ -390,7 +390,7 @@ type Engine struct {
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
 	// after Stop tears everything down.
-	OnStarted func(localIP string)
+	OnStarted func(localIP, localV6 string)
 	OnStopped func()
 
 	// store is the singleton handle to $HOME/.f2f/. Lazily opened on
@@ -701,13 +701,19 @@ func (e *Engine) Start(cfg Config) error {
 	// internal ports + user-configured ones. Failure here is non-
 	// fatal — tunnel still works, just without input filtering.
 	e.userFirewall = userFirewallFromCamp(e.camp)
-	fw, err := firewall.Open(tun.Name(), localIP, mergeFirewallRules(e.userFirewall))
+	localV6 := ""
+	if e.cfg.Camp != nil && e.identity != nil {
+		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
+			localV6 = a.String()
+		}
+	}
+	fw, err := firewall.Open(tun.Name(), localIP, localV6, mergeFirewallRules(e.userFirewall))
 	if err != nil {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
 	} else {
 		e.fw = fw
-		log.Printf("firewall: pf anchor %q on %s scoped to %s/32, %d built-in + %d user rule(s)",
-			fw.Anchor(), tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
+		log.Printf("firewall: pf anchor %q on %s scoped to %s/32+%s/128, %d built-in + %d user rule(s)",
+			fw.Anchor(), tun.Name(), localIP, localV6, len(builtinFirewallPorts), countEnabled(e.userFirewall))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
@@ -857,7 +863,13 @@ func (e *Engine) Start(cfg Config) error {
 		}()
 	}
 	if e.OnStarted != nil {
-		e.OnStarted(cfg.LocalIP)
+		localV6 := ""
+		if e.cfg.Camp != nil && e.identity != nil {
+			if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
+				localV6 = a.String()
+			}
+		}
+		e.OnStarted(cfg.LocalIP, localV6)
 	}
 	return nil
 }
@@ -1643,16 +1655,16 @@ func (e *Engine) peerCAPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 	type target struct {
-		tunnelIP string
-		name     string
+		host string
+		name string
 	}
 	var targets []target
 	e.mu.Lock()
-	for tip, p := range e.peers {
+	for _, p := range e.peers {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), name: p.Name})
 	}
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
@@ -1665,7 +1677,7 @@ func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/ca-cert"
+		url := "http://" + net.JoinHostPort(t.host, port) + "/api/ca-cert"
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			continue
@@ -1942,6 +1954,7 @@ func (e *Engine) filesPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 	type target struct {
+		host     string
 		tunnelIP string
 		name     string
 	}
@@ -1951,7 +1964,7 @@ func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
 	}
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
@@ -1960,7 +1973,7 @@ func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/files"
+		url := "http://" + net.JoinHostPort(t.host, port) + "/api/files"
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			continue
@@ -2010,6 +2023,7 @@ func (e *Engine) peerFirewallPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 	type target struct {
+		host     string
 		tunnelIP string
 		name     string
 	}
@@ -2019,7 +2033,7 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
 	}
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
@@ -2028,7 +2042,7 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/firewall"
+		url := "http://" + net.JoinHostPort(t.host, port) + "/api/firewall"
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			continue
@@ -2143,7 +2157,8 @@ func (e *Engine) domainPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 	type target struct {
-		tunnelIP string
+		host     string
+		tunnelIP string // kept for persistPeerDomainsLocked keying
 		name     string
 	}
 	var targets []target
@@ -2152,7 +2167,7 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
 	}
 	port := domainPollPort(e)
 	e.mu.Unlock()
@@ -2162,7 +2177,7 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.tunnelIP, port) + "/api/domains"
+		url := "http://" + net.JoinHostPort(t.host, port) + "/api/domains"
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			continue
@@ -2683,6 +2698,24 @@ func validCampLabel(label string) bool {
 		}
 	}
 	return true
+}
+
+// peerHTTPHost returns the host part to plug into net.JoinHostPort
+// when building tunnel-side HTTP URLs to peer p. Prefers the overlay
+// v6 (sha256-derived from camp_id+pub) so the request rides the v6
+// path that DNS now resolves to; falls back to the legacy v4
+// tunnel_ip when pub is unknown or v6 isn't computable (camp-less
+// static --peer mode, transitional peer announce without pub).
+func (e *Engine) peerHTTPHostLocked(p *peerState) string {
+	if e.cfg.Camp != nil && p != nil && p.Pub != "" {
+		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub); err == nil {
+			return a.String()
+		}
+	}
+	if p != nil {
+		return p.TunnelIP
+	}
+	return ""
 }
 
 // overlayAddrOrEmpty wraps overlay.PubToAddr for the status path: any
