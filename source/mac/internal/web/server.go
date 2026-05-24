@@ -436,19 +436,33 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := s.engine.Status()
-	if !st.Running || st.PeerIP == "" {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running or peer IP unknown"))
+	if !st.Running {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running"))
 		return
 	}
-	// Strip mDNS masking from any host candidates before forwarding, so the
-	// peer's WebRTC stack sees our real tunnel IP and can actually pair.
-	body = rewriteMDNS(body, st.LocalIP)
+	// Find active peer's overlay v6 in Status.Peers and forward there.
+	// Also find our own self.OverlayV6 so we can rewrite mDNS-masked
+	// ICE host candidates to a unique-per-peer address (v4 alias is the
+	// same on every mac and would loopback if WebRTC tried it).
+	var peerV6, selfV6 string
+	for _, p := range st.Peers {
+		if p.Self {
+			selfV6 = p.OverlayV6
+		} else if p.Pub != "" && p.Pub == st.ActivePeerPub {
+			peerV6 = p.OverlayV6
+		}
+	}
+	if peerV6 == "" {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no active peer (set one in /api/peers/active)"))
+		return
+	}
+	body = rewriteMDNS(body, selfV6)
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
 		return
 	}
-	url := "http://" + net.JoinHostPort(st.PeerIP, port) + "/api/signal/inbox"
+	url := "http://" + net.JoinHostPort(peerV6, port) + "/api/signal/inbox"
 	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

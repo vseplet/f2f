@@ -1017,24 +1017,36 @@ func chownToUser(path string) {
 func (e *Engine) startTorrent() error {
 	// Prefer overlay v6 for the BT listener — that's the address other
 	// peers in the camp resolve us to via DNS AAAA, and what the UI
-	// puts into the magnet's `peers=` list. Falls back to v4 tunnel_ip
-	// in legacy / no-pub setups.
-	listenHost := e.cfg.LocalIP
+	// puts into the magnet's `peers=` list. Falls back to the v4 alias
+	// (every mac uses the same one) if v6 bind fails — at least seeds
+	// stay reachable from peers on the v4 path then.
+	var hosts []string
 	if e.cfg.Camp != nil && e.identity != nil {
 		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
-			listenHost = a.String()
+			hosts = append(hosts, a.String())
 		}
 	}
-	opts := internaltorrent.Options{
-		ListenAddr:   net.JoinHostPort(listenHost, fmt.Sprint(internaltorrent.DefaultPort)),
-		SharedDir:    e.torrentSharedDir(),
-		DownloadsDir: e.torrentDownloadsDir(),
-	}
-	log.Printf("torrent: binding on %s …", opts.ListenAddr)
+	hosts = append(hosts, e.cfg.LocalIP)
+	var c *internaltorrent.Client
 	t0 := time.Now()
-	c, err := internaltorrent.New(opts)
-	if err != nil {
-		return err
+	var opts internaltorrent.Options
+	for _, h := range hosts {
+		opts = internaltorrent.Options{
+			ListenAddr:   net.JoinHostPort(h, fmt.Sprint(internaltorrent.DefaultPort)),
+			SharedDir:    e.torrentSharedDir(),
+			DownloadsDir: e.torrentDownloadsDir(),
+		}
+		log.Printf("torrent: binding on %s …", opts.ListenAddr)
+		var err error
+		c, err = internaltorrent.New(opts)
+		if err == nil {
+			break
+		}
+		log.Printf("torrent: bind %s failed: %v", opts.ListenAddr, err)
+		c = nil
+	}
+	if c == nil {
+		return fmt.Errorf("torrent: every listen-addr candidate failed")
 	}
 	e.mu.Lock()
 	e.torrent = c
