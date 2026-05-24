@@ -262,16 +262,7 @@ $(function () {
         const display = fp ? `${lbl} · fp ${fp}` : lbl;
         $('#identity-camp').text(display).attr('title', id || '');
       }
-      const selfPeer = Array.isArray(s.peers) ? s.peers.find((p) => p.self) : null;
-      const selfV6 = selfPeer && selfPeer.overlay_v6 ? selfPeer.overlay_v6 : '';
-      $('#identity-ip').empty().append(document.createTextNode(s.local_ip || '—'));
-      if (selfV6) {
-        $('#identity-ip').append(
-          $('<div class="muted" style="font-size:11px;font-family:monospace">')
-            .text(selfV6)
-            .attr('title', 'overlay IPv6 derived from sha256(camp_id) + sha256(pub); display only'),
-        );
-      }
+      $('#identity-ip').text(s.local_ip || '—');
       $('#identity-reflex').text(s.camp_reflex || '—');
       const pub = s.identity_pub || '';
       const fp = s.identity_fp || '';
@@ -848,7 +839,7 @@ $(function () {
       // overlay address cell: pub-derived per-camp v6. v4 is no longer
       // a peer-identifying address (every mac uses the same localV4Alias
       // on its own utun, so peer-to-peer addressing is v6 only).
-      const $tipCell = $('<td>').text(p.overlay_v6 || '—').addClass('ax-mono');
+      const $tipCell = $('<td>').text(p.overlay_v4 || '—');
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
         $name,
@@ -1029,7 +1020,7 @@ $(function () {
     livePeers.forEach((p) => {
       if (p.self) return;
       const ds = Array.isArray(p.domains) ? p.domains : [];
-      ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.overlay_v6 || '', online: p.online !== false, ...d }));
+      ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.overlay_v4 || '', online: p.online !== false, ...d }));
     });
     $('#known-domains-meta').text(rows.length);
     if (rows.length === 0) {
@@ -1085,7 +1076,7 @@ $(function () {
       if (p.self) return;
       const ports = Array.isArray(p.firewall) ? p.firewall : [];
       ports.forEach((fp) => rows.push({
-        peer: p.name, peerTunnel: p.overlay_v6 || '', online: p.online !== false, ...fp,
+        peer: p.name, peerTunnel: p.overlay_v4 || '', online: p.online !== false, ...fp,
       }));
     });
     $('#peer-firewall-meta').text(rows.length);
@@ -1349,7 +1340,7 @@ $(function () {
     const rows = [];
     others.forEach((p) => {
       const files = Array.isArray(p.files) ? p.files : [];
-      files.forEach((f) => rows.push({ peer: p.name, peerTunnel: p.overlay_v6 || '', peerOverlayV6: p.overlay_v6 || '', ...f }));
+      files.forEach((f) => rows.push({ peer: p.name, peerTunnel: p.overlay_v4 || '', ...f }));
     });
     $('#drop-lib-meta').text(rows.length);
     const $list = $('#drop-lib-list');
@@ -1387,9 +1378,7 @@ $(function () {
           // to legacy v4 if the peer hasn't announced a pub yet. The
           // local BT client listens on v6 (per camp utun alias) and on
           // v4 (legacy tunnel_ip), so either form lands on the peer.
-          const peerAddr = r.peerOverlayV6
-            ? '[' + r.peerOverlayV6 + ']:6881'
-            : r.peerTunnel + ':6881';
+          const peerAddr = r.peerTunnel + ':6881';
           $.ajax({
             url: '/api/files/download',
             method: 'POST',

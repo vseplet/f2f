@@ -182,26 +182,3 @@ func routeAddSubnet(subnet, ifname string) error {
 	return nil
 }
 
-// AddIPv6 adds an IPv6 address to the utun interface alongside the
-// existing v4 (dual-stack). Idempotent at the OS level — ifconfig
-// silently no-ops if the alias is already there.
-func (t *Tunnel) AddIPv6(addr string, prefixLen int) error {
-	prefix := fmt.Sprintf("%d", prefixLen)
-	cmd := exec.Command("/sbin/ifconfig", t.name, "inet6", addr, "prefixlen", prefix, "alias")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ifconfig %s inet6 %s/%d alias: %w: %s", t.name, addr, prefixLen, err, out)
-	}
-	return nil
-}
-
-// RouteSubnet6 installs a /N IPv6 route pointing at this utun. Used to
-// make the whole per-camp ULA prefix reachable through the interface
-// (every peer in the camp lives somewhere under that prefix).
-func (t *Tunnel) RouteSubnet6(prefix string) error {
-	_ = exec.Command("/sbin/route", "-n", "delete", "-inet6", "-net", prefix).Run()
-	cmd := exec.Command("/sbin/route", "-n", "add", "-inet6", "-net", prefix, "-interface", t.name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("route add -inet6 %s -interface %s: %w: %s", prefix, t.name, err, out)
-	}
-	return nil
-}

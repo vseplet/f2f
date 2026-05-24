@@ -31,6 +31,7 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/config"
 	"github.com/vseplet/f2f/source/mac/internal/engine"
 	"github.com/vseplet/f2f/source/mac/internal/identity"
+	"github.com/vseplet/f2f/source/mac/internal/overlay"
 )
 
 //go:embed assets
@@ -47,9 +48,9 @@ type Server struct {
 	addr   string
 	srv    *http.Server
 
-	mu         sync.Mutex
-	tunnelSrvs []*http.Server // signal/domain listeners (one per tunnel addr: v4 + v6)
-	proxySrvs  []*http.Server // HTTP/HTTPS reverse proxies on :80/:443 (loopback + tunnel v4/v6)
+	mu        sync.Mutex
+	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
+	proxySrvs []*http.Server // HTTP/HTTPS reverse proxies on :80/:443
 
 	signals    *signalHub
 	signalHTTP *http.Client
@@ -92,58 +93,53 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// BindTunnel starts the tunnel-side listener on every passed ip
-// (typically v4 tunnel_ip + overlay v6). The mux is intentionally
-// tiny — only the few endpoints other peers poll. Safe to call
-// multiple times: subsequent calls rebind from scratch.
-func (s *Server) BindTunnel(ips ...string) error {
+// BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
+func (s *Server) BindTunnel(ip string) error {
+	if ip == "" {
+		return nil
+	}
 	_ = s.UnbindTunnel()
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
 	}
+	addr := net.JoinHostPort(ip, port)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
-	for _, ip := range ips {
-		if ip == "" {
-			continue
-		}
-		addr := net.JoinHostPort(ip, port)
-		srv := &http.Server{
-			Addr:              addr,
-			Handler:           mux,
-			ReadHeaderTimeout: 10 * time.Second,
-		}
-		s.mu.Lock()
-		s.tunnelSrvs = append(s.tunnelSrvs, srv)
-		s.mu.Unlock()
-		go func(srv *http.Server, addr string) {
-			log.Printf("tunnel inbox listening on http://%s", addr)
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Printf("WARN: tunnel inbox listener %s: %v", addr, err)
-			}
-		}(srv, addr)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
+	s.mu.Lock()
+	s.tunnelSrv = srv
+	s.mu.Unlock()
+	go func() {
+		log.Printf("tunnel inbox listening on http://%s", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("WARN: tunnel inbox listener: %v", err)
+		}
+	}()
 	return nil
 }
 
-// UnbindTunnel stops every tunnel-side listener.
+// UnbindTunnel stops the tunnel-side listener.
 func (s *Server) UnbindTunnel() error {
 	s.mu.Lock()
-	srvs := s.tunnelSrvs
-	s.tunnelSrvs = nil
+	srv := s.tunnelSrv
+	s.tunnelSrv = nil
 	s.mu.Unlock()
-	for _, srv := range srvs {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		log.Printf("tunnel inbox stopped (%s)", srv.Addr)
-		_ = srv.Shutdown(ctx)
-		cancel()
+	if srv == nil {
+		return nil
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
+	return srv.Shutdown(ctx)
 }
 
 // BindProxies starts reverse-proxy listeners for the local published
@@ -157,20 +153,15 @@ func (s *Server) UnbindTunnel() error {
 // to 127.0.0.1:<configured port> over plain HTTP. Bind failures (port
 // busy, no CA) are logged but not fatal — users can keep typing
 // explicit ports.
-func (s *Server) BindProxies(tunnelIPs ...string) error {
+func (s *Server) BindProxies(tunnelIP string) error {
 	_ = s.UnbindProxies()
-	// HTTP listeners: 127.0.0.1 + every passed tunnel addr (typically
-	// v4 tunnel_ip and overlay v6).
-	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80"), net.JoinHostPort("::1", "80")}
-	for _, ip := range tunnelIPs {
-		if ip != "" {
-			httpAddrs = append(httpAddrs, net.JoinHostPort(ip, "80"))
-		}
+	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
+	if tunnelIP != "" {
+		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
 	}
 	for _, a := range httpAddrs {
 		s.startProxyListener(a, nil)
 	}
-	// HTTPS listeners — same set of addresses, but only if a CA is up.
 	if ca := s.engine.CA(); ca != nil {
 		tlsCfg := &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -182,11 +173,9 @@ func (s *Server) BindProxies(tunnelIPs ...string) error {
 				return ca.IssueLeaf(host)
 			},
 		}
-		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443"), net.JoinHostPort("::1", "443")}
-		for _, ip := range tunnelIPs {
-			if ip != "" {
-				tlsAddrs = append(tlsAddrs, net.JoinHostPort(ip, "443"))
-			}
+		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443")}
+		if tunnelIP != "" {
+			tlsAddrs = append(tlsAddrs, net.JoinHostPort(tunnelIP, "443"))
 		}
 		for _, a := range tlsAddrs {
 			s.startProxyListener(a, tlsCfg)
@@ -440,29 +429,26 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running"))
 		return
 	}
-	// Find active peer's overlay v6 in Status.Peers and forward there.
-	// Also find our own self.OverlayV6 so we can rewrite mDNS-masked
-	// ICE host candidates to a unique-per-peer address (v4 alias is the
-	// same on every mac and would loopback if WebRTC tried it).
-	var peerV6, selfV6 string
+	// Find the active peer's pub-derived v4 and forward the signal there.
+	var peerIP string
 	for _, p := range st.Peers {
-		if p.Self {
-			selfV6 = p.OverlayV6
-		} else if p.Pub != "" && p.Pub == st.ActivePeerPub {
-			peerV6 = p.OverlayV6
+		if !p.Self && p.Pub != "" && p.Pub == st.ActivePeerPub {
+			if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
+				peerIP = a.String()
+			}
 		}
 	}
-	if peerV6 == "" {
+	if peerIP == "" {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no active peer (set one in /api/peers/active)"))
 		return
 	}
-	body = rewriteMDNS(body, selfV6)
+	body = rewriteMDNS(body, st.LocalIP)
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
 		return
 	}
-	url := "http://" + net.JoinHostPort(peerV6, port) + "/api/signal/inbox"
+	url := "http://" + net.JoinHostPort(peerIP, port) + "/api/signal/inbox"
 	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -494,18 +480,17 @@ func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// Auto-select active peer based on the incoming connection's source
-	// address: match the v6 overlay address back to a peer by pub. The
-	// v4 path used to do this too, but every mac now binds the same
-	// localV4Alias, so v4 RemoteAddr no longer identifies the caller.
+	// Auto-select active peer by matching the caller's v4 overlay
+	// address (pub-derived, unique per peer) to a known peer.
 	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
 		st := s.engine.Status()
 		if st.Running {
 			for _, p := range st.Peers {
-				if !p.Self && p.OverlayV6 != "" && p.OverlayV6 == host && p.Pub != st.ActivePeerPub {
-					if err := s.engine.SetActivePeer(p.Pub); err != nil {
-						_ = err
-					}
+				if p.Self || p.Pub == "" {
+					continue
+				}
+				if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a.String() == host && p.Pub != st.ActivePeerPub {
+					_ = s.engine.SetActivePeer(p.Pub)
 					break
 				}
 			}
@@ -605,8 +590,8 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		id := "peer:" + p.Name
 		peerIDByName[p.Name] = id
 		label := p.Name
-		if p.OverlayV6 != "" {
-			label += " · " + p.OverlayV6
+		if p.OverlayV4 != "" {
+			label += " · " + p.OverlayV4
 		}
 		t.Nodes = append(t.Nodes, topologyNode{ID: id, Label: label, Kind: "peer", Online: p.Online})
 		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})

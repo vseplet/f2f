@@ -194,11 +194,10 @@ type PeerStatusInfo struct {
 	LastPongMs int64 `json:"last_pong_ms,omitempty"`
 	RTTMs      int64 `json:"rtt_ms,omitempty"`
 	Verified   bool  `json:"verified"`
-	// OverlayV6 is the per-camp ULA address derived from (camp_id, pub).
+	// OverlayV4 is the per-peer 100.64.X.Y address derived from pub.
 	// Present for any peer whose Pub is known; empty for legacy peers
-	// announced without a pub. Display-only at this stage — utun still
-	// runs v4 — but emitted now so the UI can sanity-check the scheme.
-	OverlayV6 string `json:"overlay_v6,omitempty"`
+	// announced without a pub. Used for BT peer addresses and display.
+	OverlayV4 string `json:"overlay_v4,omitempty"`
 }
 
 // InterceptInfo describes one intercept entry, what host routes it owns,
@@ -390,7 +389,7 @@ type Engine struct {
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
 	// after Stop tears everything down.
-	OnStarted func(localIP, localV6 string)
+	OnStarted func(localIP string)
 	OnStopped func()
 
 	// store is the singleton handle to $HOME/.f2f/. Lazily opened on
@@ -661,27 +660,6 @@ func (e *Engine) Start(cfg Config) error {
 		}
 		tun = t
 		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, tunnel.MTU)
-		// Dual-stack: bring up the overlay v6 alias and route the whole
-		// per-camp /48 ULA at this utun. v4 keeps doing all real work;
-		// v6 is here as observation + manual ping6 target during
-		// migration. Failure is non-fatal — v4 already works.
-		if e.identity != nil {
-			ourV6, err := overlay.PubToAddr(cfg.Camp.ID, e.identity.PubHex())
-			if err == nil {
-				if err := tun.AddIPv6(ourV6.String(), 64); err != nil {
-					log.Printf("tunnel: v6 alias: %v", err)
-				} else {
-					prefix := overlay.CampPrefix(cfg.Camp.ID).String()
-					if err := tun.RouteSubnet6(prefix); err != nil {
-						log.Printf("tunnel: v6 route %s: %v", prefix, err)
-					} else {
-						log.Printf("opened %s (v6=%s prefix=%s)", tun.Name(), ourV6, prefix)
-					}
-				}
-			} else {
-				log.Printf("tunnel: v6 derive: %v", err)
-			}
-		}
 	} else {
 		t, err := tunnel.Open(localIP, peerIP)
 		if err != nil {
@@ -708,19 +686,13 @@ func (e *Engine) Start(cfg Config) error {
 	// internal ports + user-configured ones. Failure here is non-
 	// fatal — tunnel still works, just without input filtering.
 	e.userFirewall = userFirewallFromCamp(e.camp)
-	localV6 := ""
-	if e.cfg.Camp != nil && e.identity != nil {
-		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
-			localV6 = a.String()
-		}
-	}
-	fw, err := firewall.Open(tun.Name(), localIP, localV6, mergeFirewallRules(e.userFirewall))
+	fw, err := firewall.Open(tun.Name(), localIP, mergeFirewallRules(e.userFirewall))
 	if err != nil {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
 	} else {
 		e.fw = fw
-		log.Printf("firewall: pf anchor %q on %s scoped to %s/32+%s/128, %d built-in + %d user rule(s)",
-			fw.Anchor(), tun.Name(), localIP, localV6, len(builtinFirewallPorts), countEnabled(e.userFirewall))
+		log.Printf("firewall: pf anchor %q on %s scoped to %s/32, %d built-in + %d user rule(s)",
+			fw.Anchor(), tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
@@ -870,13 +842,7 @@ func (e *Engine) Start(cfg Config) error {
 		}()
 	}
 	if e.OnStarted != nil {
-		localV6 := ""
-		if e.cfg.Camp != nil && e.identity != nil {
-			if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
-				localV6 = a.String()
-			}
-		}
-		e.OnStarted(cfg.LocalIP, localV6)
+		e.OnStarted(cfg.LocalIP)
 	}
 	return nil
 }
@@ -1018,38 +984,19 @@ func chownToUser(path string) {
 }
 
 func (e *Engine) startTorrent() error {
-	// Prefer overlay v6 for the BT listener — that's the address other
-	// peers in the camp resolve us to via DNS AAAA, and what the UI
-	// puts into the magnet's `peers=` list. Falls back to the v4 alias
-	// (every mac uses the same one) if v6 bind fails — at least seeds
-	// stay reachable from peers on the v4 path then.
-	var hosts []string
-	if e.cfg.Camp != nil && e.identity != nil {
-		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
-			hosts = append(hosts, a.String())
-		}
-	}
-	hosts = append(hosts, e.cfg.LocalIP)
-	var c *internaltorrent.Client
+	// Bind the BT listener on the v4 overlay alias — that's the address
+	// other peers in the camp reach us at through utun.
+	host := e.cfg.LocalIP
 	t0 := time.Now()
-	var opts internaltorrent.Options
-	for _, h := range hosts {
-		opts = internaltorrent.Options{
-			ListenAddr:   net.JoinHostPort(h, fmt.Sprint(internaltorrent.DefaultPort)),
-			SharedDir:    e.torrentSharedDir(),
-			DownloadsDir: e.torrentDownloadsDir(),
-		}
-		log.Printf("torrent: binding on %s …", opts.ListenAddr)
-		var err error
-		c, err = internaltorrent.New(opts)
-		if err == nil {
-			break
-		}
-		log.Printf("torrent: bind %s failed: %v", opts.ListenAddr, err)
-		c = nil
+	opts := internaltorrent.Options{
+		ListenAddr:   net.JoinHostPort(host, fmt.Sprint(internaltorrent.DefaultPort)),
+		SharedDir:    e.torrentSharedDir(),
+		DownloadsDir: e.torrentDownloadsDir(),
 	}
-	if c == nil {
-		return fmt.Errorf("torrent: every listen-addr candidate failed")
+	log.Printf("torrent: binding on %s …", opts.ListenAddr)
+	c, err := internaltorrent.New(opts)
+	if err != nil {
+		return fmt.Errorf("torrent: bind %s: %w", opts.ListenAddr, err)
 	}
 	e.mu.Lock()
 	e.torrent = c
@@ -2659,7 +2606,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Verified:    true,
 			Self:        true,
 			Domains:     e.MyDomains(),
-			OverlayV6:   overlayAddrOrEmpty(e.cfg.Camp.ID, selfPub),
+			OverlayV4:   e.cfg.LocalIP,
 		})
 	}
 	// Sort peer-keys so the UI list is stable across refreshes —
@@ -2683,10 +2630,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			// (same 30s threshold so the two signals line up).
 			verified = lastPong > 0 && now-lastPong < peerOnlineWindowMs
 		}
-		campID := ""
-		if e.cfg.Camp != nil {
-			campID = e.cfg.Camp.ID
-		}
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			Pub:         p.Pub,
@@ -2706,7 +2649,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			LastPongMs:  lastPong,
 			RTTMs:       rtt,
 			Verified:    verified,
-			OverlayV6:   overlayAddrOrEmpty(campID, p.Pub),
+			OverlayV4:   overlayV4OrEmpty(p.Pub),
 		})
 	}
 	return out
@@ -2730,34 +2673,29 @@ func validCampLabel(label string) bool {
 	return true
 }
 
-// peerHTTPHost returns the host part to plug into net.JoinHostPort
-// when building tunnel-side HTTP URLs to peer p. Prefers the overlay
-// v6 (sha256-derived from camp_id+pub) so the request rides the v6
-// path that DNS now resolves to; falls back to the legacy v4
-// tunnel_ip when pub is unknown or v6 isn't computable (camp-less
-// static --peer mode, transitional peer announce without pub).
+// peerHTTPHostLocked returns the pub-derived v4 address for peer p,
+// used as the host in tunnel-side HTTP URLs.
 func (e *Engine) peerHTTPHostLocked(p *peerState) string {
-	if e.cfg.Camp != nil && p != nil && p.Pub != "" {
-		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub); err == nil {
+	if p != nil && p.Pub != "" {
+		if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
 			return a.String()
 		}
 	}
 	return ""
 }
 
-// overlayAddrOrEmpty wraps overlay.PubToAddr for the status path: any
-// missing input (no camp, no pub, malformed pub) silently yields "" so
-// the JSON omits the field rather than returning an error to the UI.
-func overlayAddrOrEmpty(campID, pubHex string) string {
-	if campID == "" || pubHex == "" {
+func overlayV4OrEmpty(pubHex string) string {
+	if pubHex == "" {
 		return ""
 	}
-	addr, err := overlay.PubToAddr(campID, pubHex)
+	addr, err := overlay.PubToV4Addr(pubHex)
 	if err != nil {
 		return ""
 	}
 	return addr.String()
 }
+
+
 
 func sortedDomains(in []DomainEntry) []DomainEntry {
 	out := append([]DomainEntry(nil), in...)
@@ -2854,13 +2792,12 @@ func (e *Engine) SetMyDomains(list []DomainEntry) {
 }
 
 // LookupHost implements internaldns.Resolver. Resolves a label under
-// our camp's f2f zone to (v4, v6):
+// our camp's f2f zone to a v4 address:
 //
-//   - Our own published names → V4=127.0.0.1, V6=::1 (loopback both
-//     ways; we host the actual service on localhost).
-//   - Peer-published names → V4="" (peers aren't reachable by v4 in
-//     the overlay) and V6=peer's overlay v6 (per-camp ULA, routes
-//     through our utun).
+//   - Our own published names → V4=127.0.0.1 (loopback; we host the
+//     actual service on localhost).
+//   - Peer-published names → V4=peer's overlay v4 (100.64.X.Y derived
+//     from pub, routes through utun).
 //   - Anything else → ok=false.
 //
 // Names are skipped for offline peers — handing out an address for a
@@ -2869,7 +2806,7 @@ func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
 	// Self first — MyDomains doesn't need the engine lock.
 	for _, d := range e.MyDomains() {
 		if strings.EqualFold(d.Name, label) {
-			return internaldns.Host{V4: "127.0.0.1", V6: "::1"}, true
+			return internaldns.Host{V4: "127.0.0.1"}, true
 		}
 	}
 	if e.cfg.Camp == nil {
@@ -2885,11 +2822,11 @@ func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
 			if !strings.EqualFold(d.Name, label) {
 				continue
 			}
-			addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
+			v4addr, err := overlay.PubToV4Addr(p.Pub)
 			if err != nil {
 				return internaldns.Host{}, false
 			}
-			return internaldns.Host{V6: addr.String()}, true
+			return internaldns.Host{V4: v4addr.String()}, true
 		}
 	}
 	return internaldns.Host{}, false
@@ -3229,24 +3166,14 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Per-peer lookup: every peer has a deterministic v4 alias
-	// (100.64.X.Y from sha256(pub)) and a v6 overlay address
-	// (fd…::X from sha256(camp_id)+sha256(pub)). Walk peers, compute
-	// the matching address, compare. The v4 path matters for
-	// intercept reply routing — when a remote peer NATs an external
-	// reply and forwards it back to us, dst is our pub-derived v4
-	// alias; ditto in the reverse direction.
+	// (100.64.X.Y from sha256(pub)). Walk peers, compute the matching
+	// address, compare.
 	for _, p := range e.peers {
 		if p.Pub == "" || p.UDPAddr == nil {
 			continue
 		}
-		if dst.Is6() {
-			if a, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub); err == nil && a == dst {
-				return p.UDPAddr
-			}
-		} else {
-			if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a == dst {
-				return p.UDPAddr
-			}
+		if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a == dst {
+			return p.UDPAddr
 		}
 	}
 	target := e.interceptPeerForLocked(dst)
