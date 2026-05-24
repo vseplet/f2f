@@ -2139,16 +2139,43 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 		burstMs     = 1000  // probe cadence while unconfirmed / stale
 		keepaliveMs = 25000 // probe cadence once we've seen the peer
 		freshMs     = 30000 // anything older than this counts as stale
+		// wakeJumpMs is the wall-clock gap between ticks above which we
+		// assume the host slept. Real ticks land at ~1s; anything past
+		// 30s only happens after suspend/resume.
+		wakeJumpMs = 30000
 	)
+	var prevTickMs int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
+			// Wake-from-sleep detection: a tick that lands >wakeJumpMs
+			// after the previous one means the host suspended. Force
+			// every peer back into burst cadence by clearing their
+			// LastSeen/LastPing timers, and kick an out-of-band camp
+			// announce so our upstream NAT binding reopens before peers
+			// keep blasting the stale port.
+			if prevTickMs != 0 && now-prevTickMs > wakeJumpMs {
+				log.Printf("wake: clock jumped %ds, resetting hole-punch state and re-announcing", (now-prevTickMs)/1000)
+				e.mu.Lock()
+				for _, p := range e.peers {
+					p.LastSeenMs.Store(0)
+					p.LastPingMs.Store(0)
+				}
+				e.mu.Unlock()
+				if e.announce != nil {
+					if err := e.announce.Refresh(); err != nil {
+						log.Printf("wake: announce refresh: %v", err)
+					}
+				}
+			}
+			prevTickMs = now
 			e.mu.Lock()
 			targets := make([]*peerState, 0, len(e.peers))
-			for _, p := range e.peers {
+			tunIPs := make([]string, 0, len(e.peers))
+			for ip, p := range e.peers {
 				// Skip peers without a known UDP target: camp marked them
 				// offline, or we've never observed their endpoint. Punch
 				// resumes the moment they reappear in applyPeerList.
@@ -2156,14 +2183,28 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					continue
 				}
 				targets = append(targets, p)
+				tunIPs = append(tunIPs, ip)
 			}
 			e.mu.Unlock()
-			for _, p := range targets {
+			for i, p := range targets {
 				seen := p.LastSeenMs.Load()
 				lastSent := p.LastPingMs.Load()
 				cadence := int64(burstMs)
+				// Healthy = peer is sending us packets AND our last ping
+				// got a pong recently. Either signal stale → burst. This
+				// covers the asymmetric case: peer's keepalive reaches us
+				// fine but our pings get lost (NAT binding lapsed our
+				// way), so receive-only freshness isn't enough.
 				if seen != 0 && now-seen < freshMs {
-					cadence = keepaliveMs
+					pongFresh := false
+					if e.pinger != nil {
+						if r, ok := e.pinger.Result(tunIPs[i]); ok && r.LastPongMs != 0 && now-r.LastPongMs < freshMs {
+							pongFresh = true
+						}
+					}
+					if pongFresh {
+						cadence = keepaliveMs
+					}
 				}
 				if now-lastSent < cadence {
 					continue
