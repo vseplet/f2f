@@ -128,11 +128,6 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 	return PeerInfo{}, errors.New("camp: no announce reply within timeout")
 }
 
-// Refresh sends an out-of-band announce. Used after wake-from-sleep to
-// reopen the upstream NAT binding and let camp learn our current reflex
-// before the next Run tick.
-func (a *AnnounceClient) Refresh() error { return a.sendAnnounce() }
-
 // Run sends a periodic announce until ctx is done. Reply packets are
 // handled by HandlePacket via the engine's main read loop — we don't
 // read from the socket here.
