@@ -112,6 +112,7 @@ type TrustedPeer struct {
 // even before the first camp poll completes.
 type Peer struct {
 	Name        string `json:"name"`
+	Pub         string `json:"pub,omitempty"` // 64-hex Ed25519 pubkey; stable identity, used as the in-memory peers map key
 	TunnelIP    string `json:"tunnel_ip"`
 	PublicIP    string `json:"public_ip,omitempty"`
 	UDPPort     int    `json:"udp_port,omitempty"`

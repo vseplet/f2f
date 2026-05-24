@@ -103,17 +103,19 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 	if e.cfg.Camp != nil {
 		ourName = e.cfg.Camp.Name
 	}
-	byIP := make(map[string]int, len(e.camp.PeerCatalog))
+	byPub := make(map[string]int, len(e.camp.PeerCatalog))
 	for i, p := range e.camp.PeerCatalog {
-		byIP[p.TunnelIP] = i
+		if p.Pub != "" {
+			byPub[p.Pub] = i
+		}
 	}
 	for _, p := range peers {
-		if p.TunnelIP == "" || p.Name == ourName {
+		if p.Pub == "" || p.Name == ourName {
 			continue
 		}
 		entry := config.Peer{
 			Name:        p.Name,
-			TunnelIP:    p.TunnelIP,
+			Pub:         p.Pub,
 			PublicIP:    p.PublicIP,
 			UDPPort:     p.UDPPort,
 			UDPEndpoint: p.UDPEndpoint,
@@ -121,7 +123,7 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 			LastSeenAt:  p.LastSeenAt,
 			Online:      p.Online,
 		}
-		if idx, ok := byIP[p.TunnelIP]; ok {
+		if idx, ok := byPub[p.Pub]; ok {
 			// Preserve previously-known endpoint info if camp now reports
 			// the peer as offline (PublicIP/UDPEndpoint go blank when
 			// camp marks a peer offline). The catalog is our long-term
@@ -160,11 +162,14 @@ func (e *Engine) pruneSelfFromCatalogLocked() {
 		return
 	}
 	ourName := e.cfg.Camp.Name
-	ourIP := e.cfg.LocalIP
+	ourPub := ""
+	if e.identity != nil {
+		ourPub = e.identity.PubHex()
+	}
 	kept := e.camp.PeerCatalog[:0]
 	dropped := 0
 	for _, p := range e.camp.PeerCatalog {
-		if p.Name == ourName || (ourIP != "" && p.TunnelIP == ourIP) {
+		if p.Name == ourName || (ourPub != "" && p.Pub == ourPub) {
 			dropped++
 			continue
 		}
@@ -190,15 +195,18 @@ func (e *Engine) hydratePeersFromCatalog() {
 		ourName = e.cfg.Camp.Name
 	}
 	for _, p := range e.camp.PeerCatalog {
-		if p.TunnelIP == "" || p.Name == ourName {
+		if p.Name == ourName {
 			continue
 		}
-		if _, dup := e.peers[p.TunnelIP]; dup {
+		if p.Pub == "" {
+			continue
+		}
+		if _, dup := e.peers[p.Pub]; dup {
 			continue
 		}
 		st := &peerState{
 			Name:        p.Name,
-			TunnelIP:    p.TunnelIP,
+			Pub:         p.Pub,
 			PublicIP:    p.PublicIP,
 			UDPPort:     p.UDPPort,
 			UDPEndpoint: p.UDPEndpoint,
@@ -222,7 +230,7 @@ func (e *Engine) hydratePeersFromCatalog() {
 			}
 			st.Firewall = dup
 		}
-		e.peers[p.TunnelIP] = st
+		e.peers[p.Pub] = st
 	}
 }
 

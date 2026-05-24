@@ -46,6 +46,12 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
 )
 
+// localV4Alias is the same on every mac. It's only a landing pad on
+// the local utun so intercept routes have something to point at —
+// inter-peer addressing happens on overlay v6, not v4. Identical
+// across all peers is fine: the v4 path is purely local-egress.
+const localV4Alias = "10.99.0.1"
+
 // tunnelSubnetCIDR is the /24 every camp lives in. Hardcoded — camp's
 // hub uses the same prefix when allocating tunnel_ips.
 const tunnelSubnetCIDR = "10.99.0.0/24"
@@ -100,9 +106,9 @@ type Status struct {
 	// UI shows. Empty in static --peer mode.
 	IdentityPub string `json:"identity_pub,omitempty"`
 	IdentityFP  string `json:"identity_fp,omitempty"`
-	// ActivePeerTunnelIP is the user-selected peer the tunnel routes
+	// ActivePeerPub is the user-selected peer the tunnel routes
 	// catch-all traffic through. Empty when no one has been selected.
-	ActivePeerTunnelIP string             `json:"active_peer_tunnel_ip,omitempty"`
+	ActivePeerPub string `json:"active_peer_pub,omitempty"`
 	Peers              []PeerStatusInfo   `json:"peers"`
 	Intercepts         []InterceptInfo    `json:"intercepts"`
 	StartedAt          time.Time          `json:"started_at,omitempty"`
@@ -164,7 +170,6 @@ type PeerStatusInfo struct {
 	// what the UI shows. Computed server-side so the browser doesn't
 	// have to do crypto. Empty when Pub is empty.
 	Fp          string        `json:"fp,omitempty"`
-	TunnelIP    string        `json:"tunnel_ip"`
 	PublicIP    string        `json:"public_ip,omitempty"`
 	UDPPort     int           `json:"udp_port,omitempty"`
 	UDPEndpoint string        `json:"udp_endpoint,omitempty"`
@@ -259,11 +264,9 @@ func (d DomainEntry) upstreamHost() string {
 // (camp says) → kept stale until next refresh.
 type peerState struct {
 	Name string
-	// Pub is the peer's Ed25519 hex pubkey — stable identity across
-	// renames. Empty for peers we haven't yet seen with a pub (legacy
-	// transitional window).
+	// Pub is the peer's Ed25519 hex pubkey — stable identity, also
+	// used as the e.peers map key.
 	Pub         string
-	TunnelIP    string
 	PublicIP    string
 	UDPPort     int
 	UDPEndpoint string
@@ -338,10 +341,10 @@ type Engine struct {
 	// pings to all of them so NAT mappings stay open for fast active-peer
 	// switching. Protected by mu.
 	peers map[string]*peerState
-	// activeTunnelIP is the user-selected peer the tunnel routes
+	// activePub is the user-selected peer the tunnel routes
 	// catch-all traffic through. Direct peer-to-peer-tunnel-IP packets
 	// still flow regardless of selection.
-	activeTunnelIP atomic.Pointer[string]
+	activePub atomic.Pointer[string]
 	// staticPeer is the legacy --peer mode endpoint (no camp). Kept for
 	// backwards compat with the few static deployments; new code paths
 	// should use the peers map.
@@ -628,10 +631,6 @@ func (e *Engine) Start(cfg Config) error {
 			e.rollbackPartial()
 			return fmt.Errorf("camp announce: %w", err)
 		}
-		if self.TunnelIP == "" {
-			e.rollbackPartial()
-			return fmt.Errorf("camp announce reply did not include tunnel_ip")
-		}
 		e.announce = ac
 		e.campAddr.Store(ac.CampAddr())
 		reflex := self.UDPEndpoint
@@ -639,8 +638,13 @@ func (e *Engine) Start(cfg Config) error {
 			reflex = self.PublicIP
 		}
 		e.campReflex.Store(&reflex)
-		localIP = self.TunnelIP
-		log.Printf("camp: registered as %s in camp %s, tunnel_ip=%s reflex=%s", cfg.Camp.Name, cfg.Camp.ID, localIP, reflex)
+		// v4 alias on utun is a local technical detail used only as a
+		// landing pad for intercept routes — every mac uses the same
+		// constant address. Cross-peer v4 connects don't work (would
+		// loopback to self); peer-to-peer addressing is overlay v6.
+		// Whatever camp may have allocated as our tunnel_ip is ignored.
+		localIP = localV4Alias
+		log.Printf("camp: registered as %s in camp %s, reflex=%s (utun v4 alias=%s)", cfg.Camp.Name, cfg.Camp.ID, reflex, localIP)
 	}
 
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
@@ -1011,8 +1015,18 @@ func chownToUser(path string) {
 }
 
 func (e *Engine) startTorrent() error {
+	// Prefer overlay v6 for the BT listener — that's the address other
+	// peers in the camp resolve us to via DNS AAAA, and what the UI
+	// puts into the magnet's `peers=` list. Falls back to v4 tunnel_ip
+	// in legacy / no-pub setups.
+	listenHost := e.cfg.LocalIP
+	if e.cfg.Camp != nil && e.identity != nil {
+		if a, err := overlay.PubToAddr(e.cfg.Camp.ID, e.identity.PubHex()); err == nil {
+			listenHost = a.String()
+		}
+	}
 	opts := internaltorrent.Options{
-		ListenAddr:   net.JoinHostPort(e.cfg.LocalIP, fmt.Sprint(internaltorrent.DefaultPort)),
+		ListenAddr:   net.JoinHostPort(listenHost, fmt.Sprint(internaltorrent.DefaultPort)),
 		SharedDir:    e.torrentSharedDir(),
 		DownloadsDir: e.torrentDownloadsDir(),
 	}
@@ -1808,7 +1822,14 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, p := range peers {
-		if p.Name == ourName || p.TunnelIP == "" {
+		if p.Name == ourName {
+			continue
+		}
+		// Pub is the stable identity — peers without one are skipped
+		// (transitional case: camp roster has the entry but the peer
+		// hasn't yet announced an Ed25519 pub). They'll show up once
+		// they do.
+		if p.Pub == "" {
 			continue
 		}
 		var addr *net.UDPAddr
@@ -1820,12 +1841,11 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 			}
 			addr = a
 		}
-		existing, ok := e.peers[p.TunnelIP]
+		existing, ok := e.peers[p.Pub]
 		if !ok {
 			st := &peerState{
 				Name:        p.Name,
 				Pub:         p.Pub,
-				TunnelIP:    p.TunnelIP,
 				PublicIP:    p.PublicIP,
 				UDPPort:     p.UDPPort,
 				UDPEndpoint: p.UDPEndpoint,
@@ -1834,17 +1854,14 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				LastSeenAt:  p.LastSeenAt,
 				UDPAddr:     addr,
 			}
-			e.peers[p.TunnelIP] = st
+			e.peers[p.Pub] = st
 			if p.Online {
-				log.Printf("camp: peer %s @ %s entered roster (tunnel_ip=%s)", p.Name, addr, p.TunnelIP)
+				log.Printf("camp: peer %s @ %s entered roster (pub=%s)", p.Name, addr, p.Pub)
 			} else {
-				log.Printf("camp: peer %s in roster but stale (tunnel_ip=%s)", p.Name, p.TunnelIP)
+				log.Printf("camp: peer %s in roster but stale (pub=%s)", p.Name, p.Pub)
 			}
 		} else {
 			existing.Name = p.Name
-			// Once a peer announces a pub we trust the camp-provided value
-			// and remember it across subsequent polls (camp may omit pub
-			// for offline-only entries).
 			if p.Pub != "" {
 				existing.Pub = p.Pub
 			}
@@ -1857,7 +1874,7 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 					existing.UDPAddr = addr
 				}
 				if !existing.InCamp {
-					log.Printf("camp: peer %s back in roster (tunnel_ip=%s)", p.Name, p.TunnelIP)
+					log.Printf("camp: peer %s back in roster (pub=%s)", p.Name, p.Pub)
 				}
 			} else {
 				// Camp evicted the peer (no announce in ~60s) but kept
@@ -1869,21 +1886,21 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 				existing.PublicIP = ""
 				existing.UDPPort = 0
 				if existing.InCamp {
-					log.Printf("camp: peer %s left roster (tunnel_ip=%s)", p.Name, p.TunnelIP)
+					log.Printf("camp: peer %s left roster (pub=%s)", p.Name, p.Pub)
 				}
 			}
 			existing.InCamp = p.Online
 		}
-		seen[p.TunnelIP] = struct{}{}
+		seen[p.Pub] = struct{}{}
 	}
 	// Peers not in the latest poll: camp dropped them from the roster
 	// entirely (binding expired on their side). We KEEP them in e.peers
 	// as offline ghosts so the UI shows historical nodes — same as if
 	// camp still reported them with Online=false. holePunchLoop already
 	// skips peers without UDPAddr, so this is safe.
-	active := e.activeTunnelIP.Load()
-	for tip, st := range e.peers {
-		if _, alive := seen[tip]; alive {
+	active := e.activePub.Load()
+	for pub, st := range e.peers {
+		if _, alive := seen[pub]; alive {
 			continue
 		}
 		if st.InCamp || st.UDPAddr != nil {
@@ -1894,8 +1911,8 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		st.UDPEndpoint = ""
 		st.PublicIP = ""
 		st.UDPPort = 0
-		if active != nil && *active == tip {
-			e.activeTunnelIP.Store(nil)
+		if active != nil && *active == pub {
+			e.activePub.Store(nil)
 		}
 	}
 	// Merge the snapshot into the persistent catalog so the UI sees
@@ -1954,17 +1971,17 @@ func (e *Engine) filesPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 	type target struct {
-		host     string
-		tunnelIP string
-		name     string
+		host string
+		pub  string
+		name string
 	}
 	var targets []target
 	e.mu.Lock()
-	for tip, p := range e.peers {
+	for pub, p := range e.peers {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
 	}
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
@@ -1989,7 +2006,7 @@ func (e *Engine) pollAllPeerFiles(ctx context.Context) {
 			continue
 		}
 		e.mu.Lock()
-		if p, ok := e.peers[t.tunnelIP]; ok {
+		if p, ok := e.peers[t.pub]; ok {
 			p.Files = files
 		}
 		e.mu.Unlock()
@@ -2023,17 +2040,17 @@ func (e *Engine) peerFirewallPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 	type target struct {
-		host     string
-		tunnelIP string
-		name     string
+		host string
+		pub  string
+		name string
 	}
 	var targets []target
 	e.mu.Lock()
-	for tip, p := range e.peers {
+	for pub, p := range e.peers {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
 	}
 	port := e.tunnelHTTPPort
 	e.mu.Unlock()
@@ -2062,18 +2079,18 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 			continue
 		}
 		e.mu.Lock()
-		if p, ok := e.peers[t.tunnelIP]; ok {
+		if p, ok := e.peers[t.pub]; ok {
 			p.Firewall = body.User
 		}
-		e.persistPeerFirewallLocked(t.tunnelIP, body.User)
+		e.persistPeerFirewallLocked(t.pub, body.User)
 		e.mu.Unlock()
 	}
 }
 
 // persistPeerFirewallLocked mirrors a peer's published firewall list
 // into the camp catalog. Caller holds e.mu.
-func (e *Engine) persistPeerFirewallLocked(tunnelIP string, fw []FirewallPort) {
-	if e.camp == nil {
+func (e *Engine) persistPeerFirewallLocked(pub string, fw []FirewallPort) {
+	if e.camp == nil || pub == "" {
 		return
 	}
 	out := make([]config.Firewall, 0, len(fw))
@@ -2086,7 +2103,7 @@ func (e *Engine) persistPeerFirewallLocked(tunnelIP string, fw []FirewallPort) {
 		})
 	}
 	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].TunnelIP == tunnelIP {
+		if e.camp.PeerCatalog[i].Pub == pub {
 			e.camp.PeerCatalog[i].Firewall = out
 			e.persistCampLocked()
 			return
@@ -2157,17 +2174,17 @@ func (e *Engine) domainPollLoop(ctx context.Context) {
 
 func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 	type target struct {
-		host     string
-		tunnelIP string // kept for persistPeerDomainsLocked keying
-		name     string
+		host string
+		pub  string
+		name string
 	}
 	var targets []target
 	e.mu.Lock()
-	for tip, p := range e.peers {
+	for pub, p := range e.peers {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), tunnelIP: tip, name: p.Name})
+		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
 	}
 	port := domainPollPort(e)
 	e.mu.Unlock()
@@ -2200,21 +2217,20 @@ func (e *Engine) pollAllPeerDomains(ctx context.Context) {
 			continue
 		}
 		e.mu.Lock()
-		if p, ok := e.peers[t.tunnelIP]; ok {
+		if p, ok := e.peers[t.pub]; ok {
 			p.Domains = list
 		}
-		e.persistPeerDomainsLocked(t.tunnelIP, list)
+		e.persistPeerDomainsLocked(t.pub, list)
 		e.mu.Unlock()
 	}
 }
 
 // persistPeerDomainsLocked mirrors a peer's published domain list into
 // camp config so we keep it across engine restarts. Called with e.mu
-// held. Upserts by peer tunnel_ip; appends a fresh Peer row if the
-// catalog doesn't have one yet (shouldn't normally happen — applyPeerList
-// makes the catalog entry first — but be defensive).
-func (e *Engine) persistPeerDomainsLocked(tunnelIP string, domains []DomainEntry) {
-	if e.camp == nil {
+// held. Upserts by peer pub; catalog entry should already exist from
+// applyPeerList — silently no-ops if it doesn't.
+func (e *Engine) persistPeerDomainsLocked(pub string, domains []DomainEntry) {
+	if e.camp == nil || pub == "" {
 		return
 	}
 	out := make([]config.Domain, 0, len(domains))
@@ -2227,7 +2243,7 @@ func (e *Engine) persistPeerDomainsLocked(tunnelIP string, domains []DomainEntry
 		})
 	}
 	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].TunnelIP == tunnelIP {
+		if e.camp.PeerCatalog[i].Pub == pub {
 			e.camp.PeerCatalog[i].Domains = out
 			e.persistCampLocked()
 			return
@@ -2287,8 +2303,8 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			prevTickMs = now
 			e.mu.Lock()
 			targets := make([]*peerState, 0, len(e.peers))
-			tunIPs := make([]string, 0, len(e.peers))
-			for ip, p := range e.peers {
+			pubs := make([]string, 0, len(e.peers))
+			for pub, p := range e.peers {
 				// Skip peers without a known UDP target: camp marked them
 				// offline, or we've never observed their endpoint. Punch
 				// resumes the moment they reappear in applyPeerList.
@@ -2296,7 +2312,7 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					continue
 				}
 				targets = append(targets, p)
-				tunIPs = append(tunIPs, ip)
+				pubs = append(pubs, pub)
 			}
 			e.mu.Unlock()
 			for i, p := range targets {
@@ -2311,7 +2327,7 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				if seen != 0 && now-seen < freshMs {
 					pongFresh := false
 					if e.pinger != nil {
-						if r, ok := e.pinger.Result(tunIPs[i]); ok && r.LastPongMs != 0 && now-r.LastPongMs < freshMs {
+						if r, ok := e.pinger.Result(pubs[i]); ok && r.LastPongMs != 0 && now-r.LastPongMs < freshMs {
 							pongFresh = true
 						}
 					}
@@ -2409,16 +2425,18 @@ func (e *Engine) campHealthLocked() *CampHealth {
 }
 
 // pingerTargets snapshots the current peers with a known UDP endpoint.
-// Called from the Pinger goroutine on every tick.
+// Called from the Pinger goroutine on every tick. Target.Key is the
+// peer's pub — same as the peers map key — so other call sites can
+// look up the ping result by pub.
 func (e *Engine) pingerTargets() []peerping.Target {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([]peerping.Target, 0, len(e.peers))
-	for tunnelIP, p := range e.peers {
+	for pub, p := range e.peers {
 		if p.UDPAddr == nil {
 			continue
 		}
-		out = append(out, peerping.Target{Key: tunnelIP, Addr: p.UDPAddr})
+		out = append(out, peerping.Target{Key: pub, Addr: p.UDPAddr})
 	}
 	return out
 }
@@ -2512,7 +2530,7 @@ func (e *Engine) Stop() error {
 	e.campPeers.Store(nil)
 	e.campReflex.Store(nil)
 	e.peers = map[string]*peerState{}
-	e.activeTunnelIP.Store(nil)
+	e.activePub.Store(nil)
 	e.staticPeer.Store(nil)
 	e.lastStaticPingMs.Store(0)
 	e.intercepts = map[string]*InterceptInfo{}
@@ -2571,10 +2589,9 @@ func (e *Engine) Status() Status {
 				st.IdentityPub = e.identity.PubHex()
 				st.IdentityFP = e.identity.Fingerprint()
 			}
-			if active := e.activeTunnelIP.Load(); active != nil {
-				st.ActivePeerTunnelIP = *active
+			if active := e.activePub.Load(); active != nil {
+				st.ActivePeerPub = *active
 				if p, ok := e.peers[*active]; ok {
-					st.PeerIP = p.TunnelIP
 					st.CampPeerName = p.Name
 					if p.UDPAddr != nil {
 						st.PeerAddr = p.UDPAddr.String()
@@ -2599,7 +2616,7 @@ func (e *Engine) Status() Status {
 // have to fabricate one.
 func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	active := ""
-	if a := e.activeTunnelIP.Load(); a != nil {
+	if a := e.activePub.Load(); a != nil {
 		active = *a
 	}
 	var pingResults map[string]peerping.Result
@@ -2619,7 +2636,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Name:        e.cfg.Camp.Name,
 			Pub:         selfPub,
 			Fp:          selfFp,
-			TunnelIP:    e.cfg.LocalIP,
 			UDPEndpoint: selfEndpoint,
 			JoinedAt:    e.started.UnixMilli(),
 			InCamp:      true,
@@ -2645,7 +2661,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		online := p.IsOnline()
 		var lastPong, rtt int64
 		var verified bool
-		if r, ok := pingResults[p.TunnelIP]; ok {
+		if r, ok := pingResults[p.Pub]; ok {
 			lastPong = r.LastPongMs
 			rtt = r.LastRTTMs
 			// Verified = round-trip confirmed within the online window
@@ -2660,7 +2676,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Name:        p.Name,
 			Pub:         p.Pub,
 			Fp:          identity.FingerprintHex(p.Pub),
-			TunnelIP:    p.TunnelIP,
 			PublicIP:    p.PublicIP,
 			UDPPort:     p.UDPPort,
 			UDPEndpoint: p.UDPEndpoint,
@@ -2669,7 +2684,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Online:      online,
 			Reachable:   online, // kept as alias for backward compat; same semantic now
 			InCamp:      p.InCamp,
-			Active:      p.TunnelIP == active,
+			Active:      p.Pub == active,
 			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
 			Firewall:    append([]FirewallPort(nil), p.Firewall...),
@@ -2712,9 +2727,6 @@ func (e *Engine) peerHTTPHostLocked(p *peerState) string {
 			return a.String()
 		}
 	}
-	if p != nil {
-		return p.TunnelIP
-	}
 	return ""
 }
 
@@ -2750,22 +2762,22 @@ func sortedFiles(in []PeerFile) []PeerFile {
 }
 
 // SetActivePeer is the UI hook for selecting which peer the tunnel's
-// catch-all traffic and the meet signalling go to. tunnelIP must match
-// a peer currently in the peers map; empty string clears the selection.
-func (e *Engine) SetActivePeer(tunnelIP string) error {
+// catch-all traffic and the meet signalling go to. pub must match a
+// peer currently in the peers map; empty string clears the selection.
+func (e *Engine) SetActivePeer(pub string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if tunnelIP == "" {
-		e.activeTunnelIP.Store(nil)
+	if pub == "" {
+		e.activePub.Store(nil)
 		log.Printf("camp: active peer cleared")
 		return nil
 	}
-	p, ok := e.peers[tunnelIP]
+	p, ok := e.peers[pub]
 	if !ok {
-		return fmt.Errorf("no peer with tunnel_ip %s", tunnelIP)
+		return fmt.Errorf("no peer with pub %s", pub)
 	}
-	e.activeTunnelIP.Store(&tunnelIP)
-	log.Printf("camp: active peer = %s (%s)", p.Name, tunnelIP)
+	e.activePub.Store(&pub)
+	log.Printf("camp: active peer = %s (pub=%s)", p.Name, pub)
 	return nil
 }
 
@@ -2826,66 +2838,46 @@ func (e *Engine) SetMyDomains(list []DomainEntry) {
 	e.mu.Unlock()
 }
 
-// PeerDomains returns a snapshot of every known peer's domains, indexed
-// by the IP to resolve them to. Other peers' names map to their
-// tunnel_ip; our own names map to 127.0.0.1 — looking up a service we
-// host on its own tunnel_ip would round-trip through utun → engine →
-// drop (engine has no route to "self"), so loopback is the only address
-// that lets local apps reach our own published services.
-func (e *Engine) PeerDomains() map[string][]internaldns.DomainEntry {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make(map[string][]internaldns.DomainEntry, len(e.peers)+1)
-	for tip, p := range e.peers {
-		if len(p.Domains) == 0 {
-			continue
+// LookupHost implements internaldns.Resolver. Resolves a label under
+// our camp's f2f zone to (v4, v6):
+//
+//   - Our own published names → V4=127.0.0.1, V6=::1 (loopback both
+//     ways; we host the actual service on localhost).
+//   - Peer-published names → V4="" (peers aren't reachable by v4 in
+//     the overlay) and V6=peer's overlay v6 (per-camp ULA, routes
+//     through our utun).
+//   - Anything else → ok=false.
+//
+// Names are skipped for offline peers — handing out an address for a
+// peer we can't currently UDP-reach would just make apps stall.
+func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
+	// Self first — MyDomains doesn't need the engine lock.
+	for _, d := range e.MyDomains() {
+		if strings.EqualFold(d.Name, label) {
+			return internaldns.Host{V4: "127.0.0.1", V6: "::1"}, true
 		}
-		// Only resolve names of peers we can actually reach right now.
-		// peer.Domains is kept across reconnects (cache survives camp
-		// polls and engine restarts so the UI can show last-known
-		// state for offline peers), but the resolver itself should
-		// not hand out an IP that the engine has no UDP target for —
-		// the kernel would then route the apps' SYNs into utun and
-		// tunToPeerLoop would dump them with "drop-no-route". Better
-		// the browser get NXDOMAIN and fail fast.
-		if !p.IsOnline() || p.UDPAddr == nil {
-			continue
-		}
-		out[tip] = toDNSEntries(p.Domains)
 	}
-	if mine := e.MyDomains(); len(mine) > 0 {
-		out["127.0.0.1"] = toDNSEntries(mine)
-	}
-	return out
-}
-
-// PeerOverlayV6 returns the per-camp overlay IPv6 for the peer whose
-// v4 tunnel_ip equals tip. Implements internaldns.Resolver. Empty
-// when there's no camp, no matching peer, or the peer has no pub yet
-// (legacy announce-without-pub window).
-func (e *Engine) PeerOverlayV6(tip string) string {
-	if e.cfg.Camp == nil || tip == "" {
-		return ""
+	if e.cfg.Camp == nil {
+		return internaldns.Host{}, false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	p, ok := e.peers[tip]
-	if !ok || p.Pub == "" {
-		return ""
+	for _, p := range e.peers {
+		if !p.IsOnline() || p.UDPAddr == nil || p.Pub == "" {
+			continue
+		}
+		for _, d := range p.Domains {
+			if !strings.EqualFold(d.Name, label) {
+				continue
+			}
+			addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
+			if err != nil {
+				return internaldns.Host{}, false
+			}
+			return internaldns.Host{V6: addr.String()}, true
+		}
 	}
-	addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
-	if err != nil {
-		return ""
-	}
-	return addr.String()
-}
-
-func toDNSEntries(in []DomainEntry) []internaldns.DomainEntry {
-	out := make([]internaldns.DomainEntry, len(in))
-	for i, e := range in {
-		out[i] = internaldns.DomainEntry{Name: e.Name, Port: e.Port, Proto: e.Proto}
-	}
-	return out
+	return internaldns.Host{}, false
 }
 
 // AddIntercept resolves spec, installs its host routes via utun, and binds
@@ -3221,16 +3213,12 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// v4 lookup: peers map is keyed by tunnel_ip string, which is v4.
-	if dst.Is4() {
-		if p, ok := e.peers[dst.String()]; ok && p.UDPAddr != nil {
-			return p.UDPAddr
-		}
-	} else {
-		// v6 lookup: every peer's overlay v6 = sha256-derived from
-		// (camp_id, pub). Walk peers and compute; cheap because peers
-		// are O(camp size) and sha256 is fast. No persistent index
-		// yet — we add one if/when this becomes the hot path.
+	// v6 lookup: every peer's overlay v6 = sha256-derived from
+	// (camp_id, pub). Walk peers and compute; cheap because peers
+	// are O(camp size) and sha256 is fast. v4 destinations skip
+	// straight to intercept lookup below — peers are not addressable
+	// by v4 in the overlay (every mac uses the same localV4Alias).
+	if dst.Is6() {
 		for _, p := range e.peers {
 			if p.Pub == "" || p.UDPAddr == nil {
 				continue
@@ -3294,12 +3282,10 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		// Identify which peer sent this and refresh LastSeen *before*
 		// any IP-shape filter — that way 1-byte hole-punch and
 		// keepalive packets also count as "peer is alive" signals, not
-		// just real IP traffic. Two identification paths:
-		//   1. The source UDP addr matches a peer's known UDPAddr —
-		//      cheap and works as long as NAT hasn't rebound.
-		//   2. The packet is a full IPv4 frame whose src tunnel_ip
-		//      matches a peer — authoritative across NAT port shifts;
-		//      also updates the stored UDPAddr to track the rebind.
+		// just real IP traffic. Peers are identified by UDP source —
+		// NAT rebinds invalidate this until the next camp poll, at
+		// which point applyPeerList re-resolves the UDPEndpoint and
+		// the next packet from them re-matches.
 		if e.cfg.Camp != nil {
 			now := time.Now().UnixMilli()
 			e.mu.Lock()
@@ -3308,17 +3294,6 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 				if sameUDPAddr(p.UDPAddr, from) {
 					hit = p
 					break
-				}
-			}
-			if hit == nil && n >= 20 && pkt[0]>>4 == 4 {
-				if srcIP, ok := ipv4Src(pkt); ok {
-					if p, present := e.peers[srcIP]; present {
-						hit = p
-						if !sameUDPAddr(p.UDPAddr, from) {
-							log.Printf("camp: peer %s endpoint %s → %s", p.Name, p.UDPAddr, from)
-							p.UDPAddr = from
-						}
-					}
 				}
 			}
 			if hit != nil {

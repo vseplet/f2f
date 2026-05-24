@@ -480,13 +480,20 @@ func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// Auto-select active peer based on the incoming connection's source
+	// address: match the v6 overlay address back to a peer by pub. The
+	// v4 path used to do this too, but every mac now binds the same
+	// localV4Alias, so v4 RemoteAddr no longer identifies the caller.
 	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
 		st := s.engine.Status()
-		if st.Running && host != st.ActivePeerTunnelIP {
-			if err := s.engine.SetActivePeer(host); err != nil {
-				// Not fatal — could just be a peer we haven't seen yet
-				// in the camp roster. The signal still gets broadcast.
-				_ = err
+		if st.Running {
+			for _, p := range st.Peers {
+				if !p.Self && p.OverlayV6 != "" && p.OverlayV6 == host && p.Pub != st.ActivePeerPub {
+					if err := s.engine.SetActivePeer(p.Pub); err != nil {
+						_ = err
+					}
+					break
+				}
 			}
 		}
 	}
@@ -584,8 +591,8 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		id := "peer:" + p.Name
 		peerIDByName[p.Name] = id
 		label := p.Name
-		if p.TunnelIP != "" {
-			label += " · " + p.TunnelIP
+		if p.OverlayV6 != "" {
+			label += " · " + p.OverlayV6
 		}
 		t.Nodes = append(t.Nodes, topologyNode{ID: id, Label: label, Kind: "peer", Online: p.Online})
 		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})
@@ -624,7 +631,7 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 		"running": true,
 		"you":     st.CampName,
 		"camp_id": st.CampID,
-		"active":  st.ActivePeerTunnelIP,
+		"active":  st.ActivePeerPub,
 		"peers":   st.Peers,
 	})
 }
@@ -1199,17 +1206,17 @@ func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSetActivePeer sets the user-selected active peer (catch-all
-// tunnel destination and meet signalling target). Body: {tunnel_ip}.
-// Empty string clears.
+// tunnel destination and meet signalling target). Body: {pub}. Empty
+// string clears.
 func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TunnelIP string `json:"tunnel_ip"`
+		Pub string `json:"pub"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.engine.SetActivePeer(req.TunnelIP); err != nil {
+	if err := s.engine.SetActivePeer(req.Pub); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

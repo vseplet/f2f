@@ -23,20 +23,19 @@ import (
 // Resolver is implemented by engine.Engine — exposed as an interface so
 // this package doesn't depend on the engine package.
 type Resolver interface {
-	PeerDomains() map[string][]DomainEntry
-	// PeerOverlayV6 returns the per-camp overlay IPv6 address for the
-	// peer whose v4 tunnel_ip equals tip. Empty when no v6 is known
-	// (legacy peer without pub, or self when tip="127.0.0.1" — then
-	// callers fall back to ::1 / A only).
-	PeerOverlayV6(tip string) string
+	// LookupHost resolves label (the part before <camp>.f2f) to an A
+	// and/or AAAA address. Empty v4 → omit the A; empty v6 → omit the
+	// AAAA. Returns ok=false on NXDOMAIN.
+	LookupHost(label string) (host Host, ok bool)
 }
 
-// DomainEntry mirrors engine.DomainEntry so the two packages don't share
-// a struct definition. The DNS server only needs the Name field.
-type DomainEntry struct {
-	Name  string
-	Port  int
-	Proto string
+// Host is the address pair (any of v4/v6 may be empty) that a label
+// resolves to. v4 only present for self-published names (loopback) so
+// legacy v4-only apps still reach our own services; peers are reached
+// over overlay v6 exclusively.
+type Host struct {
+	V4 string
+	V6 string
 }
 
 // Server is the live DNS listener. Created by Open, stopped via Close.
@@ -166,44 +165,32 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	ip := s.lookup(label)
-	if ip == "" {
+	host, ok := s.res.LookupHost(label)
+	if !ok {
 		m.Rcode = dns.RcodeNameError
 		s.attachSOA(m)
 		_ = w.WriteMsg(m)
 		return
 	}
-	if q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY {
-		addr := net.ParseIP(ip).To4()
-		if addr != nil {
+	if (q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY) && host.V4 != "" {
+		if addr := net.ParseIP(host.V4).To4(); addr != nil {
 			m.Answer = append(m.Answer, &dns.A{
 				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
 				A:   addr,
 			})
 		}
 	}
-	if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY {
-		// Overlay v6: pub-derived, lives under the per-camp /48 ULA
-		// and routes through our utun. For our own names (loopback v4
-		// "127.0.0.1") emit ::1 so a v6-only app stays on lo0.
-		var v6 string
-		if ip == "127.0.0.1" {
-			v6 = "::1"
-		} else {
-			v6 = s.res.PeerOverlayV6(ip)
-		}
-		if v6 != "" {
-			if addr6 := net.ParseIP(v6).To16(); addr6 != nil {
-				m.Answer = append(m.Answer, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
-					AAAA: addr6,
-				})
-			}
+	if (q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) && host.V6 != "" {
+		if addr6 := net.ParseIP(host.V6).To16(); addr6 != nil {
+			m.Answer = append(m.Answer, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+				AAAA: addr6,
+			})
 		}
 	}
-	// Empty answer (e.g. AAAA query on a legacy peer with no overlay v6,
-	// or any non-A/AAAA qtype) is a NOERROR negative response; attach
-	// SOA so RFC 2308 negative cache stays at one second.
+	// Empty answer (qtype the host doesn't satisfy, or anything other
+	// than A/AAAA/ANY) is a NOERROR negative response; attach SOA so
+	// RFC 2308 negative cache stays at one second.
 	if len(m.Answer) == 0 {
 		s.attachSOA(m)
 	}
@@ -230,15 +217,4 @@ func (s *Server) attachSOA(m *dns.Msg) {
 }
 
 // lookup scans the peer-domains catalog for the matching label and
-// returns the owning peer's tunnel_ip. Case-insensitive.
-func (s *Server) lookup(label string) string {
-	all := s.res.PeerDomains()
-	for tunnelIP, entries := range all {
-		for _, e := range entries {
-			if strings.EqualFold(e.Name, label) {
-				return tunnelIP
-			}
-		}
-	}
-	return ""
-}
+// (Resolver.LookupHost replaced the old PeerDomains map walk.)

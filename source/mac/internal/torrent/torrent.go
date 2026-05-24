@@ -109,7 +109,9 @@ func New(opts Options) (*Client, error) {
 	cfg.NoDHT = true
 	cfg.DisableTrackers = true
 	cfg.DisablePEX = true
-	cfg.DisableIPv6 = true // utun is v4-only; v6 bind on tunnel_ip fails
+	// utun now has both v4 alias (tunnel_ip) and overlay v6; allow
+	// anacrolix to use whichever family the ListenAddr resolves to.
+	cfg.DisableIPv6 = false
 	cfg.NoUpload = false
 	cfg.Seed = true
 	cfg.DefaultStorage = storage.NewFile(opts.DownloadsDir)
