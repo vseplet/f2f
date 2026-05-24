@@ -46,15 +46,12 @@ import (
 	"github.com/vseplet/f2f/source/mac/internal/tunnel"
 )
 
-// localV4Alias is the same on every mac. It's only a landing pad on
-// the local utun so intercept routes have something to point at —
-// inter-peer addressing happens on overlay v6, not v4. Identical
-// across all peers is fine: the v4 path is purely local-egress.
-const localV4Alias = "10.99.0.1"
-
-// tunnelSubnetCIDR is the /24 every camp lives in. Hardcoded — camp's
+// tunnelSubnetCIDR is the CGNAT /10 the overlay carves per-peer
+// landing pads out of. Each mac picks its own alias in here
+// deterministically from its pub (see overlay.PubToV4Addr). Hardcoded
+// — camp's
 // hub uses the same prefix when allocating tunnel_ips.
-const tunnelSubnetCIDR = "10.99.0.0/24"
+const tunnelSubnetCIDR = overlay.V4Subnet
 
 // CampConfig points the engine at a rendezvous (camp) server: instead of
 // the user supplying the peer's UDP endpoint via --peer, we discover our
@@ -638,12 +635,18 @@ func (e *Engine) Start(cfg Config) error {
 			reflex = self.PublicIP
 		}
 		e.campReflex.Store(&reflex)
-		// v4 alias on utun is a local technical detail used only as a
-		// landing pad for intercept routes — every mac uses the same
-		// constant address. Cross-peer v4 connects don't work (would
-		// loopback to self); peer-to-peer addressing is overlay v6.
-		// Whatever camp may have allocated as our tunnel_ip is ignored.
-		localIP = localV4Alias
+		// v4 alias is derived from our own pub — unique per-peer so
+		// intercept replies routed back through this overlay don't
+		// land on the egress peer's own utun (would happen with a
+		// shared address). Camp-assigned tunnel_ip is ignored.
+		if e.identity != nil {
+			a, derr := overlay.PubToV4Addr(e.identity.PubHex())
+			if derr != nil {
+				e.rollbackPartial()
+				return fmt.Errorf("derive v4 alias: %w", derr)
+			}
+			localIP = a.String()
+		}
 		log.Printf("camp: registered as %s in camp %s, reflex=%s (utun v4 alias=%s)", cfg.Camp.Name, cfg.Camp.ID, reflex, localIP)
 	}
 
@@ -651,7 +654,7 @@ func (e *Engine) Start(cfg Config) error {
 	// overlay; static mode keeps the legacy point-to-point form.
 	var tun *tunnel.Tunnel
 	if cfg.Camp != nil {
-		t, err := tunnel.OpenSubnet(localIP, 24)
+		t, err := tunnel.OpenSubnet(localIP, 10)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("open tunnel: %w", err)
@@ -3225,18 +3228,23 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// v6 lookup: every peer's overlay v6 = sha256-derived from
-	// (camp_id, pub). Walk peers and compute; cheap because peers
-	// are O(camp size) and sha256 is fast. v4 destinations skip
-	// straight to intercept lookup below — peers are not addressable
-	// by v4 in the overlay (every mac uses the same localV4Alias).
-	if dst.Is6() {
-		for _, p := range e.peers {
-			if p.Pub == "" || p.UDPAddr == nil {
-				continue
+	// Per-peer lookup: every peer has a deterministic v4 alias
+	// (100.64.X.Y from sha256(pub)) and a v6 overlay address
+	// (fd…::X from sha256(camp_id)+sha256(pub)). Walk peers, compute
+	// the matching address, compare. The v4 path matters for
+	// intercept reply routing — when a remote peer NATs an external
+	// reply and forwards it back to us, dst is our pub-derived v4
+	// alias; ditto in the reverse direction.
+	for _, p := range e.peers {
+		if p.Pub == "" || p.UDPAddr == nil {
+			continue
+		}
+		if dst.Is6() {
+			if a, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub); err == nil && a == dst {
+				return p.UDPAddr
 			}
-			addr, err := overlay.PubToAddr(e.cfg.Camp.ID, p.Pub)
-			if err == nil && addr == dst {
+		} else {
+			if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a == dst {
 				return p.UDPAddr
 			}
 		}
