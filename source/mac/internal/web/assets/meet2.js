@@ -417,6 +417,7 @@
     // --- call actions ---
 
     async function createCall() {
+      if (inCall) await leaveCall();
       log('creating call...');
       try {
         var cs = await fetchJSON('/api/call/create', { method: 'POST' });
@@ -433,6 +434,7 @@
         log('no sfu host known');
         return;
       }
+      if (inCall) await leaveCall();
       log('joining call on ' + sfuHost + '...');
       try {
         // Register ourselves as a participant on the SFU host.
