@@ -9,17 +9,14 @@
   const POLL_MS = 3000;
 
   function start() {
-    const $status     = document.getElementById('m2-status');
     const $grid       = document.getElementById('m2-grid');
-    const $controls   = document.getElementById('m2-controls');
-    const $actions    = document.getElementById('m2-actions');
+    const $groupSel   = document.getElementById('m2-group-select');
     const $btnCreate  = document.getElementById('m2-btn-create');
     const $btnLeave   = document.getElementById('m2-btn-leave');
     const $btnMic     = document.getElementById('m2-btn-mic');
     const $btnCam     = document.getElementById('m2-btn-cam');
     const $videoSelf  = document.getElementById('m2-video-self');
     const $labelSelf  = document.getElementById('m2-label-self');
-    const $partList   = document.getElementById('m2-participant-list');
     const $logBody    = document.getElementById('m2-log-body');
     const $logCount   = document.getElementById('m2-log-count');
     const $logClear   = document.getElementById('m2-log-clear');
@@ -166,68 +163,31 @@
     }
 
     function updateCallListUI(calls) {
-      // Find the call we're currently in (if any).
-      var myCall = null;
-      if (inCall && sfuHost) {
-        for (var i = 0; i < calls.length; i++) {
-          if (calls[i].sfu_host === sfuHost) {
-            myCall = calls[i];
-            break;
-          }
-        }
-      }
-
-      if (inCall && myCall) {
-        var parts = (myCall.participants || []).map(function (p) { return p.name; }).join(', ');
-        $status.innerHTML = '<span class="text-emerald-400">in call</span>' + (parts ? ' — ' + parts : '');
-        $btnCreate.style.display = 'none';
-
-        syncPeerTiles(myCall.participants || []);
-        return;
-      }
-
-      if (inCall && !myCall) {
-        // Our call disappeared (host left)
-        leaveCall();
-        return;
-      }
-
-      // Not in a call — show available calls + create button.
-      $controls.style.display = 'none';
-      $btnCreate.style.display = '';
-
-      if (!calls.length) {
-        $status.innerHTML = '<span class="text-zinc-500">no active calls in camp</span>';
-
-        $partList.textContent = '—';
-        return;
-      }
-
-      // Render call list
-      var html = '';
+      // Update dropdown with available groups.
+      var selectedVal = $groupSel.value;
+      var opts = '<option value="">— group —</option>';
       for (var i = 0; i < calls.length; i++) {
         var c = calls[i];
-        var hostLabel = c.sfu_host;
-        if (c.sfu_host === myTunnelIP) hostLabel = 'you';
+        var label = c.sfu_host === myTunnelIP ? 'you' : c.sfu_host;
         var parts = (c.participants || []).map(function (p) { return p.name; }).join(', ');
-        html += '<div class="m2-call-item" style="margin-bottom:6px">' +
-          '<span class="text-emerald-400">●</span> host: ' + hostLabel +
-          (parts ? ' — ' + parts : '') +
-          (c.sfu_host !== myTunnelIP ?
-            ' <button class="m2-join-btn" data-host="' + c.sfu_host + '">join</button>' : '') +
-          '</div>';
+        if (parts) label += ' (' + parts + ')';
+        opts += '<option value="' + c.sfu_host + '">' + label + '</option>';
       }
-      $partList.innerHTML = html;
+      $groupSel.innerHTML = opts;
+      if (selectedVal) $groupSel.value = selectedVal;
 
-      // Bind join buttons
-      var btns = $partList.querySelectorAll('.m2-join-btn');
-      for (var j = 0; j < btns.length; j++) {
-        btns[j].addEventListener('click', function () {
-          sfuHost = this.getAttribute('data-host');
-          joinCall();
-        });
+      // If in a call, sync tiles and check if call still exists.
+      if (inCall && sfuHost) {
+        var myCall = null;
+        for (var i = 0; i < calls.length; i++) {
+          if (calls[i].sfu_host === sfuHost) { myCall = calls[i]; break; }
+        }
+        if (myCall) {
+          syncPeerTiles(myCall.participants || []);
+        } else {
+          leaveCall();
+        }
       }
-      $btnJoin.style.display = 'none';
     }
 
     // --- WebRTC ---
@@ -553,10 +513,10 @@
       }
       startSignalStream();
       inCall = true;
-      $grid.style.display = '';
-      $actions.style.display = 'none';
-      $controls.style.display = '';
+      $btnCreate.style.display = 'none';
       $btnLeave.style.display = '';
+      $btnMic.disabled = false;
+      $btnCam.disabled = false;
       log('connected to SFU');
     }
 
@@ -577,13 +537,10 @@
       }
       $videoSelf.srcObject = null;
       clearRemoteTiles();
-      $grid.style.display = 'none';
-      $controls.style.display = 'none';
       $btnLeave.style.display = 'none';
-      $actions.style.display = '';
       $btnCreate.style.display = '';
-      $status.innerHTML = '<span class="text-zinc-500">no active calls in camp</span>';
-      $partList.textContent = '—';
+      $btnMic.disabled = true;
+      $btnCam.disabled = true;
       pendingCandidates = [];
       hasRemoteDesc = false;
       sfuHost = '';
@@ -597,6 +554,13 @@
 
     $btnCreate.addEventListener('click', createCall);
     $btnLeave.addEventListener('click', leaveCall);
+
+    $groupSel.addEventListener('change', function () {
+      var host = $groupSel.value;
+      if (!host) return;
+      sfuHost = host;
+      joinCall();
+    });
 
     $btnMic.addEventListener('click', function () {
       if (!localStream) return;

@@ -805,8 +805,9 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
     rgba(255,255,255,0.02) 8px, rgba(255,255,255,0.02) 9px);
   border-radius: 4px;
   overflow: hidden;
-  width: 240px;
-  height: 180px;
+  width: 100%;
+  aspect-ratio: 4/3;
+  flex-shrink: 0;
 }
 
 .m2-tile video {
@@ -861,37 +862,69 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   text-align: center;
 }
 
-#tab-meet2 > .ax-frame { overflow: hidden; }
-#tab-meet2 .ax-controls {
-  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.2fr) auto auto minmax(160px, 1.4fr);
+#tab-meet2 > .ax-frame { overflow: hidden; display: flex; flex-direction: column; }
+
+.m2-topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex: 0 0 auto;
 }
-#tab-meet2 .ax-log {
+.m2-topbar .ax-select { width: 200px; }
+.m2-topbar .ax-btn { padding-top: 6px; padding-bottom: 6px; }
+
+#tab-meet2 .m2-body {
+  display: flex;
+  gap: 12px;
   flex: 1;
+  min-height: 0;
+}
+
+.m2-left {
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  flex-shrink: 0;
+  min-height: 0;
+}
+.m2-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.m2-right {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-#tab-meet2 .ax-log .ax-log-body {
+.m2-right .m2-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+.m2-right .m2-log .ax-log-body {
   flex: 1;
   max-height: none;
   min-height: 0;
 }
 
-.m2-join-btn {
-  background: #2a3a2a;
-  color: #6be66b;
-  border: 1px solid #3a5a3a;
-  border-radius: 3px;
-  padding: 1px 8px;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  margin-left: 6px;
-}
-.m2-join-btn:hover {
-  background: #3a4a3a;
-}
-
-.m2-log {
+#tab-meet2 .m2-bottombar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #2a251c;
   margin-top: 8px;
+  flex: 0 0 auto;
 }
+.m2-bottombar .ax-vol { min-width: 140px; flex-shrink: 0; }
