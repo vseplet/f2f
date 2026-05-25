@@ -1441,7 +1441,9 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resp != nil {
-		s.callSignals.broadcast(resp)
+		// Don't broadcast to SSE — the browser gets the answer from the
+		// POST response. SFU-initiated signals (renegotiation offers,
+		// candidates) arrive via deliverSFUSignal → handleCallSignalInbound.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
