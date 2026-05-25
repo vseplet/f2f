@@ -390,6 +390,9 @@ type Engine struct {
 	call atomic.Value // *callCtx
 	// remoteCalls holds calls discovered on remote peers via polling.
 	remoteCalls atomic.Value // *[]CallState
+	// joinedSFUHost is the tunnel IP of the remote SFU we joined.
+	// Empty when not in a remote call.
+	joinedSFUHost atomic.Value // *string
 
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires

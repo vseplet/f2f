@@ -57,6 +57,26 @@ func (e *Engine) storeRemoteCalls(calls []CallState) {
 	e.remoteCalls.Store(&calls)
 }
 
+func (e *Engine) JoinedSFUHost() string {
+	v := e.joinedSFUHost.Load()
+	if v == nil {
+		return ""
+	}
+	p, _ := v.(*string)
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func (e *Engine) SetJoinedSFUHost(host string) {
+	e.joinedSFUHost.Store(&host)
+}
+
+func (e *Engine) ClearJoinedSFUHost() {
+	e.joinedSFUHost.Store((*string)(nil))
+}
+
 // CallState returns the local call if we're the SFU host.
 func (e *Engine) CallState() *CallState {
 	if cc := e.loadCall(); cc != nil {

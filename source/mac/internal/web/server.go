@@ -1348,6 +1348,7 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
 	// If the SFU host is remote, proxy the join request through the tunnel.
 	if req.SFUHost != "" && req.SFUHost != st.LocalIP {
+		s.engine.SetJoinedSFUHost(req.SFUHost)
 		s.proxyCallJoinToHost(w, req.SFUHost, req.Name)
 		return
 	}
@@ -1408,15 +1409,16 @@ func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
-	cs := s.engine.CallState()
+	sfuHost := s.engine.JoinedSFUHost()
 
-	// If the SFU is remote, proxy leave to the host.
-	if cs != nil && cs.Remote && cs.SFUHost != st.LocalIP {
+	// If we joined a remote SFU, proxy leave to the host.
+	if sfuHost != "" && sfuHost != st.LocalIP {
+		s.engine.ClearJoinedSFUHost()
 		_, port, _ := net.SplitHostPort(s.addr)
 		if port == "" {
 			port = "2202"
 		}
-		url := "http://" + net.JoinHostPort(cs.SFUHost, port) + "/api/call/leave"
+		url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/leave"
 		client := &http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Post(url, "application/json", nil)
 		if err == nil {
@@ -1459,10 +1461,10 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 	// If browser is sending a signal and the SFU is on a remote peer,
 	// proxy the request there.
 	if isLocal {
-		cs := s.engine.CallState()
 		st := s.engine.Status()
-		if cs != nil && cs.Remote && cs.SFUHost != st.LocalIP {
-			s.proxyCallSignalToHost(w, cs.SFUHost, body)
+		sfuHost := s.engine.JoinedSFUHost()
+		if sfuHost != "" && sfuHost != st.LocalIP {
+			s.proxyCallSignalToHost(w, sfuHost, body)
 			return
 		}
 		from = st.LocalIP
