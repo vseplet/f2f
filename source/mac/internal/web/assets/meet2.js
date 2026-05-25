@@ -401,6 +401,7 @@
       var video = document.createElement('video');
       video.autoplay = true;
       video.playsInline = true;
+      video.volume = volume / 100;
       video.srcObject = stream;
       var label = document.createElement('div');
       label.className = 'm2-tile-label';
@@ -610,6 +611,40 @@
       localStream.getVideoTracks().forEach(function (t) { t.enabled = camEnabled; });
       updateMediaButtons();
     });
+
+    // --- volume ---
+    var $volTrack = document.getElementById('m2-vol-track');
+    var $volFill  = document.getElementById('m2-vol-fill');
+    var $volValue = document.getElementById('m2-vol-value');
+    var volume = 80;
+
+    function setVolume(v) {
+      volume = Math.max(0, Math.min(100, v));
+      $volFill.style.width = volume + '%';
+      $volValue.textContent = String(volume);
+      // Apply to all remote video elements
+      var videos = $grid.querySelectorAll('.m2-tile:not(.m2-tile-self) video');
+      for (var i = 0; i < videos.length; i++) {
+        videos[i].volume = volume / 100;
+      }
+    }
+
+    $volTrack.addEventListener('pointerdown', function (e) {
+      var drag = function (ev) {
+        var r = $volTrack.getBoundingClientRect();
+        var x = Math.max(0, Math.min(r.width, ev.clientX - r.left));
+        setVolume(Math.round((x / r.width) * 100));
+      };
+      drag(e);
+      var move = function (ev) { drag(ev); };
+      var up = function () {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    setVolume(80);
 
     // --- init ---
 

@@ -862,6 +862,9 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
 }
 
 #tab-meet2 > .ax-frame { overflow: hidden; }
+#tab-meet2 .ax-controls {
+  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.2fr) auto auto minmax(160px, 1.4fr);
+}
 #tab-meet2 .ax-log {
   flex: 1;
   min-height: 0;
