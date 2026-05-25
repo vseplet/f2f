@@ -36,6 +36,7 @@
     let sfuHost = '';  // tunnel_ip of the SFU host (empty = we are host)
     let logCount = 0;
     let pendingCandidates = [];
+    let hasRemoteDesc = false;
 
     function log(msg) {
       logCount++;
@@ -155,6 +156,8 @@
           var resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
           if (resp && resp.kind === 'answer') {
             await conn.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
+            hasRemoteDesc = true;
+            await flushPendingCandidates();
           }
         } catch (err) {
           log('negotiation error: ' + err.message);
@@ -208,22 +211,30 @@
       }
     }
 
+    async function flushPendingCandidates() {
+      while (pendingCandidates.length > 0) {
+        var c = pendingCandidates.shift();
+        try { await pc.addIceCandidate(c); } catch (e) { /* ignore stale */ }
+      }
+    }
+
     async function handleSignal(msg) {
       if (!pc) return;
       if (msg.kind === 'offer' && msg.from === 'sfu') {
+        hasRemoteDesc = false;
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        hasRemoteDesc = true;
         var answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal({ kind: 'answer', sdp: answer.sdp });
-        for (var i = 0; i < pendingCandidates.length; i++) {
-          await pc.addIceCandidate(pendingCandidates[i]);
-        }
-        pendingCandidates = [];
+        await flushPendingCandidates();
       } else if (msg.kind === 'answer' && msg.from === 'sfu') {
         await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        hasRemoteDesc = true;
+        await flushPendingCandidates();
       } else if (msg.kind === 'candidate' && msg.from === 'sfu') {
-        if (pc.remoteDescription) {
-          await pc.addIceCandidate(msg.candidate);
+        if (hasRemoteDesc) {
+          try { await pc.addIceCandidate(msg.candidate); } catch (e) { /* ignore */ }
         } else {
           pendingCandidates.push(msg.candidate);
         }
@@ -344,6 +355,11 @@
         for (var i = 0; i < tracks.length; i++) {
           pc.addTrack(tracks[i], localStream);
         }
+      } else {
+        // No local media — add recv-only transceivers so we can still
+        // receive remote tracks and trigger a proper SDP negotiation.
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addTransceiver('video', { direction: 'recvonly' });
       }
       startSignalStream();
       inCall = true;
@@ -371,6 +387,7 @@
       $btnLeave.style.display = 'none';
       $actions.style.display = '';
       pendingCandidates = [];
+      hasRemoteDesc = false;
       sfuHost = '';
       try {
         await fetchJSON('/api/call/leave', { method: 'POST' });
