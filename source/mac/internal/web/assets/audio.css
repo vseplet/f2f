@@ -871,7 +871,7 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   margin-bottom: 8px;
   flex: 0 0 auto;
 }
-.m2-topbar .ax-select { width: 200px; }
+.m2-topbar .ax-select { width: 360px; }
 .m2-topbar .ax-btn { padding-top: 6px; padding-bottom: 6px; margin-left: auto; }
 
 #tab-meet2 .m2-body {
