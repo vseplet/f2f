@@ -37,23 +37,27 @@ func (e *Engine) loadCall() *callCtx {
 	return cc
 }
 
-func (e *Engine) loadRemoteCall() *CallState {
-	v := e.remoteCall.Load()
+func (e *Engine) loadRemoteCalls() []CallState {
+	v := e.remoteCalls.Load()
 	if v == nil {
 		return nil
 	}
-	rc, _ := v.(*CallState)
-	return rc
+	p, _ := v.(*[]CallState)
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func (e *Engine) clearCall() {
 	e.call.Store((*callCtx)(nil))
 }
 
-func (e *Engine) clearRemoteCall() {
-	e.remoteCall.Store((*CallState)(nil))
+func (e *Engine) storeRemoteCalls(calls []CallState) {
+	e.remoteCalls.Store(&calls)
 }
 
+// CallState returns the local call if we're the SFU host.
 func (e *Engine) CallState() *CallState {
 	if cc := e.loadCall(); cc != nil {
 		st := cc.state
@@ -61,10 +65,24 @@ func (e *Engine) CallState() *CallState {
 		st.Remote = false
 		return &st
 	}
-	if rc := e.loadRemoteCall(); rc != nil {
-		return rc
-	}
 	return nil
+}
+
+// RemoteCalls returns active calls discovered on remote peers.
+func (e *Engine) RemoteCalls() []CallState {
+	return e.loadRemoteCalls()
+}
+
+// AllCalls returns local + remote calls for the UI.
+func (e *Engine) AllCalls() []CallState {
+	var out []CallState
+	if cs := e.CallState(); cs != nil {
+		out = append(out, *cs)
+	}
+	for _, rc := range e.loadRemoteCalls() {
+		out = append(out, rc)
+	}
+	return out
 }
 
 func (e *Engine) CallSFU() *sfu.SFU {
@@ -184,7 +202,7 @@ func (e *Engine) callPollLoop(ctx context.Context) {
 		case <-ticker.C:
 		}
 		if e.loadCall() != nil {
-			e.clearRemoteCall()
+			e.storeRemoteCalls(nil)
 			continue
 		}
 		e.pollRemoteCalls(ctx)
@@ -214,6 +232,7 @@ func (e *Engine) pollRemoteCalls(ctx context.Context) {
 	}
 
 	client := &http.Client{Timeout: 3 * time.Second}
+	var found []CallState
 	for _, t := range targets {
 		url := "http://" + net.JoinHostPort(t.host, port) + "/api/call/state"
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -233,9 +252,8 @@ func (e *Engine) pollRemoteCalls(ctx context.Context) {
 
 		if cs.CallID != "" {
 			cs.Remote = true
-			e.remoteCall.Store(&cs)
-			return
+			found = append(found, cs)
 		}
 	}
-	e.clearRemoteCall()
+	e.storeRemoteCalls(found)
 }

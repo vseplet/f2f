@@ -81,52 +81,76 @@
 
     async function pollCallState() {
       try {
-        const cs = await fetchJSON('/api/call/state');
-        updateCallUI(cs);
+        var calls = await fetchJSON('/api/call/list');
+        updateCallListUI(calls || []);
       } catch (e) {
         // ignore
       }
     }
 
-    function updateCallUI(cs) {
-      if (!cs || !cs.call_id) {
-        $status.innerHTML = '<span class="text-zinc-500">no active call in camp</span>';
-        $btnCreate.style.display = '';
-        $btnJoin.style.display = 'none';
-        sfuHost = '';
-        if (!inCall) {
-          $controls.style.display = 'none';
-          $partList.textContent = '—';
+    function updateCallListUI(calls) {
+      // Find the call we're currently in (if any).
+      var myCall = null;
+      if (inCall && sfuHost) {
+        for (var i = 0; i < calls.length; i++) {
+          if (calls[i].sfu_host === sfuHost) {
+            myCall = calls[i];
+            break;
+          }
         }
+      }
+
+      if (inCall && myCall) {
+        var parts = (myCall.participants || []).map(function (p) { return p.name; }).join(', ');
+        $status.innerHTML = '<span class="text-emerald-400">in call</span>' + (parts ? ' — ' + parts : '');
+        $btnCreate.style.display = 'none';
+        $btnJoin.style.display = 'none';
+        syncPeerTiles(myCall.participants || []);
         return;
       }
-      sfuHost = cs.sfu_host || '';
-      var hostLabel = cs.sfu_host;
-      if (cs.sfu_host === myTunnelIP) {
-        hostLabel = 'you (host)';
-      }
-      var parts = (cs.participants || []).map(function (p) { return p.name; }).join(', ');
-      if (!inCall) {
-        $status.innerHTML = '<span class="text-emerald-400">call active</span> — host: ' +
-          hostLabel + (parts ? ' — in call: ' + parts : '');
-        $btnCreate.style.display = 'none';
-        $btnJoin.style.display = '';
-      } else {
-        $status.innerHTML = '<span class="text-emerald-400">in call</span> — host: ' +
-          hostLabel + (parts ? ' — ' + parts : '');
-      }
-      renderParticipants(cs.participants || []);
-      syncPeerTiles(cs.participants || []);
-    }
 
-    function renderParticipants(list) {
-      if (!list.length) {
+      if (inCall && !myCall) {
+        // Our call disappeared (host left)
+        leaveCall();
+        return;
+      }
+
+      // Not in a call — show available calls + create button.
+      $controls.style.display = 'none';
+      $btnCreate.style.display = '';
+
+      if (!calls.length) {
+        $status.innerHTML = '<span class="text-zinc-500">no active calls in camp</span>';
+        $btnJoin.style.display = 'none';
         $partList.textContent = '—';
         return;
       }
-      $partList.textContent = list.map(function (p) {
-        return p.name + ' (' + p.tunnel_ip + ')';
-      }).join(' · ');
+
+      // Render call list
+      var html = '';
+      for (var i = 0; i < calls.length; i++) {
+        var c = calls[i];
+        var hostLabel = c.sfu_host;
+        if (c.sfu_host === myTunnelIP) hostLabel = 'you';
+        var parts = (c.participants || []).map(function (p) { return p.name; }).join(', ');
+        html += '<div class="m2-call-item" style="margin-bottom:6px">' +
+          '<span class="text-emerald-400">●</span> host: ' + hostLabel +
+          (parts ? ' — ' + parts : '') +
+          (c.sfu_host !== myTunnelIP ?
+            ' <button class="m2-join-btn" data-host="' + c.sfu_host + '">join</button>' : '') +
+          '</div>';
+      }
+      $partList.innerHTML = html;
+
+      // Bind join buttons
+      var btns = $partList.querySelectorAll('.m2-join-btn');
+      for (var j = 0; j < btns.length; j++) {
+        btns[j].addEventListener('click', function () {
+          sfuHost = this.getAttribute('data-host');
+          joinCall();
+        });
+      }
+      $btnJoin.style.display = 'none';
     }
 
     // --- WebRTC ---

@@ -388,8 +388,8 @@ type Engine struct {
 	// call holds the active group call state (SFU + participants).
 	// nil when no call is in progress.
 	call atomic.Value // *callCtx
-	// remoteCall holds a call discovered on a remote peer via polling.
-	remoteCall atomic.Value // *CallState
+	// remoteCalls holds calls discovered on remote peers via polling.
+	remoteCalls atomic.Value // *[]CallState
 
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires

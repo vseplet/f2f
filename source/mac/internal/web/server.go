@@ -115,6 +115,7 @@ func (s *Server) BindTunnel(ip string) error {
 	mux.HandleFunc("POST /api/call/signal", s.handleCallSignalInbound)
 	mux.HandleFunc("GET /api/call/state", s.handleCallState)
 	mux.HandleFunc("POST /api/call/join", s.handleCallJoinRemote)
+	mux.HandleFunc("POST /api/call/leave", s.handleCallLeaveRemote)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -368,6 +369,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// server; /api/call/signal also registered on the tunnel listener
 	// so remote peers can deliver SFU signals.
 	mux.HandleFunc("GET /api/call/state", s.handleCallState)
+	mux.HandleFunc("GET /api/call/list", s.handleCallList)
 	mux.HandleFunc("POST /api/call/create", s.handleCallCreate)
 	mux.HandleFunc("POST /api/call/join", s.handleCallJoin)
 	mux.HandleFunc("POST /api/call/leave", s.handleCallLeave)
@@ -1314,6 +1316,10 @@ func (s *Server) handleCallState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+func (s *Server) handleCallList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.AllCalls())
+}
+
 func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
 	cs, err := s.engine.CreateCall()
 	if err != nil {
@@ -1402,7 +1408,34 @@ func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
+	cs := s.engine.CallState()
+
+	// If the SFU is remote, proxy leave to the host.
+	if cs != nil && cs.Remote && cs.SFUHost != st.LocalIP {
+		_, port, _ := net.SplitHostPort(s.addr)
+		if port == "" {
+			port = "2202"
+		}
+		url := "http://" + net.JoinHostPort(cs.SFUHost, port) + "/api/call/leave"
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Post(url, "application/json", nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	s.engine.LeaveCall(st.LocalIP)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCallLeaveRemote is on the tunnel listener — a remote peer leaves.
+func (s *Server) handleCallLeaveRemote(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "" {
+		s.engine.LeaveCall(host)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

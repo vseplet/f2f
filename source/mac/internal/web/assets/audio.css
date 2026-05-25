@@ -858,6 +858,21 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   text-align: center;
 }
 
+.m2-join-btn {
+  background: #2a3a2a;
+  color: #6be66b;
+  border: 1px solid #3a5a3a;
+  border-radius: 3px;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 6px;
+}
+.m2-join-btn:hover {
+  background: #3a4a3a;
+}
+
 .m2-log {
   margin-top: 8px;
 }
