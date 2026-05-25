@@ -1,37 +1,21 @@
 // f2f-camp — rendezvous server for f2f peers.
 //
-// Peers register and refresh themselves via UDP announce packets on
-// STUN_PORT (see ./stun.ts). The HTTP side is read-only: clients poll
-// `/api/id/:id` for the peer list and humans browse `/id/:id` for the
-// same data rendered as HTML. There is no WebSocket — see the f2f
-// TODO.md history for why.
-//
-// State is in-memory and per-process — fly.io single-instance is fine
-// for MVP. Two instances would require pinning peers in the same camp
-// to the same node (sticky sessions) or moving to a shared store.
+// Peers register via UDP announce on STUN_PORT (see ./stun.ts).
+// HTTP is read-only: /api/id/:id for peer list, /id/:id for humans.
+// State is in-memory, single-instance.
 
-import { cleanupStale, initDB } from "./db";
 import { Hub } from "./hub";
 import { startUDP } from "./stun";
 import type { PeerInfo } from "./types";
 
 const PORT = Number(Bun.env.PORT ?? 8080);
 const STUN_PORT = Number(Bun.env.STUN_PORT ?? 3478);
-// Peers must announce at least every EVICT_AFTER_MS or we drop them
-// from the live roster. Client cadence is ~20s, so 60s gives two
-// missed announces of slack.
 const EVICT_AFTER_MS = 60_000;
 const EVICT_INTERVAL_MS = 10_000;
-// Sticky (name → octet) bindings older than BINDING_STALE_AFTER_MS are
-// dropped from Turso entirely — releases the slot if the name never
-// comes back.
-const BINDING_STALE_AFTER_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
-const BINDING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const MAX_CAMP_ID_LEN = 128;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
 const hub = new Hub();
-await initDB();
 
 const server = Bun.serve({
   port: PORT,
@@ -72,24 +56,15 @@ const server = Bun.serve({
 
 console.log(`f2f-camp http listening on http://localhost:${server.port}`);
 
-// UDP announce listener. Failure to bind shouldn't crash the HTTP side.
 try {
   await startUDP(STUN_PORT, hub);
 } catch (err) {
   console.error(`udp: failed to bind ${STUN_PORT}: ${(err as Error).message}`);
 }
 
-// Eviction sweep. Runs forever; nothing keeps a strong handle so the
-// runtime keeps it alive as long as the process is up.
 setInterval(() => {
   hub.evictStale(Date.now() - EVICT_AFTER_MS);
 }, EVICT_INTERVAL_MS);
-
-// Periodic DB cleanup of long-stale bindings. Hourly is plenty —
-// nothing fails if it runs less often.
-setInterval(() => {
-  void cleanupStale(Date.now() - BINDING_STALE_AFTER_MS);
-}, BINDING_CLEANUP_INTERVAL_MS);
 
 function isValidCampID(name: string): boolean {
   return name.length > 0 && name.length <= MAX_CAMP_ID_LEN && NAME_RE.test(name);
@@ -120,9 +95,10 @@ function renderCampPage(campID: string, peers: PeerInfo[]): Response {
   const rows = peers
     .map((p) => {
       const endpoint = p.udp_endpoint ?? `${p.public_ip}${p.udp_port ? ":" + p.udp_port : ""}`;
+      const fp = p.pub ? p.pub.slice(0, 16) : "—";
       return `      <tr>
         <td>${escapeHTML(p.name)}</td>
-        <td>${escapeHTML(p.tunnel_ip || "—")}</td>
+        <td class="muted">${escapeHTML(fp)}</td>
         <td>${escapeHTML(endpoint)}</td>
         <td class="muted">${ago(p.joined_at)}</td>
       </tr>`;
@@ -132,7 +108,7 @@ function renderCampPage(campID: string, peers: PeerInfo[]): Response {
     peers.length === 0
       ? `<p class="muted">no peers in this camp</p>`
       : `<table>
-      <thead><tr><th>name</th><th>tunnel ip</th><th>udp endpoint</th><th>joined</th></tr></thead>
+      <thead><tr><th>name</th><th>fingerprint</th><th>udp endpoint</th><th>joined</th></tr></thead>
       <tbody>
 ${rows}
       </tbody>
@@ -167,8 +143,6 @@ ${rows}
   });
 }
 
-// Graceful shutdown so fly.io rolling deploys don't leave dangling
-// state. The Bun runtime closes the UDP socket automatically on exit.
 function shutdown(signal: string) {
   console.log(`received ${signal}; closing`);
   server.stop(true);

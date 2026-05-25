@@ -15,10 +15,9 @@ export type PeerInfo = {
   // punching.
   udp_port?: number;
   udp_endpoint?: string;
-  // Camp-assigned IP inside the camp's virtual subnet (e.g. 10.99.0.3).
-  // The peer puts this on its local utun; other peers' tunnel_ip values
-  // are how it reaches them through the overlay.
-  tunnel_ip: string;
+  // Legacy field — clients now derive their own overlay v4 from pub.
+  // Kept for wire-compat; always empty for new peers.
+  tunnel_ip?: string;
   joined_at: number;
   // online = peer has announced within EVICT_AFTER_MS. Offline peers
   // come from the sticky-binding catalog only, so they may lack

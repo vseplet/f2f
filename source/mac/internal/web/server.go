@@ -322,6 +322,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("DELETE /api/peer-domains/{peer}/{name}", s.handleRemovePeerDomain)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/my-ca", s.handleMyCA)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
 
@@ -709,6 +710,18 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	_, _ = w.Write(ca.CertPEM)
+}
+
+func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
+	ca := s.engine.CA()
+	if ca == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"common_name": ca.CommonName(),
+		"fingerprint": ca.Fingerprint(),
+	})
 }
 
 // handleTrustedPeers returns the UI's view of which peer CAs we've

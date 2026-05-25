@@ -188,6 +188,16 @@ $(function () {
       setTimeout(() => $el.css('color', prev), 500);
     }).catch(() => {});
   });
+  $('#identity-camp-id').on('click', function () {
+    const $el = $(this);
+    const id = $el.data('camp-id');
+    if (!id) return;
+    navigator.clipboard.writeText(id).then(() => {
+      const prev = $el.css('color');
+      $el.css('color', '#7fc474');
+      setTimeout(() => $el.css('color', prev), 500);
+    }).catch(() => {});
+  });
 
   // Auto-start fires once after the first /api/status response that says
   // the engine is stopped *and* we have a camp identity stored. After
@@ -253,15 +263,7 @@ $(function () {
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
       $('#identity-name').text(s.camp_name || '?');
-      // identity-camp shows the readable label; full camp_id sits in
-      // the title so you can copy it from the tooltip.
-      {
-        const id = s.camp_id || '';
-        const lbl = s.camp_label || campLabelFromID(id) || '?';
-        const fp = campShortFP(id);
-        const display = fp ? `${lbl} · fp ${fp}` : lbl;
-        $('#identity-camp').text(display).attr('title', id || '');
-      }
+      $('#identity-camp-id').text(s.camp_id || '').data('camp-id', s.camp_id || '');
       $('#identity-ip').text(s.local_ip || '—');
       $('#identity-reflex').text(s.camp_reflex || '—');
       const pub = s.identity_pub || '';
@@ -769,7 +771,7 @@ $(function () {
       return;
     }
     const peers = Array.isArray(data.peers) ? data.peers : [];
-    $campIDMeta.text(data.camp_id || '');
+    $campIDMeta.text(campLabelFromID(data.camp_id || ''));
     const hasOthers = peers.some((p) => !p.self);
     if (!hasOthers) {
       $campStatus.text('waiting for someone to join').show();
@@ -1221,11 +1223,21 @@ $(function () {
     $('#firewall-desc-input').val('');
   });
 
-  // ---- trusted peer CAs (DNS tab, bottom section) ----
-  // One row per installed peer CA: peer name + fingerprint + age +
-  // two-click remove. Backend lists everything we've ever auto-installed
-  // via peerCAPollLoop; remove drops the PEM, keychain entry, and the
-  // record in <camp_id>.config.json.
+  // ---- my CA (DNS tab) ----
+  function refreshMyCA() {
+    $.getJSON('/api/my-ca', (data) => {
+      if (!data || !data.common_name) {
+        $('#my-ca-info').text('not running');
+        return;
+      }
+      $('#my-ca-info').html(
+        '<strong>' + $('<span>').text(data.common_name).html() + '</strong>' +
+        ' <span class="muted">fp ' + (data.fingerprint || '—') + '</span>'
+      );
+    }).fail(() => { $('#my-ca-info').text('—'); });
+  }
+
+  // ---- trusted peer CAs (DNS tab) ----
   function refreshTrustedPeers() {
     $.getJSON('/api/trusted-peers', (list) => {
       const rows = Array.isArray(list) ? list : [];
@@ -1242,7 +1254,10 @@ $(function () {
         const $head = $('<div class="ax-intercept-head" style="cursor:default">');
         $head.append($('<span class="ax-intercept-caret">').text(' '));
         $head.append($('<span class="ax-intercept-spec">').text(r.peer_name || '?'));
-        $head.append($('<span class="ax-pill ax-pill-peer">').text(r.fingerprint || ''));
+        if (r.common_name) {
+          $head.append($('<span class="ax-pill ax-pill-peer">').text(r.common_name));
+        }
+        $head.append($('<span class="ax-pill ax-pill-fp">').text(r.fingerprint || ''));
         const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '—';
         $head.append($('<span class="ax-intercept-meta">').text('installed ' + when));
         const $rm = $('<button class="ax-list-remove">');
@@ -1503,6 +1518,7 @@ $(function () {
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();
+  refreshMyCA();
   refreshTrustedPeers();
   refreshMyFiles();
   refreshDownloads();
@@ -1510,6 +1526,7 @@ $(function () {
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
+  setInterval(refreshMyCA, 5000);
   setInterval(refreshTrustedPeers, 5000);
   setInterval(refreshMyFiles, 5000);
   setInterval(refreshDownloads, 2000);
