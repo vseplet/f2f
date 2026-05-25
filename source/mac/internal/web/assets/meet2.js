@@ -552,6 +552,7 @@
       }
       startSignalStream();
       inCall = true;
+      $grid.style.display = '';
       $actions.style.display = 'none';
       $controls.style.display = '';
       $btnLeave.style.display = '';
@@ -575,6 +576,7 @@
       }
       $videoSelf.srcObject = null;
       clearRemoteTiles();
+      $grid.style.display = 'none';
       $controls.style.display = 'none';
       $btnLeave.style.display = 'none';
       $actions.style.display = '';
