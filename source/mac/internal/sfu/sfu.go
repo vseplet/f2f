@@ -98,9 +98,10 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		if c == nil {
 			return
 		}
+		cj := c.ToJSON()
 		msg, _ := json.Marshal(signalMsg{
 			Kind:      "candidate",
-			Candidate: c.ToJSON(),
+			Candidate: &cj,
 			From:      "sfu",
 		})
 		s.onSignal(tunnelIP, msg)
@@ -172,7 +173,7 @@ func (s *SFU) HandleSignal(tunnelIP string, body []byte) ([]byte, error) {
 	case "answer":
 		return nil, s.handleAnswer(tunnelIP, msg.SDP)
 	case "candidate":
-		return nil, s.handleCandidate(tunnelIP, msg.CandidateRaw)
+		return nil, s.handleCandidateInit(tunnelIP, msg.Candidate)
 	default:
 		return nil, fmt.Errorf("unknown signal kind: %s", msg.Kind)
 	}
@@ -204,11 +205,10 @@ func (s *SFU) Close() {
 // --- internal ---
 
 type signalMsg struct {
-	Kind         string              `json:"kind"`
-	SDP          string              `json:"sdp,omitempty"`
-	Candidate    webrtc.ICECandidateInit `json:"candidate,omitempty"`
-	CandidateRaw json.RawMessage     `json:"candidate_raw,omitempty"`
-	From         string              `json:"from,omitempty"`
+	Kind      string                     `json:"kind"`
+	SDP       string                     `json:"sdp,omitempty"`
+	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	From      string                     `json:"from,omitempty"`
 }
 
 func (s *SFU) handleOffer(tunnelIP, sdp string) ([]byte, error) {
@@ -252,8 +252,8 @@ func (s *SFU) handleAnswer(tunnelIP, sdp string) error {
 	return p.PC.SetRemoteDescription(answer)
 }
 
-func (s *SFU) handleCandidate(tunnelIP string, raw json.RawMessage) error {
-	if len(raw) == 0 {
+func (s *SFU) handleCandidateInit(tunnelIP string, candidate *webrtc.ICECandidateInit) error {
+	if candidate == nil {
 		return nil
 	}
 	s.mu.Lock()
@@ -262,12 +262,7 @@ func (s *SFU) handleCandidate(tunnelIP string, raw json.RawMessage) error {
 	if !ok {
 		return fmt.Errorf("unknown participant %s", tunnelIP)
 	}
-
-	var candidate webrtc.ICECandidateInit
-	if err := json.Unmarshal(raw, &candidate); err != nil {
-		return fmt.Errorf("parse candidate: %w", err)
-	}
-	return p.PC.AddICECandidate(candidate)
+	return p.PC.AddICECandidate(*candidate)
 }
 
 func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {

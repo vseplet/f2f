@@ -80,7 +80,6 @@
     }
 
     async function pollCallState() {
-      if (inCall) return;
       try {
         const cs = await fetchJSON('/api/call/state');
         updateCallUI(cs);
@@ -91,7 +90,7 @@
 
     function updateCallUI(cs) {
       if (!cs || !cs.call_id) {
-        $status.innerHTML = '<span class="text-zinc-500">no active call</span>';
+        $status.innerHTML = '<span class="text-zinc-500">no active call in camp</span>';
         $btnCreate.style.display = '';
         $btnJoin.style.display = 'none';
         sfuHost = '';
@@ -102,14 +101,19 @@
         return;
       }
       sfuHost = cs.sfu_host || '';
+      var hostLabel = cs.sfu_host;
+      if (cs.sfu_host === myTunnelIP) {
+        hostLabel = 'you (host)';
+      }
+      var parts = (cs.participants || []).map(function (p) { return p.name; }).join(', ');
       if (!inCall) {
-        var hostLabel = cs.sfu_host;
-        if (cs.sfu_host === myTunnelIP) {
-          hostLabel = 'you';
-        }
-        $status.innerHTML = '<span class="text-emerald-400">call active</span> — host: ' + hostLabel;
+        $status.innerHTML = '<span class="text-emerald-400">call active</span> — host: ' +
+          hostLabel + (parts ? ' — in call: ' + parts : '');
         $btnCreate.style.display = 'none';
         $btnJoin.style.display = '';
+      } else {
+        $status.innerHTML = '<span class="text-emerald-400">in call</span> — host: ' +
+          hostLabel + (parts ? ' — ' + parts : '');
       }
       renderParticipants(cs.participants || []);
     }

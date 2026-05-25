@@ -1465,12 +1465,9 @@ func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, bo
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 
-	// Broadcast the SFU's response to local browser SSE subscribers so
-	// the local browser receives answers and candidates.
-	if resp.StatusCode == http.StatusOK && len(respBody) > 0 {
-		s.callSignals.broadcast(respBody)
-	}
-
+	// Don't broadcast the proxy response to SSE — the browser already
+	// gets it from the POST response. SFU-initiated offers/candidates
+	// arrive separately via deliverSFUSignal → handleCallSignalInbound.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
