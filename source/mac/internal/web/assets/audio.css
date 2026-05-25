@@ -724,12 +724,12 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
 }
 .ax-frame .ax-log-event {
   display: grid;
-  grid-template-columns: 90px 70px 1fr;
+  grid-template-columns: 90px auto 1fr;
   gap: 8px;
   padding: 1px 0;
 }
 .ax-frame .ax-log-time { color: #6a5e4a; }
-.ax-frame .ax-log-icon { color: #4a4030; text-align: right; padding-right: 6px; }
+.ax-frame .ax-log-icon { color: #4a4030; text-align: right; padding-right: 6px; white-space: nowrap; }
 .ax-frame .ax-log-icon.event { color: #7a6e5a; }
 .ax-frame .ax-log-msg { color: #d4c8a6; word-break: break-word; }
 .ax-frame .ax-log-event.is-chat .ax-log-icon { text-align: right; color: #c4a554; }
