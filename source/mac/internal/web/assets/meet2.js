@@ -116,6 +116,7 @@
           hostLabel + (parts ? ' — ' + parts : '');
       }
       renderParticipants(cs.participants || []);
+      syncParticipantTiles(cs.participants || []);
     }
 
     function renderParticipants(list) {
@@ -277,7 +278,8 @@
     }
 
     // --- remote video tiles ---
-    var remoteTiles = {};
+    var remoteTiles = {};      // streamId → tile element (has video)
+    var placeholderTiles = {}; // tunnelIP → tile element (no video)
 
     function addRemoteStream(stream) {
       if (remoteTiles[stream.id]) return;
@@ -311,10 +313,47 @@
       }
     }
 
+    // Ensure every participant (except self) has at least a placeholder tile.
+    function syncParticipantTiles(participants) {
+      if (!inCall || !participants) return;
+      var activeIPs = {};
+      for (var i = 0; i < participants.length; i++) {
+        var p = participants[i];
+        if (p.tunnel_ip === myTunnelIP) continue;
+        activeIPs[p.tunnel_ip] = p.name;
+        if (!placeholderTiles[p.tunnel_ip]) {
+          var tile = document.createElement('div');
+          tile.className = 'm2-tile m2-tile-placeholder';
+          tile.id = 'm2-placeholder-' + p.tunnel_ip.replace(/\./g, '-');
+          var noVid = document.createElement('div');
+          noVid.className = 'm2-no-video';
+          noVid.textContent = p.name;
+          var label = document.createElement('div');
+          label.className = 'm2-tile-label';
+          label.textContent = p.name + ' @ ' + p.tunnel_ip;
+          tile.appendChild(noVid);
+          tile.appendChild(label);
+          $grid.appendChild(tile);
+          placeholderTiles[p.tunnel_ip] = tile;
+        }
+      }
+      // Remove placeholders for peers that left.
+      for (var ip in placeholderTiles) {
+        if (!activeIPs[ip]) {
+          placeholderTiles[ip].remove();
+          delete placeholderTiles[ip];
+        }
+      }
+    }
+
     function clearRemoteTiles() {
       for (var id in remoteTiles) {
         remoteTiles[id].remove();
         delete remoteTiles[id];
+      }
+      for (var ip in placeholderTiles) {
+        placeholderTiles[ip].remove();
+        delete placeholderTiles[ip];
       }
     }
 
