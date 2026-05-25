@@ -1473,11 +1473,12 @@ func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, bo
 	w.Write(respBody)
 }
 
-// handleCallSignalInbound is registered on the tunnel listener. It serves
-// two roles depending on who we are:
+// handleCallSignalInbound is registered on the tunnel listener. It handles:
 //
-//  1. We are the SFU host: a remote peer sends offer/answer/candidate → dispatch to SFU engine.
-//  2. We are NOT the SFU host: the SFU host sends us an offer/candidate → broadcast to local browser via SSE.
+//  1. Signals FROM the SFU (from: "sfu") → always broadcast to local browser SSE.
+//     This covers both: SFU host receiving its own renegotiation offers, and
+//     remote peers receiving SFU offers/candidates.
+//  2. Signals FROM a remote browser (no from: "sfu") → dispatch to local SFU.
 func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -1485,12 +1486,26 @@ func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Check if this signal originates from the SFU itself.
+	var peek struct {
+		From string `json:"from"`
+	}
+	_ = json.Unmarshal(body, &peek)
+
+	if peek.From == "sfu" {
+		// SFU → browser: broadcast to local SSE so the browser can
+		// process renegotiation offers and ICE candidates.
+		s.callSignals.broadcast(body)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Browser/peer → SFU: dispatch to the local SFU engine.
 	from := ""
 	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
 		from = host
 	}
 
-	// If we have a local SFU running, dispatch to it.
 	if s.engine.CallSFU() != nil {
 		resp, err := s.engine.HandleCallSignal(from, body)
 		if err != nil {
@@ -1503,13 +1518,7 @@ func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request)
 			w.Write(resp)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
-
-	// No local SFU — this is the SFU host pushing a signal to us.
-	// Broadcast to local browser SSE so it can process the offer/candidate.
-	s.callSignals.broadcast(body)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -158,13 +158,15 @@
           var offer = await conn.createOffer();
           await conn.setLocalDescription(offer);
           var resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
-          if (resp && resp.kind === 'answer') {
+          // If SFU renegotiated while we waited for the POST response,
+          // our PC is already back in 'stable' — skip the stale answer.
+          if (resp && resp.kind === 'answer' && conn.signalingState === 'have-local-offer') {
             await conn.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
             hasRemoteDesc = true;
             await flushPendingCandidates();
           }
         } catch (err) {
-          log('negotiation error: ' + err.message);
+          log('negotiation: ' + err.message);
         }
       };
 
