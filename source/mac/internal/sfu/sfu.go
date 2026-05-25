@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
@@ -14,12 +15,18 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+type publishedTrack struct {
+	local       *webrtc.TrackLocalStaticRTP
+	publisherPC *webrtc.PeerConnection
+	remoteSSRC  webrtc.SSRC
+}
+
 type Participant struct {
 	TunnelIP string
 	Name     string
 	PC       *webrtc.PeerConnection
 	mu       sync.Mutex
-	tracks   map[string]*webrtc.TrackLocalStaticRTP
+	tracks   map[string]*publishedTrack
 }
 
 type ParticipantInfo struct {
@@ -78,18 +85,43 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		TunnelIP: tunnelIP,
 		Name:     name,
 		PC:       pc,
-		tracks:   make(map[string]*webrtc.TrackLocalStaticRTP),
+		tracks:   make(map[string]*publishedTrack),
 	}
 
+	// Add existing tracks from other participants and set up RTCP forwarding.
 	for _, other := range s.participants {
 		other.mu.Lock()
-		for _, t := range other.tracks {
-			if _, err := pc.AddTrack(t); err != nil {
+		for _, pt := range other.tracks {
+			rtpSender, err := pc.AddTrack(pt.local)
+			if err != nil {
 				log.Printf("sfu: add existing track to %s: %v", tunnelIP, err)
+				continue
 			}
+			go forwardRTCP(rtpSender, pt.publisherPC, pt.remoteSSRC)
 		}
 		other.mu.Unlock()
+	}
+
+	// Request keyframes from all publishers after a short delay
+	// so the new subscriber's ICE has time to connect first.
+	publishers := make([]*publishedTrack, 0)
+	for _, other := range s.participants {
+		other.mu.Lock()
+		for _, pt := range other.tracks {
+			publishers = append(publishers, pt)
 		}
+		other.mu.Unlock()
+	}
+	if len(publishers) > 0 {
+		go func() {
+			time.Sleep(time.Second)
+			for _, pt := range publishers {
+				_ = pt.publisherPC.WriteRTCP([]rtcp.Packet{
+					&rtcp.PictureLossIndication{MediaSSRC: uint32(pt.remoteSSRC)},
+				})
+			}
+		}()
+	}
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		s.handleTrack(p, remote)
@@ -131,8 +163,8 @@ func (s *SFU) RemoveParticipant(tunnelIP string) {
 
 	p.mu.Lock()
 	removedTracks := make([]*webrtc.TrackLocalStaticRTP, 0, len(p.tracks))
-	for _, t := range p.tracks {
-		removedTracks = append(removedTracks, t)
+	for _, pt := range p.tracks {
+		removedTracks = append(removedTracks, pt.local)
 	}
 	p.mu.Unlock()
 
@@ -161,7 +193,6 @@ func (s *SFU) RemoveParticipant(tunnelIP string) {
 }
 
 // HandleSignal processes a raw JSON WebRTC signal from a participant.
-// Returns a response JSON (e.g. an answer) or nil.
 func (s *SFU) HandleSignal(tunnelIP string, body []byte) ([]byte, error) {
 	var msg signalMsg
 	if err := json.Unmarshal(body, &msg); err != nil {
@@ -206,10 +237,10 @@ func (s *SFU) Close() {
 // --- internal ---
 
 type signalMsg struct {
-	Kind      string                     `json:"kind"`
-	SDP       string                     `json:"sdp,omitempty"`
-	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
-	From      string                     `json:"from,omitempty"`
+	Kind      string                   `json:"kind"`
+	SDP       string                   `json:"sdp,omitempty"`
+	Candidate *webrtc.ICECandidateInit `json:"candidate,omitempty"`
+	From      string                   `json:"from,omitempty"`
 }
 
 func (s *SFU) handleOffer(tunnelIP, sdp string) ([]byte, error) {
@@ -280,8 +311,14 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		return
 	}
 
+	pt := &publishedTrack{
+		local:       local,
+		publisherPC: sender.PC,
+		remoteSSRC:  remote.SSRC(),
+	}
+
 	sender.mu.Lock()
-	sender.tracks[remote.ID()] = local
+	sender.tracks[remote.ID()] = pt
 	sender.mu.Unlock()
 
 	s.mu.Lock()
@@ -297,7 +334,6 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 			continue
 		}
 		renegotiateList = append(renegotiateList, p)
-		// Forward RTCP (PLI/FIR) from subscriber back to publisher.
 		go forwardRTCP(rtpSender, sender.PC, remote.SSRC())
 	}
 	s.mu.Unlock()
@@ -306,10 +342,13 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		s.renegotiate(p)
 	}
 
-	// One initial PLI so subscribers get a keyframe to start decoding.
-	_ = sender.PC.WriteRTCP([]rtcp.Packet{
-		&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-	})
+	// Request a keyframe after subscribers have time to connect.
+	go func() {
+		time.Sleep(time.Second)
+		_ = sender.PC.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+		})
+	}()
 
 	buf := make([]byte, 1500)
 	for {
@@ -347,8 +386,8 @@ func (s *SFU) renegotiate(p *Participant) {
 }
 
 // forwardRTCP reads RTCP from a subscriber's RTPSender and forwards
-// PLI/FIR requests to the publisher's PC. This restores the natural
-// RTCP feedback loop that browser-to-browser WebRTC has natively.
+// PLI/FIR requests to the publisher's PC so the publisher's browser
+// generates keyframes when the subscriber needs them.
 func forwardRTCP(rtpSender *webrtc.RTPSender, publisherPC *webrtc.PeerConnection, publisherSSRC webrtc.SSRC) {
 	for {
 		pkts, _, err := rtpSender.ReadRTCP()
