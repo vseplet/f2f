@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
@@ -292,11 +291,14 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 			continue
 		}
 		log.Printf("sfu: forwarding track %s from %s → %s", remote.Codec().MimeType, sender.TunnelIP, p.TunnelIP)
-		if _, err := p.PC.AddTrack(local); err != nil {
+		rtpSender, err := p.PC.AddTrack(local)
+		if err != nil {
 			log.Printf("sfu: add track to %s: %v", p.TunnelIP, err)
 			continue
 		}
 		renegotiateList = append(renegotiateList, p)
+		// Forward RTCP (PLI/FIR) from subscriber back to publisher.
+		go forwardRTCP(rtpSender, sender.PC, remote.SSRC())
 	}
 	s.mu.Unlock()
 
@@ -304,28 +306,10 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		s.renegotiate(p)
 	}
 
-	// Periodically request keyframes so subscribers can start decoding
-	// and recover from packet loss. 5s is a compromise: fast enough for
-	// recovery, slow enough to not cause constant stuttering.
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		// Immediate first PLI
-		_ = sender.PC.WriteRTCP([]rtcp.Packet{
-			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-		})
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				_ = sender.PC.WriteRTCP([]rtcp.Packet{
-					&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-				})
-			}
-		}
-	}()
+	// One initial PLI so subscribers get a keyframe to start decoding.
+	_ = sender.PC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+	})
 
 	buf := make([]byte, 1500)
 	for {
@@ -337,7 +321,6 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 			break
 		}
 	}
-	close(done)
 
 	sender.mu.Lock()
 	delete(sender.tracks, remote.ID())
@@ -361,4 +344,24 @@ func (s *SFU) renegotiate(p *Participant) {
 		From: "sfu",
 	})
 	s.onSignal(p.TunnelIP, msg)
+}
+
+// forwardRTCP reads RTCP from a subscriber's RTPSender and forwards
+// PLI/FIR requests to the publisher's PC. This restores the natural
+// RTCP feedback loop that browser-to-browser WebRTC has natively.
+func forwardRTCP(rtpSender *webrtc.RTPSender, publisherPC *webrtc.PeerConnection, publisherSSRC webrtc.SSRC) {
+	for {
+		pkts, _, err := rtpSender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, pkt := range pkts {
+			switch pkt.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				_ = publisherPC.WriteRTCP([]rtcp.Packet{
+					&rtcp.PictureLossIndication{MediaSSRC: uint32(publisherSSRC)},
+				})
+			}
+		}
+	}
 }
