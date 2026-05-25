@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
@@ -89,12 +90,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 			}
 		}
 		other.mu.Unlock()
-		// Request keyframe from existing publisher so the new subscriber
-		// can decode immediately without waiting for the next natural one.
-		_ = other.PC.WriteRTCP([]rtcp.Packet{
-			&rtcp.PictureLossIndication{},
-		})
-	}
+		}
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		s.handleTrack(p, remote)
@@ -308,10 +304,28 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		s.renegotiate(p)
 	}
 
-	// Request one keyframe immediately so subscribers can start decoding.
-	_ = sender.PC.WriteRTCP([]rtcp.Packet{
-		&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-	})
+	// Periodically request keyframes so subscribers can start decoding
+	// and recover from packet loss. 5s is a compromise: fast enough for
+	// recovery, slow enough to not cause constant stuttering.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		// Immediate first PLI
+		_ = sender.PC.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+		})
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_ = sender.PC.WriteRTCP([]rtcp.Packet{
+					&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+				})
+			}
+		}
+	}()
 
 	buf := make([]byte, 1500)
 	for {
@@ -323,6 +337,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 			break
 		}
 	}
+	close(done)
 
 	sender.mu.Lock()
 	delete(sender.tracks, remote.ID())

@@ -28,33 +28,54 @@ type callCtx struct {
 	sfu   *sfu.SFU
 }
 
-// CallState returns the local call if we're the SFU host, or a remote
-// call discovered by polling peers.
+func (e *Engine) loadCall() *callCtx {
+	v := e.call.Load()
+	if v == nil {
+		return nil
+	}
+	cc, _ := v.(*callCtx)
+	return cc
+}
+
+func (e *Engine) loadRemoteCall() *CallState {
+	v := e.remoteCall.Load()
+	if v == nil {
+		return nil
+	}
+	rc, _ := v.(*CallState)
+	return rc
+}
+
+func (e *Engine) clearCall() {
+	e.call.Store((*callCtx)(nil))
+}
+
+func (e *Engine) clearRemoteCall() {
+	e.remoteCall.Store((*CallState)(nil))
+}
+
 func (e *Engine) CallState() *CallState {
-	if v := e.call.Load(); v != nil {
-		cc := v.(*callCtx)
+	if cc := e.loadCall(); cc != nil {
 		st := cc.state
 		st.Participants = cc.sfu.Participants()
 		st.Remote = false
 		return &st
 	}
-	if v := e.remoteCall.Load(); v != nil {
-		rc := v.(*CallState)
+	if rc := e.loadRemoteCall(); rc != nil {
 		return rc
 	}
 	return nil
 }
 
 func (e *Engine) CallSFU() *sfu.SFU {
-	v := e.call.Load()
-	if v == nil {
-		return nil
+	if cc := e.loadCall(); cc != nil {
+		return cc.sfu
 	}
-	return v.(*callCtx).sfu
+	return nil
 }
 
 func (e *Engine) CreateCall() (*CallState, error) {
-	if e.call.Load() != nil {
+	if cc := e.loadCall(); cc != nil {
 		return nil, fmt.Errorf("call already active")
 	}
 
@@ -79,7 +100,7 @@ func (e *Engine) CreateCall() (*CallState, error) {
 
 	if _, err := sfuInst.AddParticipant(st.LocalIP, st.CampName); err != nil {
 		sfuInst.Close()
-		e.call.Store((*callCtx)(nil))
+		e.clearCall()
 		return nil, fmt.Errorf("add self to sfu: %w", err)
 	}
 
@@ -88,25 +109,23 @@ func (e *Engine) CreateCall() (*CallState, error) {
 }
 
 func (e *Engine) JoinCall(tunnelIP, name string) error {
-	v := e.call.Load()
-	if v == nil {
+	cc := e.loadCall()
+	if cc == nil {
 		return fmt.Errorf("no active call on this host")
 	}
-	_, err := v.(*callCtx).sfu.AddParticipant(tunnelIP, name)
+	_, err := cc.sfu.AddParticipant(tunnelIP, name)
 	return err
 }
 
 func (e *Engine) LeaveCall(tunnelIP string) {
-	v := e.call.Load()
-	if v == nil {
+	cc := e.loadCall()
+	if cc == nil {
 		return
 	}
-	cc := v.(*callCtx)
 
-	// If the SFU host leaves, end the entire call.
 	if tunnelIP == cc.state.SFUHost {
 		cc.sfu.Close()
-		e.call.Store((*callCtx)(nil))
+		e.clearCall()
 		log.Printf("call: ended (host left)")
 		return
 	}
@@ -114,27 +133,27 @@ func (e *Engine) LeaveCall(tunnelIP string) {
 	cc.sfu.RemoveParticipant(tunnelIP)
 	if len(cc.sfu.Participants()) == 0 {
 		cc.sfu.Close()
-		e.call.Store((*callCtx)(nil))
+		e.clearCall()
 		log.Printf("call: ended (last participant left)")
 	}
 }
 
 func (e *Engine) EndCall() {
-	v := e.call.Load()
-	if v == nil {
+	cc := e.loadCall()
+	if cc == nil {
 		return
 	}
-	v.(*callCtx).sfu.Close()
-	e.call.Store((*callCtx)(nil))
+	cc.sfu.Close()
+	e.clearCall()
 	log.Printf("call: ended")
 }
 
 func (e *Engine) HandleCallSignal(fromTunnelIP string, body []byte) ([]byte, error) {
-	v := e.call.Load()
-	if v == nil {
+	cc := e.loadCall()
+	if cc == nil {
 		return nil, fmt.Errorf("no active call")
 	}
-	return v.(*callCtx).sfu.HandleSignal(fromTunnelIP, body)
+	return cc.sfu.HandleSignal(fromTunnelIP, body)
 }
 
 func (e *Engine) deliverSFUSignal(to string, msg []byte) {
@@ -154,8 +173,6 @@ func (e *Engine) deliverSFUSignal(to string, msg []byte) {
 	}()
 }
 
-// callPollLoop discovers active calls on remote peers by polling their
-// /api/call/state through the tunnel. Same pattern as domainPollLoop.
 func (e *Engine) callPollLoop(ctx context.Context) {
 	defer e.workers.Done()
 	ticker := time.NewTicker(3 * time.Second)
@@ -166,8 +183,8 @@ func (e *Engine) callPollLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		if e.call.Load() != nil {
-			e.remoteCall.Store((*CallState)(nil))
+		if e.loadCall() != nil {
+			e.clearRemoteCall()
 			continue
 		}
 		e.pollRemoteCalls(ctx)
@@ -220,5 +237,5 @@ func (e *Engine) pollRemoteCalls(ctx context.Context) {
 			return
 		}
 	}
-	e.remoteCall.Store((*CallState)(nil))
+	e.clearRemoteCall()
 }
