@@ -25,6 +25,7 @@ type Participant struct {
 	TunnelIP string
 	Name     string
 	PC       *webrtc.PeerConnection
+	DC       *webrtc.DataChannel // chat relay
 	mu       sync.Mutex
 	tracks   map[string]*publishedTrack
 }
@@ -125,6 +126,20 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 
 	pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		s.handleTrack(p, remote)
+	})
+
+	// Chat relay via DataChannel. Each participant creates a DC on their
+	// side; when a message arrives, broadcast to all other participants.
+	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			p.mu.Lock()
+			p.DC = dc
+			p.mu.Unlock()
+			log.Printf("sfu: chat channel open for %s", tunnelIP)
+		})
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			s.broadcastChat(tunnelIP, msg.Data)
+		})
 	})
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -383,6 +398,22 @@ func (s *SFU) renegotiate(p *Participant) {
 		From: "sfu",
 	})
 	s.onSignal(p.TunnelIP, msg)
+}
+
+func (s *SFU) broadcastChat(senderIP string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.participants {
+		if p.TunnelIP == senderIP {
+			continue
+		}
+		p.mu.Lock()
+		dc := p.DC
+		p.mu.Unlock()
+		if dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
+			_ = dc.Send(data)
+		}
+	}
 }
 
 // forwardRTCP reads RTCP from a subscriber's RTPSender and forwards

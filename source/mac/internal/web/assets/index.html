@@ -329,24 +329,31 @@
         <div class="m2-grid" id="m2-grid">
           <div class="m2-tile m2-tile-self" id="m2-tile-self">
             <video id="m2-video-self" autoplay muted playsinline></video>
+            <div class="ax-cam-off">
+              <svg viewBox="0 0 40 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="26" height="20" rx="2" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M28 11L38 6v18l-10-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              </svg>
+              <span>camera off</span>
+            </div>
             <div class="m2-tile-label" id="m2-label-self">you</div>
           </div>
         </div>
 
-        <div class="m2-controls" id="m2-controls" style="display:none">
-          <button id="m2-btn-mic" class="ax-btn" disabled>
+        <div class="ax-controls m2-controls" id="m2-controls" style="display:none">
+          <button id="m2-btn-mic" class="ax-btn ax-btn-mic" disabled>
             <span class="ax-btn-state">●</span>
             <span>mic</span>
           </button>
-          <button id="m2-btn-cam" class="ax-btn" disabled>
+          <button id="m2-btn-cam" class="ax-btn ax-btn-cam" disabled>
             <span class="ax-btn-state">□</span>
             <span>cam</span>
           </button>
-          <button id="m2-btn-share" class="ax-btn" disabled>
+          <button id="m2-btn-share" class="ax-btn ax-btn-share" disabled>
             <span class="ax-btn-state">▢</span>
             <span>share</span>
           </button>
-          <button id="m2-btn-leave" class="ax-btn" style="display:none">
+          <button id="m2-btn-leave" class="ax-btn ax-btn-call state-connected" style="display:none">
             <span class="ax-btn-state">■</span>
             <span>leave</span>
           </button>
@@ -357,23 +364,23 @@
             <span class="ax-btn-state">▶</span>
             <span class="ax-btn-label">start group call</span>
           </button>
-          <button id="m2-btn-join" class="ax-btn ax-btn-call" style="display:none">
-            <span class="ax-btn-state">▶</span>
-            <span class="ax-btn-label">join call</span>
-          </button>
         </div>
 
         <div class="m2-participants" id="m2-participants">
-          <div class="ax-section-title">participants</div>
+          <div class="ax-section-title">groups</div>
           <div id="m2-participant-list" class="text-zinc-500">—</div>
         </div>
 
-        <div class="m2-log">
+        <div class="ax-log m2-log">
           <div class="ax-log-header">
             <span>— log · <span id="m2-log-count">0</span></span>
             <button id="m2-log-clear" class="ax-log-clear">clear</button>
           </div>
           <div class="ax-log-body" id="m2-log-body"></div>
+          <div class="ax-chat-input">
+            <span class="ax-chat-prompt">›</span>
+            <input id="m2-chat-input" type="text" autocomplete="off" placeholder="join a call to chat" disabled />
+          </div>
         </div>
       </div>
     </div><!-- /#tab-meet2 -->

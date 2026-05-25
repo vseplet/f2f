@@ -25,7 +25,10 @@
     const $logCount   = document.getElementById('m2-log-count');
     const $logClear   = document.getElementById('m2-log-clear');
 
+    const $chatInput  = document.getElementById('m2-chat-input');
+
     let pc = null;
+    let dataChannel = null;
     let signalES = null;
     let localStream = null;
     let micEnabled = false;
@@ -33,7 +36,7 @@
     let inCall = false;
     let myTunnelIP = '';
     let myName = '';
-    let sfuHost = '';  // tunnel_ip of the SFU host (empty = we are host)
+    let sfuHost = '';
     let logCount = 0;
     let pendingCandidates = [];
     let hasRemoteDesc = false;
@@ -53,6 +56,60 @@
       $logBody.innerHTML = '';
       logCount = 0;
       $logCount.textContent = '0';
+    });
+
+    function logChat(who, text) {
+      logCount++;
+      $logCount.textContent = logCount;
+      var line = document.createElement('div');
+      line.className = 'ax-log-event is-chat' + (who === myName ? ' from-you' : '');
+      var ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
+      line.textContent = ts + ' ' + who + ': ' + text;
+      $logBody.appendChild(line);
+      $logBody.scrollTop = $logBody.scrollHeight;
+    }
+
+    function attachDataChannel(channel) {
+      dataChannel = channel;
+      channel.onopen = function () {
+        $chatInput.disabled = false;
+        $chatInput.placeholder = 'type a message...';
+        log('chat channel open');
+      };
+      channel.onclose = function () {
+        $chatInput.disabled = true;
+        $chatInput.placeholder = 'join a call to chat';
+      };
+      channel.onmessage = function (e) {
+        var text = String(e.data || '').slice(0, 4096).trim();
+        if (text) {
+          try {
+            var msg = JSON.parse(text);
+            logChat(msg.name || 'peer', msg.text || text);
+          } catch (err) {
+            logChat('peer', text);
+          }
+        }
+      };
+    }
+
+    function sendChat(text) {
+      if (!dataChannel || dataChannel.readyState !== 'open') return false;
+      try {
+        dataChannel.send(JSON.stringify({ name: myName, text: text }));
+      } catch (err) {
+        log('chat send failed: ' + err.message);
+        return false;
+      }
+      logChat(myName, text);
+      return true;
+    }
+
+    $chatInput.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var text = $chatInput.value.trim();
+      if (!text) return;
+      if (sendChat(text)) $chatInput.value = '';
     });
 
     async function fetchJSON(url, opts) {
@@ -158,6 +215,10 @@
     function createPC() {
       var conn = new RTCPeerConnection({ iceServers: [] });
 
+      // Chat DataChannel — create before offer so it's in the SDP.
+      var dc = conn.createDataChannel('chat');
+      attachDataChannel(dc);
+
       conn.onicecandidate = function (e) {
         if (e.candidate) {
           sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
@@ -169,6 +230,10 @@
         if (e.streams && e.streams[0]) {
           addRemoteStream(e.streams[0]);
         }
+      };
+
+      conn.ondatachannel = function (e) {
+        attachDataChannel(e.channel);
       };
 
       conn.onconnectionstatechange = function () {
@@ -477,6 +542,9 @@
       if (!inCall) return;
       inCall = false;
       stopSignalStream();
+      dataChannel = null;
+      $chatInput.disabled = true;
+      $chatInput.placeholder = 'join a call to chat';
       if (pc) {
         pc.close();
         pc = null;
@@ -491,8 +559,7 @@
       $btnLeave.style.display = 'none';
       $actions.style.display = '';
       $btnCreate.style.display = '';
-      $btnJoin.style.display = 'none';
-      $status.innerHTML = '<span class="text-zinc-500">no active call in camp</span>';
+      $status.innerHTML = '<span class="text-zinc-500">no active calls in camp</span>';
       $partList.textContent = '—';
       pendingCandidates = [];
       hasRemoteDesc = false;
