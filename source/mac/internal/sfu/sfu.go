@@ -411,7 +411,7 @@ func (s *SFU) broadcastChat(senderIP string, data []byte) {
 		dc := p.DC
 		p.mu.Unlock()
 		if dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
-			_ = dc.Send(data)
+			_ = dc.SendText(string(data))
 		}
 	}
 }
