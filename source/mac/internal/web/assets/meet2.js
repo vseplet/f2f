@@ -464,6 +464,10 @@
       $controls.style.display = 'none';
       $btnLeave.style.display = 'none';
       $actions.style.display = '';
+      $btnCreate.style.display = '';
+      $btnJoin.style.display = 'none';
+      $status.innerHTML = '<span class="text-zinc-500">no active call in camp</span>';
+      $partList.textContent = '—';
       pendingCandidates = [];
       hasRemoteDesc = false;
       sfuHost = '';
