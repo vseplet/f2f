@@ -385,6 +385,10 @@ type Engine struct {
 
 	tap *logTap
 
+	// call holds the active group call state (SFU + participants).
+	// nil when no call is in progress.
+	call atomic.Value // *callCtx
+
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires

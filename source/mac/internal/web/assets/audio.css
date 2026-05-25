@@ -783,3 +783,68 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   margin-right: 4px;
   vertical-align: 1px;
 }
+
+/* ---- meet-2 (group calls) ---- */
+
+.m2-status {
+  margin-bottom: 12px;
+}
+
+.m2-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.m2-tile {
+  position: relative;
+  background: #121110;
+  border: 1px solid #2a251c;
+  border-radius: 4px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+}
+
+.m2-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.m2-tile-self {
+  border-color: #4a7c59;
+}
+
+.m2-tile-label {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  font-size: 11px;
+  color: #b0a48c;
+  background: rgba(12, 10, 8, 0.7);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.m2-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.m2-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.m2-participants {
+  margin-bottom: 12px;
+}
+
+.m2-log {
+  margin-top: 8px;
+}

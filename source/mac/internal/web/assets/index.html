@@ -21,6 +21,8 @@
           <span class="ax-sep">·</span>
           <button type="button" data-tab="audio" class="ax-tab">meet</button>
           <span class="ax-sep">·</span>
+          <button type="button" data-tab="meet2" class="ax-tab">meet-</button>
+          <span class="ax-sep">·</span>
           <button type="button" data-tab="drop" class="ax-tab">drop</button>
           <span class="ax-sep">·</span>
           <button type="button" data-tab="diagnostics" class="ax-tab">diagnostics</button>
@@ -318,6 +320,64 @@
       </div>
     </div><!-- /#tab-audio -->
 
+    <div id="tab-meet2" class="tab-panel hidden">
+      <div class="ax-frame">
+        <div class="m2-status" id="m2-status">
+          <span class="text-zinc-500">checking call state...</span>
+        </div>
+
+        <div class="m2-grid" id="m2-grid">
+          <div class="m2-tile m2-tile-self" id="m2-tile-self">
+            <video id="m2-video-self" autoplay muted playsinline></video>
+            <div class="m2-tile-label" id="m2-label-self">you</div>
+          </div>
+        </div>
+
+        <div class="m2-controls" id="m2-controls" style="display:none">
+          <button id="m2-btn-mic" class="ax-btn" disabled>
+            <span class="ax-btn-state">●</span>
+            <span>mic</span>
+          </button>
+          <button id="m2-btn-cam" class="ax-btn" disabled>
+            <span class="ax-btn-state">□</span>
+            <span>cam</span>
+          </button>
+          <button id="m2-btn-share" class="ax-btn" disabled>
+            <span class="ax-btn-state">▢</span>
+            <span>share</span>
+          </button>
+          <button id="m2-btn-leave" class="ax-btn" style="display:none">
+            <span class="ax-btn-state">■</span>
+            <span>leave</span>
+          </button>
+        </div>
+
+        <div class="m2-actions" id="m2-actions">
+          <button id="m2-btn-create" class="ax-btn ax-btn-call">
+            <span class="ax-btn-state">▶</span>
+            <span class="ax-btn-label">start group call</span>
+          </button>
+          <button id="m2-btn-join" class="ax-btn ax-btn-call" style="display:none">
+            <span class="ax-btn-state">▶</span>
+            <span class="ax-btn-label">join call</span>
+          </button>
+        </div>
+
+        <div class="m2-participants" id="m2-participants">
+          <div class="ax-section-title">participants</div>
+          <div id="m2-participant-list" class="text-zinc-500">—</div>
+        </div>
+
+        <div class="m2-log">
+          <div class="ax-log-header">
+            <span>— log · <span id="m2-log-count">0</span></span>
+            <button id="m2-log-clear" class="ax-log-clear">clear</button>
+          </div>
+          <div class="ax-log-body" id="m2-log-body"></div>
+        </div>
+      </div>
+    </div><!-- /#tab-meet2 -->
+
     <div id="tab-drop" class="tab-panel hidden">
       <div class="ax-frame">
         <div class="ax-section">
@@ -466,5 +526,6 @@
 
   <script src="/app.js"></script>
   <script src="/audio.js"></script>
+  <script src="/meet2.js"></script>
 </body>
 </html>

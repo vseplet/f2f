@@ -52,15 +52,17 @@ type Server struct {
 	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
 	proxySrvs []*http.Server // HTTP/HTTPS reverse proxies on :80/:443
 
-	signals    *signalHub
-	signalHTTP *http.Client
+	signals     *signalHub
+	callSignals *signalHub // SSE hub for SFU signals → local browser
+	signalHTTP  *http.Client
 }
 
 func New(eng *engine.Engine, addr string) *Server {
 	return &Server{
-		engine:  eng,
-		addr:    addr,
-		signals: newSignalHub(),
+		engine:      eng,
+		addr:        addr,
+		signals:     newSignalHub(),
+		callSignals: newSignalHub(),
 		signalHTTP: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -110,6 +112,9 @@ func (s *Server) BindTunnel(ip string) error {
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
+	mux.HandleFunc("POST /api/call/signal", s.handleCallSignal)
+	mux.HandleFunc("GET /api/call/state", s.handleCallState)
+	mux.HandleFunc("POST /api/call/join", s.handleCallJoinRemote)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -358,6 +363,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
+
+	// Group calls (SFU-based). Browser-facing endpoints on the UI
+	// server; /api/call/signal also registered on the tunnel listener
+	// so remote peers can deliver SFU signals.
+	mux.HandleFunc("GET /api/call/state", s.handleCallState)
+	mux.HandleFunc("POST /api/call/create", s.handleCallCreate)
+	mux.HandleFunc("POST /api/call/join", s.handleCallJoin)
+	mux.HandleFunc("POST /api/call/leave", s.handleCallLeave)
+	mux.HandleFunc("POST /api/call/signal", s.handleCallSignal)
+	mux.HandleFunc("GET /api/call/signal/stream", s.handleCallSignalStream)
 }
 
 // signalHub is a tiny in-memory broadcaster. Every browser connected to
@@ -1286,4 +1301,147 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeError(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// --- Group call (SFU) handlers ---
+
+func (s *Server) handleCallState(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.CallState()
+	if st == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
+	cs, err := s.engine.CreateCall()
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cs)
+}
+
+func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		TunnelIP string `json:"tunnel_ip"`
+		Name     string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.JoinCall(req.TunnelIP, req.Name); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.CallState())
+}
+
+// handleCallJoinRemote is exposed on the tunnel listener so a remote peer
+// can register itself as a call participant.
+func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("cannot determine caller IP"))
+		return
+	}
+	if err := s.engine.JoinCall(host, req.Name); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.CallState())
+}
+
+func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	s.engine.LeaveCall(st.LocalIP)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCallSignal receives WebRTC signals for the SFU. On the tunnel
+// listener the sender is a remote peer; on the loopback listener it's
+// the local browser (fromTunnelIP = our own local_ip).
+func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	from := ""
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+		from = host
+	}
+	if from == "" || from == "127.0.0.1" || from == "::1" {
+		from = s.engine.Status().LocalIP
+	}
+
+	resp, err := s.engine.HandleCallSignal(from, body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if resp != nil {
+		s.callSignals.broadcast(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCallSignalStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.callSignals.subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
 }
