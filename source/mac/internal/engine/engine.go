@@ -388,6 +388,8 @@ type Engine struct {
 	// call holds the active group call state (SFU + participants).
 	// nil when no call is in progress.
 	call atomic.Value // *callCtx
+	// remoteCall holds a call discovered on a remote peer via polling.
+	remoteCall atomic.Value // *CallState
 
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
@@ -791,6 +793,8 @@ func (e *Engine) Start(cfg Config) error {
 		go e.filesPollLoop(ctx)
 		e.workers.Add(1)
 		go e.peerFirewallPollLoop(ctx)
+		e.workers.Add(1)
+		go e.callPollLoop(ctx)
 	}
 	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
 	// — 5353 is contended on macOS by mDNSResponder and any running

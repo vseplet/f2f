@@ -1,9 +1,9 @@
 // meet2.js — group calls via embedded Pion SFU.
 //
 // One participant creates a call (their engine becomes the SFU host).
-// Others see the active call via polling /api/call/state and join.
-// Each browser holds a single RTCPeerConnection to the SFU.
-// SFU signals arrive via SSE /api/call/signal/stream.
+// Others discover the call via polling /api/call/state (engine polls
+// all peers' /api/call/state through the tunnel). Join sends the
+// request to the SFU host, and WebRTC signals go there too.
 
 (function () {
   const POLL_MS = 3000;
@@ -18,7 +18,6 @@
     const $btnLeave   = document.getElementById('m2-btn-leave');
     const $btnMic     = document.getElementById('m2-btn-mic');
     const $btnCam     = document.getElementById('m2-btn-cam');
-    const $btnShare   = document.getElementById('m2-btn-share');
     const $videoSelf  = document.getElementById('m2-video-self');
     const $labelSelf  = document.getElementById('m2-label-self');
     const $partList   = document.getElementById('m2-participant-list');
@@ -34,8 +33,8 @@
     let inCall = false;
     let myTunnelIP = '';
     let myName = '';
+    let sfuHost = '';  // tunnel_ip of the SFU host (empty = we are host)
     let logCount = 0;
-    let pollTimer = null;
     let pendingCandidates = [];
 
     function log(msg) {
@@ -80,6 +79,7 @@
     }
 
     async function pollCallState() {
+      if (inCall) return;
       try {
         const cs = await fetchJSON('/api/call/state');
         updateCallUI(cs);
@@ -93,14 +93,20 @@
         $status.innerHTML = '<span class="text-zinc-500">no active call</span>';
         $btnCreate.style.display = '';
         $btnJoin.style.display = 'none';
+        sfuHost = '';
         if (!inCall) {
           $controls.style.display = 'none';
           $partList.textContent = '—';
         }
         return;
       }
+      sfuHost = cs.sfu_host || '';
       if (!inCall) {
-        $status.innerHTML = '<span class="text-emerald-400">call active</span> — host: ' + cs.sfu_host;
+        var hostLabel = cs.sfu_host;
+        if (cs.sfu_host === myTunnelIP) {
+          hostLabel = 'you';
+        }
+        $status.innerHTML = '<span class="text-emerald-400">call active</span> — host: ' + hostLabel;
         $btnCreate.style.display = 'none';
         $btnJoin.style.display = '';
       }
@@ -120,7 +126,7 @@
     // --- WebRTC ---
 
     function createPC() {
-      const conn = new RTCPeerConnection({ iceServers: [] });
+      var conn = new RTCPeerConnection({ iceServers: [] });
 
       conn.onicecandidate = function (e) {
         if (e.candidate) {
@@ -144,9 +150,9 @@
 
       conn.onnegotiationneeded = async function () {
         try {
-          const offer = await conn.createOffer();
+          var offer = await conn.createOffer();
           await conn.setLocalDescription(offer);
-          const resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
+          var resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
           if (resp && resp.kind === 'answer') {
             await conn.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
           }
@@ -158,9 +164,13 @@
       return conn;
     }
 
+    // sendSignal delivers a WebRTC signal to the SFU.
+    // If we are the SFU host, it goes to our local /api/call/signal.
+    // If remote, it goes to the SFU host through the tunnel via our
+    // local proxy endpoint (which the Go server forwards).
     async function sendSignal(msg) {
       try {
-        const r = await fetch('/api/call/signal', {
+        var r = await fetch('/api/call/signal', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(msg),
@@ -202,11 +212,11 @@
       if (!pc) return;
       if (msg.kind === 'offer' && msg.from === 'sfu') {
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-        const answer = await pc.createAnswer();
+        var answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal({ kind: 'answer', sdp: answer.sdp });
-        for (const c of pendingCandidates) {
-          await pc.addIceCandidate(c);
+        for (var i = 0; i < pendingCandidates.length; i++) {
+          await pc.addIceCandidate(pendingCandidates[i]);
         }
         pendingCandidates = [];
       } else if (msg.kind === 'answer' && msg.from === 'sfu') {
@@ -250,18 +260,18 @@
     }
 
     // --- remote video tiles ---
-    const remoteTiles = {};
+    var remoteTiles = {};
 
     function addRemoteStream(stream) {
       if (remoteTiles[stream.id]) return;
-      const tile = document.createElement('div');
+      var tile = document.createElement('div');
       tile.className = 'm2-tile';
       tile.id = 'm2-tile-' + stream.id;
-      const video = document.createElement('video');
+      var video = document.createElement('video');
       video.autoplay = true;
       video.playsInline = true;
       video.srcObject = stream;
-      const label = document.createElement('div');
+      var label = document.createElement('div');
       label.className = 'm2-tile-label';
       label.textContent = 'peer';
       tile.appendChild(video);
@@ -277,7 +287,7 @@
     }
 
     function removeRemoteStream(streamId) {
-      const tile = remoteTiles[streamId];
+      var tile = remoteTiles[streamId];
       if (tile) {
         tile.remove();
         delete remoteTiles[streamId];
@@ -285,7 +295,7 @@
     }
 
     function clearRemoteTiles() {
-      for (const id of Object.keys(remoteTiles)) {
+      for (var id in remoteTiles) {
         remoteTiles[id].remove();
         delete remoteTiles[id];
       }
@@ -296,8 +306,9 @@
     async function createCall() {
       log('creating call...');
       try {
-        const cs = await fetchJSON('/api/call/create', { method: 'POST' });
+        var cs = await fetchJSON('/api/call/create', { method: 'POST' });
         log('call created: ' + cs.call_id);
+        sfuHost = myTunnelIP;
         await joinSFU();
       } catch (e) {
         log('create failed: ' + e.message);
@@ -305,12 +316,19 @@
     }
 
     async function joinCall() {
-      log('joining call...');
+      if (!sfuHost) {
+        log('no sfu host known');
+        return;
+      }
+      log('joining call on ' + sfuHost + '...');
       try {
+        // Register ourselves as a participant on the SFU host.
+        // This goes through our local server which proxies to the
+        // SFU host's tunnel listener.
         await fetchJSON('/api/call/join', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tunnel_ip: myTunnelIP, name: myName }),
+          body: JSON.stringify({ tunnel_ip: myTunnelIP, name: myName, sfu_host: sfuHost }),
         });
         await joinSFU();
       } catch (e) {
@@ -322,8 +340,9 @@
       await acquireMedia();
       pc = createPC();
       if (localStream) {
-        for (const track of localStream.getTracks()) {
-          pc.addTrack(track, localStream);
+        var tracks = localStream.getTracks();
+        for (var i = 0; i < tracks.length; i++) {
+          pc.addTrack(tracks[i], localStream);
         }
       }
       startSignalStream();
@@ -352,6 +371,7 @@
       $btnLeave.style.display = 'none';
       $actions.style.display = '';
       pendingCandidates = [];
+      sfuHost = '';
       try {
         await fetchJSON('/api/call/leave', { method: 'POST' });
       } catch (e) { /* ignore */ }
@@ -382,7 +402,7 @@
 
     getStatus().then(function () {
       pollCallState();
-      pollTimer = setInterval(pollCallState, POLL_MS);
+      setInterval(pollCallState, POLL_MS);
     });
   }
 

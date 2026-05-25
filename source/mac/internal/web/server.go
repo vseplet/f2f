@@ -112,7 +112,7 @@ func (s *Server) BindTunnel(ip string) error {
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
-	mux.HandleFunc("POST /api/call/signal", s.handleCallSignal)
+	mux.HandleFunc("POST /api/call/signal", s.handleCallSignalInbound)
 	mux.HandleFunc("GET /api/call/state", s.handleCallState)
 	mux.HandleFunc("POST /api/call/join", s.handleCallJoinRemote)
 	srv := &http.Server{
@@ -1332,16 +1332,45 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TunnelIP string `json:"tunnel_ip"`
 		Name     string `json:"name"`
+		SFUHost  string `json:"sfu_host"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+
+	st := s.engine.Status()
+	// If the SFU host is remote, proxy the join request through the tunnel.
+	if req.SFUHost != "" && req.SFUHost != st.LocalIP {
+		s.proxyCallJoinToHost(w, req.SFUHost, req.Name)
+		return
+	}
+
 	if err := s.engine.JoinCall(req.TunnelIP, req.Name); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.engine.CallState())
+}
+
+func (s *Server) proxyCallJoinToHost(w http.ResponseWriter, sfuHost, name string) {
+	_, port, _ := net.SplitHostPort(s.addr)
+	if port == "" {
+		port = "2202"
+	}
+	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/join"
+	body, _ := json.Marshal(map[string]string{"name": name})
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy join to %s: %w", sfuHost, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
 }
 
 // handleCallJoinRemote is exposed on the tunnel listener so a remote peer
@@ -1379,7 +1408,8 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 
 // handleCallSignal receives WebRTC signals for the SFU. On the tunnel
 // listener the sender is a remote peer; on the loopback listener it's
-// the local browser (fromTunnelIP = our own local_ip).
+// the local browser. If the SFU is remote, the loopback handler proxies
+// the signal to the SFU host through the tunnel.
 func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -1391,8 +1421,18 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
 		from = host
 	}
-	if from == "" || from == "127.0.0.1" || from == "::1" {
-		from = s.engine.Status().LocalIP
+	isLocal := from == "" || from == "127.0.0.1" || from == "::1"
+
+	// If browser is sending a signal and the SFU is on a remote peer,
+	// proxy the request there.
+	if isLocal {
+		cs := s.engine.CallState()
+		st := s.engine.Status()
+		if cs != nil && cs.Remote && cs.SFUHost != st.LocalIP {
+			s.proxyCallSignalToHost(w, cs.SFUHost, body)
+			return
+		}
+		from = st.LocalIP
 	}
 
 	resp, err := s.engine.HandleCallSignal(from, body)
@@ -1407,6 +1447,72 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 		w.Write(resp)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, body []byte) {
+	_, port, _ := net.SplitHostPort(s.addr)
+	if port == "" {
+		port = "2202"
+	}
+	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/signal"
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy signal to %s: %w", sfuHost, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Broadcast the SFU's response to local browser SSE subscribers so
+	// the local browser receives answers and candidates.
+	if resp.StatusCode == http.StatusOK && len(respBody) > 0 {
+		s.callSignals.broadcast(respBody)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
+// handleCallSignalInbound is registered on the tunnel listener. It serves
+// two roles depending on who we are:
+//
+//  1. We are the SFU host: a remote peer sends offer/answer/candidate → dispatch to SFU engine.
+//  2. We are NOT the SFU host: the SFU host sends us an offer/candidate → broadcast to local browser via SSE.
+func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	from := ""
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+		from = host
+	}
+
+	// If we have a local SFU running, dispatch to it.
+	if s.engine.CallSFU() != nil {
+		resp, err := s.engine.HandleCallSignal(from, body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if resp != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// No local SFU — this is the SFU host pushing a signal to us.
+	// Broadcast to local browser SSE so it can process the offer/candidate.
+	s.callSignals.broadcast(body)
 	w.WriteHeader(http.StatusNoContent)
 }
 
