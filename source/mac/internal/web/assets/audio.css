@@ -791,19 +791,22 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
 }
 
 .m2-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .m2-tile {
   position: relative;
-  background: #121110;
-  border: 1px solid #2a251c;
+  background: #1c1915;
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0, transparent 8px,
+    rgba(255,255,255,0.02) 8px, rgba(255,255,255,0.02) 9px);
   border-radius: 4px;
   overflow: hidden;
-  aspect-ratio: 16 / 9;
+  width: 240px;
+  height: 180px;
 }
 
 .m2-tile video {
@@ -849,7 +852,7 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #0e0d0c;
+  background-color: #151a1d;
 }
 
 .m2-no-video {
