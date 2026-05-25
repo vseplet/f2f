@@ -116,7 +116,7 @@
           hostLabel + (parts ? ' — ' + parts : '');
       }
       renderParticipants(cs.participants || []);
-      syncParticipantTiles(cs.participants || []);
+      syncPeerTiles(cs.participants || []);
     }
 
     function renderParticipants(list) {
@@ -277,26 +277,40 @@
       $btnCam.querySelector('.ax-btn-state').textContent = camEnabled ? '■' : '□';
     }
 
-    // --- remote video tiles ---
-    var remoteTiles = {};      // streamId → tile element (has video)
-    var placeholderTiles = {}; // tunnelIP → tile element (no video)
+    // --- remote tiles ---
+    var remoteTiles = {};      // streamId → {tile, peerIP}
+    var peerTiles = {};        // tunnelIP → tile element (placeholder or video)
+    var peersWithVideo = {};   // tunnelIP → true if we have a video stream
 
     function addRemoteStream(stream) {
       if (remoteTiles[stream.id]) return;
+      // SFU stream ID format: "tunnelIP-originalStreamID"
+      var peerIP = extractPeerIP(stream.id);
+
       var tile = document.createElement('div');
       tile.className = 'm2-tile';
-      tile.id = 'm2-tile-' + stream.id;
       var video = document.createElement('video');
       video.autoplay = true;
       video.playsInline = true;
       video.srcObject = stream;
       var label = document.createElement('div');
       label.className = 'm2-tile-label';
-      label.textContent = 'peer';
+      label.textContent = peerIP;
       tile.appendChild(video);
       tile.appendChild(label);
-      $grid.appendChild(tile);
-      remoteTiles[stream.id] = tile;
+
+      // Replace placeholder if one exists for this peer
+      if (peerIP && peerTiles[peerIP]) {
+        peerTiles[peerIP].replaceWith(tile);
+      } else {
+        $grid.appendChild(tile);
+      }
+      if (peerIP) {
+        peerTiles[peerIP] = tile;
+        peersWithVideo[peerIP] = true;
+      }
+      remoteTiles[stream.id] = { tile: tile, peerIP: peerIP };
+      log('video tile for ' + peerIP);
 
       stream.onremovetrack = function () {
         if (stream.getTracks().length === 0) {
@@ -305,56 +319,75 @@
       };
     }
 
+    function extractPeerIP(streamId) {
+      // "100.80.47.142-xxxxx" → "100.80.47.142"
+      var m = streamId.match(/^(\d+\.\d+\.\d+\.\d+)-/);
+      return m ? m[1] : '';
+    }
+
     function removeRemoteStream(streamId) {
-      var tile = remoteTiles[streamId];
-      if (tile) {
-        tile.remove();
+      var entry = remoteTiles[streamId];
+      if (entry) {
+        entry.tile.remove();
+        if (entry.peerIP) {
+          delete peerTiles[entry.peerIP];
+          delete peersWithVideo[entry.peerIP];
+        }
         delete remoteTiles[streamId];
       }
     }
 
-    // Ensure every participant (except self) has at least a placeholder tile.
-    function syncParticipantTiles(participants) {
+    // Called from pollCallState — ensure every remote participant has a tile.
+    function syncPeerTiles(participants) {
       if (!inCall || !participants) return;
       var activeIPs = {};
       for (var i = 0; i < participants.length; i++) {
         var p = participants[i];
         if (p.tunnel_ip === myTunnelIP) continue;
         activeIPs[p.tunnel_ip] = p.name;
-        if (!placeholderTiles[p.tunnel_ip]) {
-          var tile = document.createElement('div');
-          tile.className = 'm2-tile m2-tile-placeholder';
-          tile.id = 'm2-placeholder-' + p.tunnel_ip.replace(/\./g, '-');
-          var noVid = document.createElement('div');
-          noVid.className = 'm2-no-video';
-          noVid.textContent = p.name;
-          var label = document.createElement('div');
-          label.className = 'm2-tile-label';
-          label.textContent = p.name + ' @ ' + p.tunnel_ip;
-          tile.appendChild(noVid);
-          tile.appendChild(label);
-          $grid.appendChild(tile);
-          placeholderTiles[p.tunnel_ip] = tile;
+
+        // Already has a tile (video or placeholder)
+        if (peerTiles[p.tunnel_ip]) {
+          // Update label
+          var lbl = peerTiles[p.tunnel_ip].querySelector('.m2-tile-label');
+          if (lbl) lbl.textContent = p.name + ' @ ' + p.tunnel_ip;
+          continue;
         }
+
+        // Create placeholder
+        var tile = document.createElement('div');
+        tile.className = 'm2-tile m2-tile-placeholder';
+        var noVid = document.createElement('div');
+        noVid.className = 'm2-no-video';
+        noVid.textContent = p.name;
+        var label = document.createElement('div');
+        label.className = 'm2-tile-label';
+        label.textContent = p.name + ' @ ' + p.tunnel_ip;
+        tile.appendChild(noVid);
+        tile.appendChild(label);
+        $grid.appendChild(tile);
+        peerTiles[p.tunnel_ip] = tile;
       }
-      // Remove placeholders for peers that left.
-      for (var ip in placeholderTiles) {
+      // Remove tiles for peers that left
+      for (var ip in peerTiles) {
         if (!activeIPs[ip]) {
-          placeholderTiles[ip].remove();
-          delete placeholderTiles[ip];
+          peerTiles[ip].remove();
+          delete peerTiles[ip];
+          delete peersWithVideo[ip];
         }
       }
     }
 
     function clearRemoteTiles() {
       for (var id in remoteTiles) {
-        remoteTiles[id].remove();
+        remoteTiles[id].tile.remove();
         delete remoteTiles[id];
       }
-      for (var ip in placeholderTiles) {
-        placeholderTiles[ip].remove();
-        delete placeholderTiles[ip];
+      for (var ip in peerTiles) {
+        peerTiles[ip].remove();
+        delete peerTiles[ip];
       }
+      peersWithVideo = {};
     }
 
     // --- call actions ---

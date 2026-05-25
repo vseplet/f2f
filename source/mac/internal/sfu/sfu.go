@@ -266,6 +266,9 @@ func (s *SFU) handleCandidateInit(tunnelIP string, candidate *webrtc.ICECandidat
 }
 
 func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
+	log.Printf("sfu: OnTrack from %s: %s (codec=%s, stream=%s)",
+		sender.TunnelIP, remote.ID(), remote.Codec().MimeType, remote.StreamID())
+
 	local, err := webrtc.NewTrackLocalStaticRTP(
 		remote.Codec().RTPCodecCapability,
 		remote.ID(),
@@ -286,6 +289,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		if p.TunnelIP == sender.TunnelIP {
 			continue
 		}
+		log.Printf("sfu: forwarding track %s from %s → %s", remote.Codec().MimeType, sender.TunnelIP, p.TunnelIP)
 		if _, err := p.PC.AddTrack(local); err != nil {
 			log.Printf("sfu: add track to %s: %v", p.TunnelIP, err)
 			continue
@@ -315,6 +319,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 }
 
 func (s *SFU) renegotiate(p *Participant) {
+	log.Printf("sfu: renegotiating with %s", p.TunnelIP)
 	offer, err := p.PC.CreateOffer(nil)
 	if err != nil {
 		log.Printf("sfu: create offer for %s: %v", p.TunnelIP, err)
