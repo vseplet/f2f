@@ -40,15 +40,47 @@
     let pendingCandidates = [];
     let hasRemoteDesc = false;
 
-    function log(msg) {
+    function timestamp() {
+      return new Date().toLocaleTimeString('en-GB', { hour12: false });
+    }
+
+    function appendRow(row) {
       logCount++;
       $logCount.textContent = logCount;
-      const line = document.createElement('div');
-      line.className = 'ax-log-line';
-      const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      line.textContent = ts + ' ' + msg;
-      $logBody.appendChild(line);
+      $logBody.appendChild(row);
       $logBody.scrollTop = $logBody.scrollHeight;
+    }
+
+    function log(msg) {
+      var row = document.createElement('div');
+      row.className = 'ax-log-event';
+      var c1 = document.createElement('span');
+      c1.className = 'ax-log-time';
+      c1.textContent = timestamp();
+      var c2 = document.createElement('span');
+      c2.className = 'ax-log-icon event';
+      c2.textContent = '›';
+      var c3 = document.createElement('span');
+      c3.className = 'ax-log-msg';
+      c3.textContent = msg;
+      row.append(c1, c2, c3);
+      appendRow(row);
+    }
+
+    function logChat(who, text) {
+      var row = document.createElement('div');
+      row.className = 'ax-log-event is-chat' + (who === myName ? ' from-you' : '');
+      var c1 = document.createElement('span');
+      c1.className = 'ax-log-time';
+      c1.textContent = timestamp();
+      var c2 = document.createElement('span');
+      c2.className = 'ax-log-icon';
+      c2.textContent = '<' + who + '>';
+      var c3 = document.createElement('span');
+      c3.className = 'ax-log-msg';
+      c3.textContent = text;
+      row.append(c1, c2, c3);
+      appendRow(row);
     }
 
     $logClear.addEventListener('click', function () {
@@ -56,17 +88,6 @@
       logCount = 0;
       $logCount.textContent = '0';
     });
-
-    function logChat(who, text) {
-      logCount++;
-      $logCount.textContent = logCount;
-      var line = document.createElement('div');
-      line.className = 'ax-log-event is-chat' + (who === myName ? ' from-you' : '');
-      var ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      line.textContent = ts + ' ' + who + ': ' + text;
-      $logBody.appendChild(line);
-      $logBody.scrollTop = $logBody.scrollHeight;
-    }
 
     function attachDataChannel(channel) {
       dataChannel = channel;
