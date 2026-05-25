@@ -872,7 +872,7 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
   flex: 0 0 auto;
 }
 .m2-topbar .ax-select { width: 200px; }
-.m2-topbar .ax-btn { padding-top: 6px; padding-bottom: 6px; }
+.m2-topbar .ax-btn { padding-top: 6px; padding-bottom: 6px; margin-left: auto; }
 
 #tab-meet2 .m2-body {
   display: flex;
@@ -900,12 +900,10 @@ a.ax-domain-link:hover { text-decoration: underline; color: #a0d28a; }
 .m2-right {
   flex: 1;
   min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+  height: 100%;
 }
 .m2-right .m2-log {
-  flex: 1;
+  height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
