@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -302,6 +304,26 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		s.renegotiate(p)
 	}
 
+	// Periodically request keyframes from the publisher so subscribers
+	// can start decoding quickly and recover from packet loss.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_ = sender.PC.WriteRTCP([]rtcp.Packet{
+					&rtcp.PictureLossIndication{
+						MediaSSRC: uint32(remote.SSRC()),
+					},
+				})
+			}
+		}
+	}()
+
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := remote.Read(buf)
@@ -312,6 +334,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 			break
 		}
 	}
+	close(done)
 
 	sender.mu.Lock()
 	delete(sender.tracks, remote.ID())
