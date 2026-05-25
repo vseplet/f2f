@@ -14,7 +14,6 @@
     const $controls   = document.getElementById('m2-controls');
     const $actions    = document.getElementById('m2-actions');
     const $btnCreate  = document.getElementById('m2-btn-create');
-    const $btnJoin    = document.getElementById('m2-btn-join');
     const $btnLeave   = document.getElementById('m2-btn-leave');
     const $btnMic     = document.getElementById('m2-btn-mic');
     const $btnCam     = document.getElementById('m2-btn-cam');
@@ -161,7 +160,7 @@
         var parts = (myCall.participants || []).map(function (p) { return p.name; }).join(', ');
         $status.innerHTML = '<span class="text-emerald-400">in call</span>' + (parts ? ' — ' + parts : '');
         $btnCreate.style.display = 'none';
-        $btnJoin.style.display = 'none';
+
         syncPeerTiles(myCall.participants || []);
         return;
       }
@@ -178,7 +177,7 @@
 
       if (!calls.length) {
         $status.innerHTML = '<span class="text-zinc-500">no active calls in camp</span>';
-        $btnJoin.style.display = 'none';
+
         $partList.textContent = '—';
         return;
       }
@@ -573,7 +572,6 @@
     // --- button handlers ---
 
     $btnCreate.addEventListener('click', createCall);
-    $btnJoin.addEventListener('click', joinCall);
     $btnLeave.addEventListener('click', leaveCall);
 
     $btnMic.addEventListener('click', function () {
