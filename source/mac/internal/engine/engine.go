@@ -2509,6 +2509,12 @@ func (e *Engine) Stop() error {
 	e.intercepts = map[string]*InterceptInfo{}
 	e.camp = nil
 	e.identity = nil
+	if cc := e.loadCall(); cc != nil {
+		cc.sfu.Close()
+		e.clearCall()
+	}
+	e.ClearJoinedSFUHost()
+	e.storeRemoteCalls(nil)
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
