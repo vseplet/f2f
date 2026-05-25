@@ -109,12 +109,11 @@ func New(opts Options) (*Client, error) {
 	cfg.NoDHT = true
 	cfg.DisableTrackers = true
 	cfg.DisablePEX = true
-	cfg.DisableIPv6 = true // utun is v4-only; v6 bind on tunnel_ip fails
+	cfg.DisableIPv6 = true
 	cfg.NoUpload = false
 	cfg.Seed = true
 	cfg.DefaultStorage = storage.NewFile(opts.DownloadsDir)
 
-	// Parse listen addr into host + port for anacrolix's separate fields.
 	host, port, err := splitHostPort(opts.ListenAddr)
 	if err != nil {
 		return nil, err

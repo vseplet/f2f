@@ -100,7 +100,7 @@ export async function startUDP(port: number, hub: Hub) {
         }
         if (wasNew) {
           console.log(
-            `join: ${name}@${campID} ${info.tunnel_ip} pub=${pub.slice(0, 16)} from ${srcAddr}:${srcPort}`,
+            `join: ${name}@${campID} pub=${pub.slice(0, 16)} from ${srcAddr}:${srcPort}`,
           );
         }
 

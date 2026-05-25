@@ -30,6 +30,8 @@ import (
 
 	"github.com/vseplet/f2f/source/mac/internal/config"
 	"github.com/vseplet/f2f/source/mac/internal/engine"
+	"github.com/vseplet/f2f/source/mac/internal/identity"
+	"github.com/vseplet/f2f/source/mac/internal/overlay"
 )
 
 //go:embed assets
@@ -47,9 +49,8 @@ type Server struct {
 	srv    *http.Server
 
 	mu        sync.Mutex
-	tunnelSrv *http.Server   // signaling/domain listener on <tunnel_ip>:<port>
-	proxySrvs []*http.Server // HTTP-only reverse proxies on :80
-	                         // (tunnel_ip and 127.0.0.1)
+	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
+	proxySrvs []*http.Server // HTTP/HTTPS reverse proxies on :80/:443
 
 	signals    *signalHub
 	signalHTTP *http.Client
@@ -93,28 +94,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
-// The mux it serves is intentionally tiny — only POST /api/signal/inbox.
-// Everything else 404s, so a LAN attacker who somehow reaches the tunnel
-// listener can't drive Start/Stop or read state. Safe to call multiple
-// times; subsequent calls with a different IP rebind.
 func (s *Server) BindTunnel(ip string) error {
 	if ip == "" {
 		return nil
 	}
+	_ = s.UnbindTunnel()
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
 	}
 	addr := net.JoinHostPort(ip, port)
-
-	s.mu.Lock()
-	if s.tunnelSrv != nil && s.tunnelSrv.Addr == addr {
-		s.mu.Unlock()
-		return nil // already bound there
-	}
-	s.mu.Unlock()
-	_ = s.UnbindTunnel()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
@@ -138,8 +127,7 @@ func (s *Server) BindTunnel(ip string) error {
 	return nil
 }
 
-// UnbindTunnel stops the tunnel-side listener if it's running. No-op if
-// nothing was bound.
+// UnbindTunnel stops the tunnel-side listener.
 func (s *Server) UnbindTunnel() error {
 	s.mu.Lock()
 	srv := s.tunnelSrv
@@ -167,7 +155,6 @@ func (s *Server) UnbindTunnel() error {
 // explicit ports.
 func (s *Server) BindProxies(tunnelIP string) error {
 	_ = s.UnbindProxies()
-	// HTTP listeners: 127.0.0.1:80 (self traffic) + tunnel_ip:80 (peer traffic).
 	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
 	if tunnelIP != "" {
 		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
@@ -175,7 +162,6 @@ func (s *Server) BindProxies(tunnelIP string) error {
 	for _, a := range httpAddrs {
 		s.startProxyListener(a, nil)
 	}
-	// HTTPS listeners — same set of addresses, but only if a CA is up.
 	if ca := s.engine.CA(); ca != nil {
 		tlsCfg := &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -262,7 +248,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
 		return
 	}
-	suffix := "." + campID + ".f2f"
+	zone := identity.CampLabel(campID)
+	suffix := "." + zone + ".f2f"
 
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
@@ -335,6 +322,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
 	mux.HandleFunc("DELETE /api/peer-domains/{peer}/{name}", s.handleRemovePeerDomain)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/my-ca", s.handleMyCA)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
 
@@ -438,19 +426,30 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := s.engine.Status()
-	if !st.Running || st.PeerIP == "" {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running or peer IP unknown"))
+	if !st.Running {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running"))
 		return
 	}
-	// Strip mDNS masking from any host candidates before forwarding, so the
-	// peer's WebRTC stack sees our real tunnel IP and can actually pair.
+	// Find the active peer's pub-derived v4 and forward the signal there.
+	var peerIP string
+	for _, p := range st.Peers {
+		if !p.Self && p.Pub != "" && p.Pub == st.ActivePeerPub {
+			if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
+				peerIP = a.String()
+			}
+		}
+	}
+	if peerIP == "" {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no active peer (set one in /api/peers/active)"))
+		return
+	}
 	body = rewriteMDNS(body, st.LocalIP)
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
 		return
 	}
-	url := "http://" + net.JoinHostPort(st.PeerIP, port) + "/api/signal/inbox"
+	url := "http://" + net.JoinHostPort(peerIP, port) + "/api/signal/inbox"
 	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -482,13 +481,19 @@ func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// Auto-select active peer by matching the caller's v4 overlay
+	// address (pub-derived, unique per peer) to a known peer.
 	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
 		st := s.engine.Status()
-		if st.Running && host != st.ActivePeerTunnelIP {
-			if err := s.engine.SetActivePeer(host); err != nil {
-				// Not fatal — could just be a peer we haven't seen yet
-				// in the camp roster. The signal still gets broadcast.
-				_ = err
+		if st.Running {
+			for _, p := range st.Peers {
+				if p.Self || p.Pub == "" {
+					continue
+				}
+				if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a.String() == host && p.Pub != st.ActivePeerPub {
+					_ = s.engine.SetActivePeer(p.Pub)
+					break
+				}
 			}
 		}
 	}
@@ -586,8 +591,8 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		id := "peer:" + p.Name
 		peerIDByName[p.Name] = id
 		label := p.Name
-		if p.TunnelIP != "" {
-			label += " · " + p.TunnelIP
+		if p.OverlayV4 != "" {
+			label += " · " + p.OverlayV4
 		}
 		t.Nodes = append(t.Nodes, topologyNode{ID: id, Label: label, Kind: "peer", Online: p.Online})
 		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})
@@ -626,7 +631,7 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 		"running": true,
 		"you":     st.CampName,
 		"camp_id": st.CampID,
-		"active":  st.ActivePeerTunnelIP,
+		"active":  st.ActivePeerPub,
 		"peers":   st.Peers,
 	})
 }
@@ -705,6 +710,18 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	_, _ = w.Write(ca.CertPEM)
+}
+
+func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
+	ca := s.engine.CA()
+	if ca == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"common_name": ca.CommonName(),
+		"fingerprint": ca.Fingerprint(),
+	})
 }
 
 // handleTrustedPeers returns the UI's view of which peer CAs we've
@@ -1094,8 +1111,9 @@ func isLoopback(remoteAddr string) bool {
 }
 
 type startRequest struct {
-	CampName string `json:"camp_name,omitempty"`
-	CampID   string `json:"camp_id"`
+	CampName  string `json:"camp_name,omitempty"`
+	CampID    string `json:"camp_id"`
+	CampLabel string `json:"camp_label,omitempty"`
 }
 
 // handleStart accepts only camp identity from the UI now; everything else
@@ -1115,12 +1133,18 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.CampID == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id is required"))
+	// Two flows in one endpoint:
+	//   - join/resume: req.CampID populated (a known camp on disk or a
+	//     full <pub>_<label> id pasted from an invite).
+	//   - create: req.CampID empty, req.CampLabel populated → engine
+	//     generates identity and derives ID = <pub>_<label>.
+	// req.CampName is the user's nickname inside the camp either way.
+	if req.CampID == "" && req.CampLabel == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id or camp_label is required"))
 		return
 	}
 	if cur := s.engine.Status(); cur.Running {
-		if cur.CampID == req.CampID {
+		if req.CampID != "" && cur.CampID == req.CampID {
 			writeJSON(w, http.StatusOK, cur)
 			return
 		}
@@ -1130,13 +1154,13 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name := req.CampName
-	if name == "" {
+	if name == "" && req.CampID != "" {
 		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
 			name = existing.Identity.Name
 		}
 	}
 	if name == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required for new camp %s", req.CampID))
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required"))
 		return
 	}
 	cfg := engine.Config{
@@ -1147,6 +1171,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			StunAddr: "f2f-camp.fly.dev:3478",
 			Name:     name,
 			ID:       req.CampID,
+			Label:    req.CampLabel,
 		},
 	}
 	if err := s.engine.Start(cfg); err != nil {
@@ -1193,17 +1218,17 @@ func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSetActivePeer sets the user-selected active peer (catch-all
-// tunnel destination and meet signalling target). Body: {tunnel_ip}.
-// Empty string clears.
+// tunnel destination and meet signalling target). Body: {pub}. Empty
+// string clears.
 func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TunnelIP string `json:"tunnel_ip"`
+		Pub string `json:"pub"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.engine.SetActivePeer(req.TunnelIP); err != nil {
+	if err := s.engine.SetActivePeer(req.Pub); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

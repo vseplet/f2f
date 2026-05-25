@@ -128,8 +128,13 @@ $(function () {
     $sel.empty();
     $sel.append($('<option>').val('').text('— pick a camp —'));
     knownCamps.forEach((c) => {
-      const label = c.name ? `${c.id} (${c.name})` : c.id;
-      $sel.append($('<option>').val(c.id).text(label));
+      // Display: <camp_label> · fp <8hex> (<nickname>) — keeps the
+      // dropdown readable even when c.id is a 64-hex-prefixed string.
+      const label = campLabelFromID(c.id);
+      const fp = campShortFP(c.id);
+      const fpPart = fp ? ` · fp ${fp}` : '';
+      const namePart = c.name ? ` (${c.name})` : '';
+      $sel.append($('<option>').val(c.id).text(`${label}${fpPart}${namePart}`));
     });
     $sel.append($('<option>').val('__new__').text('+ new camp'));
     if (cur) $sel.val(cur);
@@ -154,7 +159,7 @@ $(function () {
     const id = ($('#camp-id').val() || '').trim();
     const name = ($('#camp-name').val() || '').trim();
     if (!id || !name) {
-      alert('camp_id and name are required for a new camp');
+      alert('camp and name are required');
       return;
     }
     triggerStart();
@@ -183,6 +188,16 @@ $(function () {
       setTimeout(() => $el.css('color', prev), 500);
     }).catch(() => {});
   });
+  $('#identity-camp-id').on('click', function () {
+    const $el = $(this);
+    const id = $el.data('camp-id');
+    if (!id) return;
+    navigator.clipboard.writeText(id).then(() => {
+      const prev = $el.css('color');
+      $el.css('color', '#7fc474');
+      setTimeout(() => $el.css('color', prev), 500);
+    }).catch(() => {});
+  });
 
   // Auto-start fires once after the first /api/status response that says
   // the engine is stopped *and* we have a camp identity stored. After
@@ -206,9 +221,35 @@ $(function () {
   // now only filled on the "+ new camp" path, so we can't read it
   // there anymore. Falls back to the picker value if status hasn't
   // arrived yet (page-load → first refreshStatus is a brief window).
+  // campLabelFromID mirrors identity.CampLabel in Go: new-format camp_ids
+  // look like "<64-hex-pub>_<label>", legacy ones are free-form. Split
+  // only when the prefix is exactly 64 hex chars; otherwise return the
+  // whole id as the label.
+  function campLabelFromID(id) {
+    if (!id) return '';
+    if (id.length > 65 && id[64] === '_' && /^[0-9a-f]{64}$/i.test(id.slice(0, 64))) {
+      return id.slice(65);
+    }
+    return id;
+  }
+  // campShortFP extracts the first 8 hex of pub from a new-format camp_id
+  // for UI disambiguation. Empty for legacy camps.
+  function campShortFP(id) {
+    if (!id || id.length <= 65 || id[64] !== '_') return '';
+    if (!/^[0-9a-f]{64}$/i.test(id.slice(0, 64))) return '';
+    return id.slice(0, 8);
+  }
   let currentCampID = '';
+  let currentCampLabel = '';
   function campIDOrPlaceholder() {
     return currentCampID || ($('#camp-picker').val() || '').trim().replace(/^__new__$/, '') || '<camp_id>';
+  }
+  // campLabelOrPlaceholder picks the DNS-zone-safe label (post-CampLabel
+  // split server-side). Falls back to the same picker value as the id
+  // placeholder when status hasn't arrived yet — for the legacy case
+  // (no '_'), id and label are identical, so the placeholder is fine.
+  function campLabelOrPlaceholder() {
+    return currentCampLabel || campIDOrPlaceholder();
   }
 
   function applyStatus(s) {
@@ -217,11 +258,12 @@ $(function () {
     } else if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';
+      currentCampLabel = s.camp_label || s.camp_id || '';
       // Running: collapse the picker and form into a key:value readout.
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
       $('#identity-name').text(s.camp_name || '?');
-      $('#identity-camp').text(s.camp_id || '?');
+      $('#identity-camp-id').text(s.camp_id || '').data('camp-id', s.camp_id || '');
       $('#identity-ip').text(s.local_ip || '—');
       $('#identity-reflex').text(s.camp_reflex || '—');
       const pub = s.identity_pub || '';
@@ -246,7 +288,7 @@ $(function () {
     liveIntercepts = s.intercepts || [];
     livePeers = s.peers || [];
     refreshInterceptPeerSelect();
-    refreshCallPeerSelect(s.active_peer_tunnel_ip || '');
+    refreshCallPeerSelect(s.active_peer_pub || '');
     renderIntercepts();
 
     $('#tx-packets').text(s.tx_packets || 0);
@@ -526,30 +568,46 @@ $(function () {
   }
 
   function triggerStart() {
-    // Source of truth is the picker. Two paths:
+    // Source of truth is the picker. Three paths:
     //   - picker = known camp id → use it directly, name from
     //     knownCamps entry (camp config on disk already has the name).
-    //   - picker = "__new__" → user is creating a fresh camp, read
-    //     name + id from the join form below.
+    //   - picker = "__new__" → user is creating or joining via the
+    //     form below. The "camp" input takes either a full <pub>_<label>
+    //     id (join existing) or a short label (create fresh).
     //   - picker = "" → nothing selected, surface it.
     const pick = ($('#camp-picker').val() || '').trim();
-    let id = '';
-    let name = '';
+    const cfg = {};
+    let needName = false;
     if (pick && pick !== '__new__') {
-      id = pick;
+      cfg.camp_id = pick;
       const entry = knownCamps.find((c) => c.id === pick);
-      if (entry && entry.name) name = entry.name;
+      if (entry && entry.name) cfg.camp_name = entry.name;
     } else if (pick === '__new__') {
-      id = ($('#camp-id').val() || '').trim();
-      name = ($('#camp-name').val() || '').trim();
+      const raw = ($('#camp-id').val() || '').trim();
+      const name = ($('#camp-name').val() || '').trim();
+      if (!raw) {
+        $('#camp-id').trigger('focus');
+        return;
+      }
+      // Full <64hex>_<label> shape → join existing. Otherwise treat
+      // input as a label for a brand-new camp.
+      if (/^[0-9a-f]{64}_.+$/i.test(raw)) {
+        cfg.camp_id = raw;
+      } else {
+        cfg.camp_label = raw;
+      }
+      if (name) cfg.camp_name = name;
+      needName = true;
     }
-    if (!id) {
+    if (!cfg.camp_id && !cfg.camp_label) {
       $('#identity-picker').removeClass('hidden');
       $('#camp-picker').trigger('focus');
       return;
     }
-    const cfg = { camp_id: id };
-    if (name) cfg.camp_name = name;
+    if (needName && !cfg.camp_name) {
+      $('#camp-name').trigger('focus');
+      return;
+    }
     pendingOp = 'starting';
     setEngineState('loading', 'starting…', '');
     $.ajax({
@@ -713,7 +771,7 @@ $(function () {
       return;
     }
     const peers = Array.isArray(data.peers) ? data.peers : [];
-    $campIDMeta.text(data.camp_id || '');
+    $campIDMeta.text(campLabelFromID(data.camp_id || ''));
     const hasOthers = peers.some((p) => !p.self);
     if (!hasOthers) {
       $campStatus.text('waiting for someone to join').show();
@@ -754,7 +812,7 @@ $(function () {
       const $row = $('<tr>')
         .addClass(p.self ? 'is-self' : '')
         .addClass(!p.online && !p.self ? 'is-offline' : '')
-        .attr('data-tunnel-ip', p.tunnel_ip || '');
+        .attr('data-pub', p.pub || '');
       // Optional "in camp" badge next to the name — purely informational,
       // shown when camp sees the peer regardless of our local view.
       // Fingerprint pill renders the SHA-256(pub) prefix as the peer's
@@ -780,10 +838,14 @@ $(function () {
       }
       const $rtt = $('<td>').text(rttText).attr('title', rttTitle);
       if (!p.verified) $rtt.addClass('muted');
+      // overlay address cell: pub-derived per-camp v6. v4 is no longer
+      // a peer-identifying address (every mac uses the same localV4Alias
+      // on its own utun, so peer-to-peer addressing is v6 only).
+      const $tipCell = $('<td>').text(p.overlay_v4 || '—');
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
         $name,
-        $('<td>').text(p.tunnel_ip || '—'),
+        $tipCell,
         $('<td>').text(endpoint || '—'),
         $rtt,
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
@@ -799,12 +861,12 @@ $(function () {
   $('#ax-call-peer').on('change', function () {
     const name = $(this).val();
     const peer = livePeers.find((p) => !p.self && p.name === name);
-    const tunnelIP = peer ? peer.tunnel_ip : '';
+    const pub = peer ? (peer.pub || '') : '';
     $.ajax({
       url: '/api/peers/active',
       method: 'POST',
       contentType: 'application/json',
-      data: JSON.stringify({ tunnel_ip: tunnelIP }),
+      data: JSON.stringify({ pub }),
     })
       .done(refreshStatus)
       .fail((xhr) => alert('Set active failed: ' + errorOf(xhr)));
@@ -812,7 +874,7 @@ $(function () {
 
   // refreshCallPeerSelect mirrors live camp peers into the meet-tab
   // dropdown, preserving the currently-active selection.
-  function refreshCallPeerSelect(activeTunnelIP) {
+  function refreshCallPeerSelect(activePub) {
     const $sel = $('#ax-call-peer');
     const others = livePeers.filter((p) => !p.self);
     $sel.empty();
@@ -823,7 +885,7 @@ $(function () {
       else if (!p.reachable) label += ' (unreachable)';
       $sel.append($('<option>').val(p.name).text(label));
     });
-    const activePeer = others.find((p) => p.tunnel_ip === activeTunnelIP);
+    const activePeer = others.find((p) => p.pub && p.pub === activePub);
     $sel.val(activePeer ? activePeer.name : '');
   }
 
@@ -869,7 +931,7 @@ $(function () {
       return;
     }
     myDomains.forEach((d) => {
-      const fqdn = d.name + '.' + campIDOrPlaceholder() + '.f2f';
+      const fqdn = d.name + '.' + campLabelOrPlaceholder() + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
@@ -960,16 +1022,16 @@ $(function () {
     livePeers.forEach((p) => {
       if (p.self) return;
       const ds = Array.isArray(p.domains) ? p.domains : [];
-      ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.tunnel_ip, online: p.online !== false, ...d }));
+      ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.overlay_v4 || '', online: p.online !== false, ...d }));
     });
     $('#known-domains-meta').text(rows.length);
     if (rows.length === 0) {
       $list.append('<div class="ax-list-empty">no domains published by any peer yet.</div>');
       return;
     }
-    const campID = campIDOrPlaceholder();
+    const campLabel = campLabelOrPlaceholder();
     rows.forEach((r) => {
-      const fqdn = r.name + '.' + campID + '.f2f';
+      const fqdn = r.name + '.' + campLabel + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
@@ -1016,7 +1078,7 @@ $(function () {
       if (p.self) return;
       const ports = Array.isArray(p.firewall) ? p.firewall : [];
       ports.forEach((fp) => rows.push({
-        peer: p.name, peerTunnel: p.tunnel_ip, online: p.online !== false, ...fp,
+        peer: p.name, peerTunnel: p.overlay_v4 || '', online: p.online !== false, ...fp,
       }));
     });
     $('#peer-firewall-meta').text(rows.length);
@@ -1161,11 +1223,21 @@ $(function () {
     $('#firewall-desc-input').val('');
   });
 
-  // ---- trusted peer CAs (DNS tab, bottom section) ----
-  // One row per installed peer CA: peer name + fingerprint + age +
-  // two-click remove. Backend lists everything we've ever auto-installed
-  // via peerCAPollLoop; remove drops the PEM, keychain entry, and the
-  // record in <camp_id>.config.json.
+  // ---- my CA (DNS tab) ----
+  function refreshMyCA() {
+    $.getJSON('/api/my-ca', (data) => {
+      if (!data || !data.common_name) {
+        $('#my-ca-info').text('not running');
+        return;
+      }
+      $('#my-ca-info').html(
+        '<strong>' + $('<span>').text(data.common_name).html() + '</strong>' +
+        ' <span class="muted">fp ' + (data.fingerprint || '—') + '</span>'
+      );
+    }).fail(() => { $('#my-ca-info').text('—'); });
+  }
+
+  // ---- trusted peer CAs (DNS tab) ----
   function refreshTrustedPeers() {
     $.getJSON('/api/trusted-peers', (list) => {
       const rows = Array.isArray(list) ? list : [];
@@ -1182,7 +1254,10 @@ $(function () {
         const $head = $('<div class="ax-intercept-head" style="cursor:default">');
         $head.append($('<span class="ax-intercept-caret">').text(' '));
         $head.append($('<span class="ax-intercept-spec">').text(r.peer_name || '?'));
-        $head.append($('<span class="ax-pill ax-pill-peer">').text(r.fingerprint || ''));
+        if (r.common_name) {
+          $head.append($('<span class="ax-pill ax-pill-peer">').text(r.common_name));
+        }
+        $head.append($('<span class="ax-pill ax-pill-fp">').text(r.fingerprint || ''));
         const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '—';
         $head.append($('<span class="ax-intercept-meta">').text('installed ' + when));
         const $rm = $('<button class="ax-list-remove">');
@@ -1280,7 +1355,7 @@ $(function () {
     const rows = [];
     others.forEach((p) => {
       const files = Array.isArray(p.files) ? p.files : [];
-      files.forEach((f) => rows.push({ peer: p.name, peerTunnel: p.tunnel_ip, ...f }));
+      files.forEach((f) => rows.push({ peer: p.name, peerTunnel: p.overlay_v4 || '', ...f }));
     });
     $('#drop-lib-meta').text(rows.length);
     const $list = $('#drop-lib-list');
@@ -1314,7 +1389,10 @@ $(function () {
       } else {
         const $dl = $('<button class="ax-list-remove" style="color:#86b86b">download</button>');
         $dl.on('click', () => {
-          // peer addr: <peer_tunnel_ip>:6881 — BT client listens there.
+          // BT peer endpoint: prefer overlay v6 ([fd…]:6881), fall back
+          // to legacy v4 if the peer hasn't announced a pub yet. The
+          // local BT client listens on v6 (per camp utun alias) and on
+          // v4 (legacy tunnel_ip), so either form lands on the peer.
           const peerAddr = r.peerTunnel + ':6881';
           $.ajax({
             url: '/api/files/download',
@@ -1440,6 +1518,7 @@ $(function () {
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();
+  refreshMyCA();
   refreshTrustedPeers();
   refreshMyFiles();
   refreshDownloads();
@@ -1447,6 +1526,7 @@ $(function () {
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
+  setInterval(refreshMyCA, 5000);
   setInterval(refreshTrustedPeers, 5000);
   setInterval(refreshMyFiles, 5000);
   setInterval(refreshDownloads, 2000);

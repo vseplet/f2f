@@ -46,7 +46,42 @@ func LoadOrGenerate(dir string) (*Identity, error) {
 	if !os.IsNotExist(err) {
 		return nil, err
 	}
-	return generate(dir)
+	id, err = Generate()
+	if err != nil {
+		return nil, err
+	}
+	if err := id.Save(dir); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+// Generate returns a fresh keypair in memory, not persisted yet. Used
+// when the caller needs the pub *before* deciding where to save the
+// identity — e.g. when the camp_id is being constructed from the pub.
+// Save() commits to disk afterwards.
+func Generate() (*Identity, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("identity: generate: %w", err)
+	}
+	return &Identity{priv: priv, pub: pub}, nil
+}
+
+// Save writes the keypair to dir (priv.key 0600, pub.key 0644) and
+// remembers dir for Dir(). Idempotent: overwrites if files exist.
+func (i *Identity) Save(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "priv.key"), i.priv, 0o600); err != nil {
+		return fmt.Errorf("identity: write priv: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pub.key"), i.pub, 0o644); err != nil {
+		return fmt.Errorf("identity: write pub: %w", err)
+	}
+	i.dir = dir
+	return nil
 }
 
 func load(dir string) (*Identity, error) {
@@ -69,18 +104,29 @@ func load(dir string) (*Identity, error) {
 	return &Identity{dir: dir, priv: ed25519.PrivateKey(priv), pub: ed25519.PublicKey(pub)}, nil
 }
 
-func generate(dir string) (*Identity, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("identity: generate: %w", err)
+// CampLabel returns the human-friendly suffix of a camp_id. New-format
+// camp_ids look like "<64-hex-pub>_<label>"; legacy ones are free-form
+// strings without that structure. We split on the underscore only when
+// the prefix is exactly 64 hex chars — otherwise the whole id is the
+// label (covers legacy camps like "12345").
+func CampLabel(campID string) string {
+	if len(campID) > 65 && campID[64] == '_' && isHex64(campID[:64]) {
+		return campID[65:]
 	}
-	if err := os.WriteFile(filepath.Join(dir, "priv.key"), priv, 0o600); err != nil {
-		return nil, fmt.Errorf("identity: write priv: %w", err)
+	return campID
+}
+
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pub.key"), pub, 0o644); err != nil {
-		return nil, fmt.Errorf("identity: write pub: %w", err)
+	for i := 0; i < 64; i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
 	}
-	return &Identity{dir: dir, priv: priv, pub: pub}, nil
+	return true
 }
 
 // PubHex returns the 64-char hex of the 32-byte Ed25519 public key.

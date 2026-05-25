@@ -45,7 +45,7 @@
             <table class="ax-kv">
               <tbody>
                 <tr><td>name</td>       <td id="identity-name"></td></tr>
-                <tr><td>camp id</td>    <td id="identity-camp"></td></tr>
+                <tr><td>camp id</td>   <td><code id="identity-camp-id" class="ax-mono" title="click to copy" style="cursor:pointer;font-size:11px;word-break:break-all"></code></td></tr>
                 <tr><td>tunnel ip</td>  <td id="identity-ip"></td></tr>
                 <tr><td>endpoint</td>   <td id="identity-reflex" class="muted">—</td></tr>
                 <tr><td>public key</td> <td><code id="identity-pub" class="ax-mono" title="click to copy"></code> <span id="identity-fp" class="muted"></span></td></tr>
@@ -72,8 +72,8 @@
                 <input id="camp-name" type="text" class="ax-input" placeholder="your nickname">
               </div>
               <div class="ax-field">
-                <label>camp id</label>
-                <input id="camp-id" type="text" class="ax-input" placeholder="camp id">
+                <label>camp</label>
+                <input id="camp-id" type="text" class="ax-input" placeholder="new label (e.g. family) or full pasted camp_id">
               </div>
             </div>
             <div class="ax-add-row" style="margin-top:6px">
@@ -81,29 +81,6 @@
               <button id="btn-new-camp-cancel" class="ax-btn">cancel</button>
             </div>
           </div>
-        </div>
-
-        <div class="ax-section">
-          <div class="ax-section-title">
-            <span>— camp link</span>
-          </div>
-          <table id="camp-health-table" class="ax-health hidden">
-            <tbody>
-              <tr>
-                <td class="ax-peers-dot"><span id="camp-udp-dot" class="ax-dot offline"></span></td>
-                <td class="ax-health-label">udp announce</td>
-                <td id="camp-udp-rtt" class="ax-health-rtt">—</td>
-                <td id="camp-udp-meta" class="ax-health-meta muted">—</td>
-              </tr>
-              <tr>
-                <td class="ax-peers-dot"><span id="camp-http-dot" class="ax-dot offline"></span></td>
-                <td class="ax-health-label">http peer list</td>
-                <td id="camp-http-rtt" class="ax-health-rtt">—</td>
-                <td id="camp-http-meta" class="ax-health-meta muted">—</td>
-              </tr>
-            </tbody>
-          </table>
-          <div id="camp-health-status" class="ax-section-status muted">engine not running</div>
         </div>
 
         <div class="ax-section">
@@ -117,7 +94,7 @@
               <tr>
                 <th class="ax-peers-dot"></th>
                 <th>name</th>
-                <th>tunnel ip</th>
+                <th>overlay ip</th>
                 <th>endpoint</th>
                 <th>rtt</th>
                 <th>joined</th>
@@ -190,7 +167,7 @@
             <span class="ax-meta" id="my-domains-meta">0</span>
           </div>
           <div class="ax-section-status muted" id="my-domains-hint">
-            published as <code>&lt;name&gt;.&lt;camp_id&gt;.f2f</code> to every other peer · port is informational only, you still type it in URLs
+            published as <code>&lt;name&gt;.&lt;camp&gt;.f2f</code> to every other peer · port is informational only, you still type it in URLs
           </div>
           <div id="my-domains-list" class="ax-list"></div>
           <div class="ax-add-row">
@@ -211,11 +188,17 @@
 
         <div class="ax-section">
           <div class="ax-section-title">
+            <span>— my CA</span>
+          </div>
+          <div id="my-ca-info" class="ax-section-status muted">not running</div>
+        </div>
+        <div class="ax-section">
+          <div class="ax-section-title">
             <span>— trusted peer CAs</span>
             <span class="ax-meta" id="trusted-peers-meta">0</span>
           </div>
           <div class="ax-section-status muted">
-            each peer in the camp issues its own HTTPS certs from a local CA constrained to <code>*.&lt;camp_id&gt;.f2f</code> · we install peer CAs as trusted roots so your browser gets a green lock when visiting their domains · macOS prompts for password on each new install (Apple's anti-malware safeguard)
+            each peer in the camp issues its own HTTPS certs from a local CA constrained to <code>*.&lt;camp&gt;.f2f</code> · peer CAs are installed as trusted roots so your browser gets a green lock · macOS prompts for password on each new install
           </div>
           <div id="trusted-peers-list" class="ax-list"></div>
         </div>
@@ -396,6 +379,29 @@
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <div class="ax-section">
+          <div class="ax-section-title">
+            <span>— camp link</span>
+          </div>
+          <table id="camp-health-table" class="ax-health hidden">
+            <tbody>
+              <tr>
+                <td class="ax-peers-dot"><span id="camp-udp-dot" class="ax-dot offline"></span></td>
+                <td class="ax-health-label">udp announce</td>
+                <td id="camp-udp-rtt" class="ax-health-rtt">—</td>
+                <td id="camp-udp-meta" class="ax-health-meta muted">—</td>
+              </tr>
+              <tr>
+                <td class="ax-peers-dot"><span id="camp-http-dot" class="ax-dot offline"></span></td>
+                <td class="ax-health-label">http peer list</td>
+                <td id="camp-http-rtt" class="ax-health-rtt">—</td>
+                <td id="camp-http-meta" class="ax-health-meta muted">—</td>
+              </tr>
+            </tbody>
+          </table>
+          <div id="camp-health-status" class="ax-section-status muted">engine not running</div>
         </div>
 
         <div class="ax-section">
