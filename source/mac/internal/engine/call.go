@@ -102,8 +102,16 @@ func (e *Engine) LeaveCall(tunnelIP string) {
 		return
 	}
 	cc := v.(*callCtx)
-	cc.sfu.RemoveParticipant(tunnelIP)
 
+	// If the SFU host leaves, end the entire call.
+	if tunnelIP == cc.state.SFUHost {
+		cc.sfu.Close()
+		e.call.Store((*callCtx)(nil))
+		log.Printf("call: ended (host left)")
+		return
+	}
+
+	cc.sfu.RemoveParticipant(tunnelIP)
 	if len(cc.sfu.Participants()) == 0 {
 		cc.sfu.Close()
 		e.call.Store((*callCtx)(nil))
