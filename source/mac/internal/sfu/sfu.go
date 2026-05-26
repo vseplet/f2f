@@ -471,6 +471,16 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 	log.Printf("sfu: removed ended track %s from %d subscriber(s)", remote.ID(), len(affectedSubs))
 }
 
+type renegotiateMsg struct {
+	Kind   string          `json:"kind"`
+	From   string          `json:"from"`
+	Tracks []trackInfoMsg  `json:"tracks,omitempty"`
+}
+
+type trackInfoMsg struct {
+	Kind string `json:"kind"`
+}
+
 func (s *SFU) renegotiate(p *Participant) {
 	s.mu.Lock()
 	if t, ok := s.renegTimers[p.TunnelIP]; ok {
@@ -479,11 +489,22 @@ func (s *SFU) renegotiate(p *Participant) {
 	s.renegTimers[p.TunnelIP] = time.AfterFunc(200*time.Millisecond, func() {
 		s.mu.Lock()
 		delete(s.renegTimers, p.TunnelIP)
+
+		var tracks []trackInfoMsg
+		for _, snd := range p.PC.GetSenders() {
+			t := snd.Track()
+			if t == nil {
+				continue
+			}
+			tracks = append(tracks, trackInfoMsg{Kind: t.Kind().String()})
+		}
 		s.mu.Unlock()
-		log.Printf("sfu: requesting renegotiation from %s", p.TunnelIP)
-		msg, _ := json.Marshal(signalMsg{
-			Kind: "renegotiate",
-			From: "sfu",
+
+		log.Printf("sfu: requesting renegotiation from %s (%d sender tracks)", p.TunnelIP, len(tracks))
+		msg, _ := json.Marshal(renegotiateMsg{
+			Kind:   "renegotiate",
+			From:   "sfu",
+			Tracks: tracks,
 		})
 		s.onSignal(p.TunnelIP, msg)
 	})
