@@ -589,6 +589,7 @@
       pendingCandidates = [];
       hasRemoteDesc = false;
       sfuHost = '';
+      $groupSel.value = '';
       try {
         await fetchJSON('/api/call/leave', { method: 'POST' });
       } catch (e) { /* ignore */ }
