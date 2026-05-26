@@ -122,7 +122,7 @@ func (e *Engine) CreateCall() (*CallState, error) {
 		return nil, fmt.Errorf("engine not running")
 	}
 
-	sfuInst := sfu.New(st.UtunName, func(to string, msg []byte) {
+	sfuInst := sfu.New(st.LocalIP, st.UtunName, func(to string, msg []byte) {
 		e.deliverSFUSignal(to, msg)
 	})
 

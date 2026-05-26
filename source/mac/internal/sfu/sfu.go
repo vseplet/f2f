@@ -37,43 +37,49 @@ type ParticipantInfo struct {
 
 type SFU struct {
 	mu           sync.Mutex
-	api          *webrtc.API
+	localAPI     *webrtc.API // for local participant (all interfaces)
+	tunnelAPI    *webrtc.API // for remote participants (utun only)
+	localIP      string
 	participants map[string]*Participant
 	onSignal     func(to string, msg []byte)
-	// renegTimers batches rapid renegotiation requests per participant.
-	renegTimers map[string]*time.Timer
+	renegTimers  map[string]*time.Timer
 }
 
-func New(tunIface string, onSignal func(to string, msg []byte)) *SFU {
-	m := &webrtc.MediaEngine{}
-	if err := m.RegisterDefaultCodecs(); err != nil {
-		log.Printf("sfu: register codecs: %v", err)
+func New(localIP, tunIface string, onSignal func(to string, msg []byte)) *SFU {
+	buildAPI := func(se webrtc.SettingEngine) *webrtc.API {
+		m := &webrtc.MediaEngine{}
+		if err := m.RegisterDefaultCodecs(); err != nil {
+			log.Printf("sfu: register codecs: %v", err)
+		}
+		i := &interceptor.Registry{}
+		responder, _ := nack.NewResponderInterceptor()
+		i.Add(responder)
+		generator, _ := nack.NewGeneratorInterceptor()
+		i.Add(generator)
+		if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
+			log.Printf("sfu: register interceptors: %v", err)
+		}
+		return webrtc.NewAPI(
+			webrtc.WithMediaEngine(m),
+			webrtc.WithInterceptorRegistry(i),
+			webrtc.WithSettingEngine(se),
+		)
 	}
 
-	i := &interceptor.Registry{}
-	responder, _ := nack.NewResponderInterceptor()
-	i.Add(responder)
-	generator, _ := nack.NewGeneratorInterceptor()
-	i.Add(generator)
-	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
-		log.Printf("sfu: register interceptors: %v", err)
-	}
+	localAPI := buildAPI(webrtc.SettingEngine{})
 
-	se := webrtc.SettingEngine{}
+	tunSE := webrtc.SettingEngine{}
 	if tunIface != "" {
-		se.SetInterfaceFilter(func(iface string) bool {
-			return iface == tunIface || iface == "lo0"
+		tunSE.SetInterfaceFilter(func(iface string) bool {
+			return iface == tunIface
 		})
 	}
-
-	api := webrtc.NewAPI(
-		webrtc.WithMediaEngine(m),
-		webrtc.WithInterceptorRegistry(i),
-		webrtc.WithSettingEngine(se),
-	)
+	tunnelAPI := buildAPI(tunSE)
 
 	return &SFU{
-		api:          api,
+		localAPI:     localAPI,
+		tunnelAPI:    tunnelAPI,
+		localIP:      localIP,
 		participants: make(map[string]*Participant),
 		onSignal:     onSignal,
 		renegTimers:  make(map[string]*time.Timer),
@@ -106,7 +112,11 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		log.Printf("sfu: replacing stale participant %s (%s)", name, tunnelIP)
 	}
 
-	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
+	api := s.tunnelAPI
+	if tunnelIP == s.localIP {
+		api = s.localAPI
+	}
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		return nil, fmt.Errorf("new peer connection: %w", err)
 	}
