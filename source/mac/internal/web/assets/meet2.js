@@ -22,11 +22,14 @@
     const $logClear   = document.getElementById('m2-log-clear');
 
     const $chatInput  = document.getElementById('m2-chat-input');
+    const $btnShare   = document.getElementById('m2-btn-share');
 
     let pc = null;
     let dataChannel = null;
     let signalES = null;
     let localStream = null;
+    let screenStream = null;
+    let screenSenders = [];
     let micEnabled = false;
     let camEnabled = false;
     let inCall = false;
@@ -301,6 +304,9 @@
     async function handleSignal(msg) {
       if (!pc) return;
       if (msg.kind === 'offer' && msg.from === 'sfu') {
+        if (pc.signalingState === 'have-local-offer') {
+          await pc.setLocalDescription({ type: 'rollback' });
+        }
         hasRemoteDesc = false;
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
         hasRemoteDesc = true;
@@ -361,8 +367,11 @@
 
     function addRemoteStream(stream) {
       if (remoteTiles[stream.id]) return;
-      // SFU stream ID format: "tunnelIP-originalStreamID"
       var peerIP = extractPeerIP(stream.id);
+      if (!peerIP) {
+        log('ignoring stream with unknown peer: ' + stream.id);
+        return;
+      }
 
       var tile = document.createElement('div');
       tile.className = 'm2-tile';
@@ -374,19 +383,24 @@
       var label = document.createElement('div');
       label.className = 'm2-tile-label';
       label.textContent = peerIP;
+      var fsBtn = document.createElement('button');
+      fsBtn.className = 'm2-tile-fs';
+      fsBtn.title = 'fullscreen';
+      fsBtn.textContent = '⛶';
       tile.appendChild(video);
       tile.appendChild(label);
+      tile.appendChild(fsBtn);
 
-      // Replace placeholder if one exists for this peer
-      if (peerIP && peerTiles[peerIP]) {
+      if (peerTiles[peerIP] && !peersWithVideo[peerIP]) {
         peerTiles[peerIP].replaceWith(tile);
+        peerTiles[peerIP] = tile;
+      } else if (!peerTiles[peerIP]) {
+        $grid.appendChild(tile);
+        peerTiles[peerIP] = tile;
       } else {
         $grid.appendChild(tile);
       }
-      if (peerIP) {
-        peerTiles[peerIP] = tile;
-        peersWithVideo[peerIP] = true;
-      }
+      peersWithVideo[peerIP] = true;
       remoteTiles[stream.id] = { tile: tile, peerIP: peerIP };
       log('video tile for ' + peerIP);
 
@@ -405,14 +419,18 @@
 
     function removeRemoteStream(streamId) {
       var entry = remoteTiles[streamId];
-      if (entry) {
-        entry.tile.remove();
-        if (entry.peerIP) {
-          delete peerTiles[entry.peerIP];
-          delete peersWithVideo[entry.peerIP];
-        }
-        delete remoteTiles[streamId];
+      if (!entry) return;
+      entry.tile.remove();
+      delete remoteTiles[streamId];
+      if (!entry.peerIP) return;
+      if (peerTiles[entry.peerIP] === entry.tile) {
+        delete peerTiles[entry.peerIP];
       }
+      var hasOther = false;
+      for (var id in remoteTiles) {
+        if (remoteTiles[id].peerIP === entry.peerIP) { hasOther = true; break; }
+      }
+      if (!hasOther) delete peersWithVideo[entry.peerIP];
     }
 
     // Called from pollCallState — ensure every remote participant has a tile.
@@ -441,8 +459,13 @@
         var label = document.createElement('div');
         label.className = 'm2-tile-label';
         label.textContent = p.name + ' @ ' + p.tunnel_ip;
+        var fsBtn = document.createElement('button');
+        fsBtn.className = 'm2-tile-fs';
+        fsBtn.title = 'fullscreen';
+        fsBtn.textContent = '⛶';
         tile.appendChild(noVid);
         tile.appendChild(label);
+        tile.appendChild(fsBtn);
         $grid.appendChild(tile);
         peerTiles[p.tunnel_ip] = tile;
       }
@@ -525,6 +548,9 @@
       inCall = true;
       $btnCreate.style.display = 'none';
       $btnLeave.style.display = '';
+      $btnLeave.querySelector('span:last-child').textContent =
+        sfuHost === myTunnelIP ? 'leave (host)' : 'leave';
+      $btnShare.disabled = false;
       updateMediaButtons();
       log('connected to SFU');
     }
@@ -532,6 +558,7 @@
     async function leaveCall() {
       if (!inCall) return;
       inCall = false;
+      if (screenStream) stopScreenShare();
       stopSignalStream();
       dataChannel = null;
       $chatInput.disabled = true;
@@ -547,9 +574,11 @@
       $videoSelf.srcObject = null;
       clearRemoteTiles();
       $btnLeave.style.display = 'none';
+      $btnLeave.querySelector('span:last-child').textContent = 'leave';
       $btnCreate.style.display = '';
       micEnabled = false;
       camEnabled = false;
+      $btnShare.disabled = true;
       updateMediaButtons();
       pendingCandidates = [];
       hasRemoteDesc = false;
@@ -585,6 +614,87 @@
       localStream.getVideoTracks().forEach(function (t) { t.enabled = camEnabled; });
       updateMediaButtons();
     });
+
+    // --- fullscreen ---
+
+    $grid.addEventListener('click', function (e) {
+      var btn = e.target.closest('.m2-tile-fs');
+      if (!btn) return;
+      e.stopPropagation();
+      var tile = btn.closest('.m2-tile');
+      var video = tile && tile.querySelector('video');
+      if (video && video.requestFullscreen) {
+        video.requestFullscreen().catch(function () {});
+      }
+    });
+
+    // --- screen share ---
+
+    $btnShare.addEventListener('click', function () {
+      if (!pc) return;
+      if (screenStream) stopScreenShare();
+      else startScreenShare();
+    });
+
+    async function startScreenShare() {
+      if (!pc || screenStream) return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        log('getDisplayMedia not supported');
+        return;
+      }
+      var stream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (err) {
+        if (err.name !== 'NotAllowedError') log('getDisplayMedia: ' + err.message);
+        return;
+      }
+      screenStream = stream;
+      screenSenders = [];
+      stream.getTracks().forEach(function (t) {
+        screenSenders.push(pc.addTrack(t, stream));
+        t.addEventListener('ended', stopScreenShare);
+      });
+      // Local preview tile
+      var tile = document.createElement('div');
+      tile.className = 'm2-tile m2-tile-screen';
+      tile.id = 'm2-tile-screen-self';
+      var video = document.createElement('video');
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      var label = document.createElement('div');
+      label.className = 'm2-tile-label';
+      label.textContent = myName + ' · screen';
+      var fsBtn = document.createElement('button');
+      fsBtn.className = 'm2-tile-fs';
+      fsBtn.title = 'fullscreen';
+      fsBtn.textContent = '⛶';
+      tile.appendChild(video);
+      tile.appendChild(label);
+      tile.appendChild(fsBtn);
+      $grid.appendChild(tile);
+      $btnShare.querySelector('.ax-btn-state').textContent = '■';
+      $btnShare.classList.add('active');
+      log('screen share started');
+    }
+
+    function stopScreenShare() {
+      if (!screenStream) return;
+      var stream = screenStream;
+      screenStream = null;
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      if (pc) {
+        screenSenders.forEach(function (s) { try { pc.removeTrack(s); } catch (_) {} });
+      }
+      screenSenders = [];
+      var selfScreen = document.getElementById('m2-tile-screen-self');
+      if (selfScreen) selfScreen.remove();
+      $btnShare.querySelector('.ax-btn-state').textContent = '▢';
+      $btnShare.classList.remove('active');
+      log('screen share stopped');
+    }
 
     // --- volume ---
     var $volTrack = document.getElementById('m2-vol-track');

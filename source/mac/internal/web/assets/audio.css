@@ -1205,6 +1205,30 @@ a.ax-domain-link:hover {
     text-align: center;
 }
 
+.m2-tile-fs {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    pointer-events: auto;
+    background: rgba(20, 18, 14, 0.6);
+    color: #d4c8a6;
+    border: 1px solid #3a3024;
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.m2-tile:hover .m2-tile-fs {
+    opacity: 1;
+}
+.m2-tile-fs:hover {
+    background: rgba(20, 18, 14, 0.9);
+}
+
 #tab-meet2 > .ax-frame {
     overflow: hidden;
     display: flex;

@@ -401,10 +401,25 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 }
 
 func (s *SFU) renegotiate(p *Participant) {
-	log.Printf("sfu: renegotiating with %s", p.TunnelIP)
+	s.renegotiateRetry(p, 0)
+}
+
+func (s *SFU) renegotiateRetry(p *Participant, attempt int) {
+	if attempt > 0 {
+		log.Printf("sfu: renegotiate retry %d with %s", attempt, p.TunnelIP)
+	} else {
+		log.Printf("sfu: renegotiating with %s", p.TunnelIP)
+	}
 	offer, err := p.PC.CreateOffer(nil)
 	if err != nil {
-		log.Printf("sfu: create offer for %s: %v", p.TunnelIP, err)
+		if attempt < 5 {
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				s.renegotiateRetry(p, attempt+1)
+			}()
+		} else {
+			log.Printf("sfu: create offer for %s failed after retries: %v", p.TunnelIP, err)
+		}
 		return
 	}
 	if err := p.PC.SetLocalDescription(offer); err != nil {
