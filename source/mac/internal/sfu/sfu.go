@@ -40,9 +40,11 @@ type SFU struct {
 	api          *webrtc.API
 	participants map[string]*Participant
 	onSignal     func(to string, msg []byte)
+	// renegTimers batches rapid renegotiation requests per participant.
+	renegTimers map[string]*time.Timer
 }
 
-func New(onSignal func(to string, msg []byte)) *SFU {
+func New(tunIface string, onSignal func(to string, msg []byte)) *SFU {
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
 		log.Printf("sfu: register codecs: %v", err)
@@ -57,15 +59,24 @@ func New(onSignal func(to string, msg []byte)) *SFU {
 		log.Printf("sfu: register interceptors: %v", err)
 	}
 
+	se := webrtc.SettingEngine{}
+	if tunIface != "" {
+		se.SetInterfaceFilter(func(iface string) bool {
+			return iface == tunIface || iface == "lo0"
+		})
+	}
+
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(m),
 		webrtc.WithInterceptorRegistry(i),
+		webrtc.WithSettingEngine(se),
 	)
 
 	return &SFU{
 		api:          api,
 		participants: make(map[string]*Participant),
 		onSignal:     onSignal,
+		renegTimers:  make(map[string]*time.Timer),
 	}
 }
 
@@ -446,7 +457,21 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 }
 
 func (s *SFU) renegotiate(p *Participant) {
-	s.renegotiateRetry(p, 0)
+	s.scheduleRenegotiate(p)
+}
+
+func (s *SFU) scheduleRenegotiate(p *Participant) {
+	s.mu.Lock()
+	if t, ok := s.renegTimers[p.TunnelIP]; ok {
+		t.Stop()
+	}
+	s.renegTimers[p.TunnelIP] = time.AfterFunc(200*time.Millisecond, func() {
+		s.mu.Lock()
+		delete(s.renegTimers, p.TunnelIP)
+		s.mu.Unlock()
+		s.renegotiateRetry(p, 0)
+	})
+	s.mu.Unlock()
 }
 
 func (s *SFU) renegotiateRetry(p *Participant, attempt int) {
