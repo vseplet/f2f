@@ -385,6 +385,15 @@ type Engine struct {
 
 	tap *logTap
 
+	// call holds the active group call state (SFU + participants).
+	// nil when no call is in progress.
+	call atomic.Value // *callCtx
+	// remoteCalls holds calls discovered on remote peers via polling.
+	remoteCalls atomic.Value // *[]CallState
+	// joinedSFUHost is the tunnel IP of the remote SFU we joined.
+	// Empty when not in a remote call.
+	joinedSFUHost atomic.Value // *string
+
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
@@ -787,6 +796,8 @@ func (e *Engine) Start(cfg Config) error {
 		go e.filesPollLoop(ctx)
 		e.workers.Add(1)
 		go e.peerFirewallPollLoop(ctx)
+		e.workers.Add(1)
+		go e.callPollLoop(ctx)
 	}
 	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
 	// — 5353 is contended on macOS by mDNSResponder and any running
@@ -2498,6 +2509,12 @@ func (e *Engine) Stop() error {
 	e.intercepts = map[string]*InterceptInfo{}
 	e.camp = nil
 	e.identity = nil
+	if cc := e.loadCall(); cc != nil {
+		cc.sfu.Close()
+		e.clearCall()
+	}
+	e.ClearJoinedSFUHost()
+	e.storeRemoteCalls(nil)
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
