@@ -1268,6 +1268,7 @@ a.ax-domain-link:hover {
 .m2-grid {
     display: flex;
     flex-direction: column;
+    flex-wrap: nowrap;
     gap: 8px;
     overflow-y: auto;
     flex: 1;

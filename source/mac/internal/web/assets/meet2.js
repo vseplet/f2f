@@ -368,10 +368,6 @@
     function addRemoteStream(stream) {
       if (remoteTiles[stream.id]) return;
       var peerIP = extractPeerIP(stream.id);
-      if (!peerIP) {
-        log('ignoring stream with unknown peer: ' + stream.id);
-        return;
-      }
 
       var tile = document.createElement('div');
       tile.className = 'm2-tile';
@@ -382,7 +378,7 @@
       video.srcObject = stream;
       var label = document.createElement('div');
       label.className = 'm2-tile-label';
-      label.textContent = peerIP;
+      label.textContent = peerIP || 'peer';
       var fsBtn = document.createElement('button');
       fsBtn.className = 'm2-tile-fs';
       fsBtn.title = 'fullscreen';
