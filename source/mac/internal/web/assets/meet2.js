@@ -325,31 +325,25 @@
         var needed = msg.tracks || [];
         log('SFU requested renegotiation (' + needed.length + ' sender tracks)');
         try {
-          // Ensure we have enough recvonly transceivers for SFU's sender tracks.
-          var transceivers = pc.getTransceivers();
+          var needCount = {};
           for (var ti = 0; ti < needed.length; ti++) {
             var k = needed[ti].kind;
-            var found = false;
-            for (var tj = 0; tj < transceivers.length; tj++) {
-              var tr = transceivers[tj];
-              if (tr.receiver.track.kind === k && !tr.sender.track && tr.direction === 'recvonly') {
-                found = true;
-                break;
-              }
+            needCount[k] = (needCount[k] || 0) + 1;
+          }
+          var transceivers = pc.getTransceivers();
+          var haveCount = {};
+          for (var tj = 0; tj < transceivers.length; tj++) {
+            var tr = transceivers[tj];
+            if (tr.direction === 'recvonly' || tr.direction === 'sendrecv') {
+              var rk = tr.receiver.track.kind;
+              haveCount[rk] = (haveCount[rk] || 0) + 1;
             }
-            if (!found) {
-              var unused = false;
-              for (var tj2 = 0; tj2 < transceivers.length; tj2++) {
-                var tr2 = transceivers[tj2];
-                if (tr2.receiver.track.kind === k && tr2.direction === 'sendrecv') {
-                  unused = true;
-                  break;
-                }
-              }
-              if (!unused) {
-                pc.addTransceiver(k, { direction: 'recvonly' });
-                log('added recvonly transceiver: ' + k);
-              }
+          }
+          for (var kind in needCount) {
+            var deficit = needCount[kind] - (haveCount[kind] || 0);
+            for (var d = 0; d < deficit; d++) {
+              pc.addTransceiver(kind, { direction: 'recvonly' });
+              log('added recvonly transceiver: ' + kind);
             }
           }
           var offer = await pc.createOffer();
