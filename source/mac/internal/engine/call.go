@@ -221,10 +221,6 @@ func (e *Engine) callPollLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		if e.loadCall() != nil {
-			e.storeRemoteCalls(nil)
-			continue
-		}
 		e.pollRemoteCalls(ctx)
 	}
 }

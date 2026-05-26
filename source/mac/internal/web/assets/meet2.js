@@ -488,7 +488,9 @@
         log('no sfu host known');
         return;
       }
+      var target = sfuHost;
       if (inCall) await leaveCall();
+      sfuHost = target;
       log('joining call on ' + sfuHost + '...');
       try {
         // Register ourselves as a participant on the SFU host.
