@@ -314,8 +314,15 @@ func (s *SFU) handleAnswer(tunnelIP, sdp string) error {
 		return fmt.Errorf("unknown participant %s", tunnelIP)
 	}
 
+	log.Printf("sfu: received answer from %s (signalingState=%s)", tunnelIP, p.PC.SignalingState())
 	answer := webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp}
-	return p.PC.SetRemoteDescription(answer)
+	err := p.PC.SetRemoteDescription(answer)
+	if err != nil {
+		log.Printf("sfu: setRemoteDescription(answer) for %s failed: %v", tunnelIP, err)
+	} else {
+		log.Printf("sfu: answer applied for %s, senders=%d", tunnelIP, len(p.PC.GetSenders()))
+	}
+	return err
 }
 
 func (s *SFU) handleCandidateInit(tunnelIP string, candidate *webrtc.ICECandidateInit) error {
@@ -376,21 +383,38 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		s.renegotiate(p)
 	}
 
-	// Request a keyframe after subscribers have time to connect.
+	// Request keyframes repeatedly to cover the renegotiation window.
+	ssrc := remote.SSRC()
 	go func() {
-		time.Sleep(time.Second)
-		_ = sender.PC.WriteRTCP([]rtcp.Packet{
-			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-		})
+		for i := 0; i < 5; i++ {
+			time.Sleep(2 * time.Second)
+			_ = sender.PC.WriteRTCP([]rtcp.Packet{
+				&rtcp.PictureLossIndication{MediaSSRC: uint32(ssrc)},
+			})
+		}
 	}()
 
+	log.Printf("sfu: forwarding %s from %s (ssrc=%d)", remote.Codec().MimeType, sender.TunnelIP, ssrc)
 	buf := make([]byte, 1500)
+	n, _, err := remote.Read(buf)
+	if err != nil {
+		log.Printf("sfu: forward loop for %s/%s exited on first read: %v", sender.TunnelIP, remote.ID(), err)
+		sender.mu.Lock()
+		delete(sender.tracks, remote.ID())
+		sender.mu.Unlock()
+		return
+	}
+	log.Printf("sfu: first RTP packet from %s/%s (%d bytes)", sender.TunnelIP, remote.ID(), n)
+	_, _ = local.Write(buf[:n])
+
 	for {
-		n, _, err := remote.Read(buf)
+		n, _, err = remote.Read(buf)
 		if err != nil {
+			log.Printf("sfu: forward loop ended for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
 			break
 		}
 		if _, err := local.Write(buf[:n]); err != nil {
+			log.Printf("sfu: forward write error for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
 			break
 		}
 	}
@@ -431,6 +455,7 @@ func (s *SFU) renegotiateRetry(p *Participant, attempt int) {
 		SDP:  offer.SDP,
 		From: "sfu",
 	})
+	log.Printf("sfu: sending renegotiation offer to %s", p.TunnelIP)
 	s.onSignal(p.TunnelIP, msg)
 }
 
