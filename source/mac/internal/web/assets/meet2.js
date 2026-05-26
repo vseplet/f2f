@@ -543,7 +543,7 @@
       log('creating call...');
       try {
         var cs = await fetchJSON('/api/call/create', { method: 'POST' });
-        log('call created: ' + cs.call_id);
+        log('SFU started on ' + myTunnelIP + ':' + (location.port || '2202'));
         sfuHost = myTunnelIP;
         await joinSFU();
       } catch (e) {
