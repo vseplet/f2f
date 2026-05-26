@@ -405,6 +405,16 @@
           removeRemoteStream(stream.id);
         }
       };
+      stream.getTracks().forEach(function (t) {
+        t.onended = function () {
+          var alive = stream.getTracks().some(function (tr) { return tr.readyState === 'live'; });
+          if (!alive) removeRemoteStream(stream.id);
+        };
+        t.onmute = function () {
+          var alive = stream.getTracks().some(function (tr) { return !tr.muted && tr.readyState === 'live'; });
+          if (!alive) removeRemoteStream(stream.id);
+        };
+      });
     }
 
     function extractPeerIP(streamId) {

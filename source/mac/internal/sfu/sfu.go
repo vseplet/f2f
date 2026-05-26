@@ -422,6 +422,27 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 	sender.mu.Lock()
 	delete(sender.tracks, remote.ID())
 	sender.mu.Unlock()
+
+	s.mu.Lock()
+	var affectedSubs []*Participant
+	for _, sub := range s.participants {
+		if sub.TunnelIP == sender.TunnelIP {
+			continue
+		}
+		for _, snd := range sub.PC.GetSenders() {
+			if snd.Track() == local {
+				_ = sub.PC.RemoveTrack(snd)
+				affectedSubs = append(affectedSubs, sub)
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	for _, sub := range affectedSubs {
+		s.renegotiate(sub)
+	}
+	log.Printf("sfu: removed ended track %s from %d subscriber(s)", remote.ID(), len(affectedSubs))
 }
 
 func (s *SFU) renegotiate(p *Participant) {
