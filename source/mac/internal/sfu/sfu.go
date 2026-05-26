@@ -73,8 +73,26 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if p, ok := s.participants[tunnelIP]; ok {
-		return p, nil
+	if old, ok := s.participants[tunnelIP]; ok {
+		// Stale participant (e.g., browser page reload). Clean up before re-adding.
+		old.PC.OnConnectionStateChange(func(webrtc.PeerConnectionState) {})
+		old.mu.Lock()
+		for _, pt := range old.tracks {
+			for _, other := range s.participants {
+				if other.TunnelIP == tunnelIP {
+					continue
+				}
+				for _, sender := range other.PC.GetSenders() {
+					if sender.Track() == pt.local {
+						_ = other.PC.RemoveTrack(sender)
+					}
+				}
+			}
+		}
+		old.mu.Unlock()
+		delete(s.participants, tunnelIP)
+		go old.PC.Close()
+		log.Printf("sfu: replacing stale participant %s (%s)", name, tunnelIP)
 	}
 
 	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
@@ -199,6 +217,7 @@ func (s *SFU) RemoveParticipant(tunnelIP string) {
 	}
 	s.mu.Unlock()
 
+	p.PC.OnConnectionStateChange(func(webrtc.PeerConnectionState) {})
 	_ = p.PC.Close()
 	log.Printf("sfu: removed participant %s (%s)", p.Name, tunnelIP)
 

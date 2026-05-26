@@ -174,7 +174,11 @@
         opts += '<option value="' + c.sfu_host + '">' + label + '</option>';
       }
       $groupSel.innerHTML = opts;
-      if (selectedVal) $groupSel.value = selectedVal;
+      if (inCall && sfuHost) {
+        $groupSel.value = sfuHost;
+      } else if (selectedVal) {
+        $groupSel.value = selectedVal;
+      }
 
       // If in a call, sync tiles and check if call still exists.
       if (inCall && sfuHost) {
@@ -340,8 +344,12 @@
     }
 
     function updateMediaButtons() {
-      $btnMic.disabled = !localStream;
-      $btnCam.disabled = !localStream;
+      var hasMic = !!localStream && localStream.getAudioTracks().length > 0;
+      var hasCam = !!localStream && localStream.getVideoTracks().length > 0;
+      $btnMic.disabled = !hasMic;
+      $btnCam.disabled = !hasCam;
+      $btnMic.classList.toggle('active', micEnabled);
+      $btnCam.classList.toggle('active', camEnabled);
       $btnMic.querySelector('.ax-btn-state').textContent = micEnabled ? '●' : '○';
       $btnCam.querySelector('.ax-btn-state').textContent = camEnabled ? '■' : '□';
     }
@@ -515,8 +523,7 @@
       inCall = true;
       $btnCreate.style.display = 'none';
       $btnLeave.style.display = '';
-      $btnMic.disabled = false;
-      $btnCam.disabled = false;
+      updateMediaButtons();
       log('connected to SFU');
     }
 
@@ -539,8 +546,9 @@
       clearRemoteTiles();
       $btnLeave.style.display = 'none';
       $btnCreate.style.display = '';
-      $btnMic.disabled = true;
-      $btnCam.disabled = true;
+      micEnabled = false;
+      camEnabled = false;
+      updateMediaButtons();
       pendingCandidates = [];
       hasRemoteDesc = false;
       sfuHost = '';
@@ -615,6 +623,14 @@
     getStatus().then(function () {
       pollCallState();
       setInterval(pollCallState, POLL_MS);
+      // Auto-rejoin own call after page reload.
+      fetchJSON('/api/call/state').then(function (cs) {
+        if (cs && cs.sfu_host === myTunnelIP && !inCall) {
+          log('rejoining own call...');
+          sfuHost = myTunnelIP;
+          joinCall();
+        }
+      }).catch(function () {});
     });
   }
 
