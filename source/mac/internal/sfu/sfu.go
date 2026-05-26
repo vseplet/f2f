@@ -185,6 +185,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		if c == nil {
 			return
 		}
+		log.Printf("sfu: ICE candidate for %s: %s %s:%d", tunnelIP, c.Typ, c.Address, c.Port)
 		cj := c.ToJSON()
 		msg, _ := json.Marshal(signalMsg{
 			Kind:      "candidate",
@@ -192,6 +193,10 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 			From:      "sfu",
 		})
 		s.onSignal(tunnelIP, msg)
+	})
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("sfu: %s ICE: %s", tunnelIP, state)
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {

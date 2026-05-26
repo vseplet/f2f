@@ -304,8 +304,10 @@
     async function handleSignal(msg) {
       if (!pc) return;
       if (msg.kind === 'offer' && msg.from === 'sfu') {
+        log('SFU offer (state=' + pc.signalingState + ')');
         if (pc.signalingState === 'have-local-offer') {
           await pc.setLocalDescription({ type: 'rollback' });
+          log('rolled back local offer');
         }
         hasRemoteDesc = false;
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
@@ -313,6 +315,7 @@
         var answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal({ kind: 'answer', sdp: answer.sdp });
+        log('sent answer to SFU');
         await flushPendingCandidates();
       } else if (msg.kind === 'answer' && msg.from === 'sfu') {
         await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
