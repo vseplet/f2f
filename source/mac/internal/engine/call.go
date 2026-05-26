@@ -195,6 +195,11 @@ func (e *Engine) HandleCallSignal(fromTunnelIP string, body []byte) ([]byte, err
 }
 
 func (e *Engine) deliverSFUSignal(to string, msg []byte) {
+	st := e.Status()
+	if to == st.LocalIP && e.OnLocalSFUSignal != nil {
+		e.OnLocalSFUSignal(msg)
+		return
+	}
 	port := e.tunnelHTTPPort
 	if port == "" {
 		port = "2202"

@@ -394,6 +394,10 @@ type Engine struct {
 	// Empty when not in a remote call.
 	joinedSFUHost atomic.Value // *string
 
+	// OnLocalSFUSignal, when set, delivers SFU signals destined for the
+	// local browser directly (bypassing HTTP to tunnel IP).
+	OnLocalSFUSignal func(msg []byte)
+
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires

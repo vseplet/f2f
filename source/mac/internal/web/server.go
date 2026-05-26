@@ -58,7 +58,7 @@ type Server struct {
 }
 
 func New(eng *engine.Engine, addr string) *Server {
-	return &Server{
+	s := &Server{
 		engine:      eng,
 		addr:        addr,
 		signals:     newSignalHub(),
@@ -67,6 +67,10 @@ func New(eng *engine.Engine, addr string) *Server {
 			Timeout: 5 * time.Second,
 		},
 	}
+	eng.OnLocalSFUSignal = func(msg []byte) {
+		s.callSignals.broadcast(msg)
+	}
+	return s
 }
 
 // Addr returns the configured bind address.
