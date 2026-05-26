@@ -472,10 +472,6 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 }
 
 func (s *SFU) renegotiate(p *Participant) {
-	s.scheduleRenegotiate(p)
-}
-
-func (s *SFU) scheduleRenegotiate(p *Participant) {
 	s.mu.Lock()
 	if t, ok := s.renegTimers[p.TunnelIP]; ok {
 		t.Stop()
@@ -484,40 +480,14 @@ func (s *SFU) scheduleRenegotiate(p *Participant) {
 		s.mu.Lock()
 		delete(s.renegTimers, p.TunnelIP)
 		s.mu.Unlock()
-		s.renegotiateRetry(p, 0)
+		log.Printf("sfu: requesting renegotiation from %s", p.TunnelIP)
+		msg, _ := json.Marshal(signalMsg{
+			Kind: "renegotiate",
+			From: "sfu",
+		})
+		s.onSignal(p.TunnelIP, msg)
 	})
 	s.mu.Unlock()
-}
-
-func (s *SFU) renegotiateRetry(p *Participant, attempt int) {
-	if attempt > 0 {
-		log.Printf("sfu: renegotiate retry %d with %s", attempt, p.TunnelIP)
-	} else {
-		log.Printf("sfu: renegotiating with %s", p.TunnelIP)
-	}
-	offer, err := p.PC.CreateOffer(nil)
-	if err != nil {
-		if attempt < 5 {
-			go func() {
-				time.Sleep(300 * time.Millisecond)
-				s.renegotiateRetry(p, attempt+1)
-			}()
-		} else {
-			log.Printf("sfu: create offer for %s failed after retries: %v", p.TunnelIP, err)
-		}
-		return
-	}
-	if err := p.PC.SetLocalDescription(offer); err != nil {
-		log.Printf("sfu: set local desc for %s: %v", p.TunnelIP, err)
-		return
-	}
-	msg, _ := json.Marshal(signalMsg{
-		Kind: "offer",
-		SDP:  offer.SDP,
-		From: "sfu",
-	})
-	log.Printf("sfu: sending renegotiation offer to %s", p.TunnelIP)
-	s.onSignal(p.TunnelIP, msg)
 }
 
 func (s *SFU) broadcastChat(senderIP string, data []byte) {

@@ -321,6 +321,20 @@
         await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
         hasRemoteDesc = true;
         await flushPendingCandidates();
+      } else if (msg.kind === 'renegotiate' && msg.from === 'sfu') {
+        log('SFU requested renegotiation');
+        try {
+          var offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          var resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
+          if (resp && resp.kind === 'answer' && pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
+            hasRemoteDesc = true;
+            await flushPendingCandidates();
+          }
+        } catch (err) {
+          log('renegotiation failed: ' + err.message);
+        }
       } else if (msg.kind === 'candidate' && msg.from === 'sfu') {
         if (hasRemoteDesc) {
           try { await pc.addIceCandidate(msg.candidate); } catch (e) { /* ignore */ }
