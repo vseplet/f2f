@@ -22,12 +22,14 @@ type publishedTrack struct {
 }
 
 type Participant struct {
-	TunnelIP string
-	Name     string
-	PC       *webrtc.PeerConnection
-	DC       *webrtc.DataChannel // chat relay
-	mu       sync.Mutex
-	tracks   map[string]*publishedTrack
+	TunnelIP          string
+	Name              string
+	PC                *webrtc.PeerConnection
+	DC                *webrtc.DataChannel // chat relay
+	mu                sync.Mutex
+	tracks            map[string]*publishedTrack
+	hasRemoteDesc     bool
+	pendingCandidates []webrtc.ICECandidateInit
 }
 
 type ParticipantInfo struct {
@@ -316,6 +318,15 @@ func (s *SFU) handleOffer(tunnelIP, sdp string) ([]byte, error) {
 		return nil, fmt.Errorf("set remote description: %w", err)
 	}
 
+	p.mu.Lock()
+	p.hasRemoteDesc = true
+	pending := p.pendingCandidates
+	p.pendingCandidates = nil
+	p.mu.Unlock()
+	for _, c := range pending {
+		_ = p.PC.AddICECandidate(c)
+	}
+
 	answer, err := p.PC.CreateAnswer(nil)
 	if err != nil {
 		return nil, fmt.Errorf("create answer: %w", err)
@@ -361,6 +372,13 @@ func (s *SFU) handleCandidateInit(tunnelIP string, candidate *webrtc.ICECandidat
 	if !ok {
 		return fmt.Errorf("unknown participant %s", tunnelIP)
 	}
+	p.mu.Lock()
+	if !p.hasRemoteDesc {
+		p.pendingCandidates = append(p.pendingCandidates, *candidate)
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
 	return p.PC.AddICECandidate(*candidate)
 }
 
