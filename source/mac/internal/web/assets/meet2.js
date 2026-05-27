@@ -39,6 +39,7 @@
     let logCount = 0;
     let pendingCandidates = [];
     let hasRemoteDesc = false;
+    let negotiating = false;
 
     function timestamp() {
       return new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -231,12 +232,12 @@
       };
 
       conn.onnegotiationneeded = async function () {
+        if (negotiating) return;
+        negotiating = true;
         try {
           var offer = await conn.createOffer();
           await conn.setLocalDescription(offer);
           var resp = await sendSignal({ kind: 'offer', sdp: offer.sdp });
-          // If SFU renegotiated while we waited for the POST response,
-          // our PC is already back in 'stable' — skip the stale answer.
           if (resp && resp.kind === 'answer' && conn.signalingState === 'have-local-offer') {
             await conn.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
             hasRemoteDesc = true;
@@ -244,6 +245,8 @@
           }
         } catch (err) {
           log('negotiation: ' + err.message);
+        } finally {
+          negotiating = false;
         }
       };
 
@@ -324,6 +327,7 @@
       } else if (msg.kind === 'renegotiate' && msg.from === 'sfu') {
         var needed = msg.tracks || [];
         log('SFU requested renegotiation (' + needed.length + ' sender tracks)');
+        negotiating = true;
         try {
           var needCount = {};
           for (var ti = 0; ti < needed.length; ti++) {
@@ -356,6 +360,8 @@
           }
         } catch (err) {
           log('renegotiation failed: ' + err.message);
+        } finally {
+          negotiating = false;
         }
       } else if (msg.kind === 'candidate' && msg.from === 'sfu') {
         if (hasRemoteDesc) {
