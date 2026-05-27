@@ -270,7 +270,8 @@
         });
         if (r.status === 204) return null;
         if (!r.ok) {
-          log('signal error: ' + r.status);
+          var errBody = await r.text().catch(function () { return ''; });
+          log('signal error: ' + r.status + ' ' + errBody);
           return null;
         }
         return r.json();
