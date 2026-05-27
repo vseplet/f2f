@@ -209,6 +209,10 @@
 
       conn.onicecandidate = function (e) {
         if (e.candidate) {
+          if (sfuHost !== myTunnelIP && myTunnelIP &&
+              e.candidate.candidate.indexOf(myTunnelIP) === -1) {
+            return;
+          }
           sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
         }
       };
