@@ -42,6 +42,7 @@
     let negotiating = false;
     let reconnectAttempts = 0;
     let reconnectTimer = null;
+    let signalChain = Promise.resolve();
 
     function timestamp() {
       return new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -292,12 +293,15 @@
       signalES = new EventSource('/api/call/signal/stream');
       signalES.onopen = function () { log('signal stream open'); };
       signalES.onerror = function () { log('signal stream error'); };
-      signalES.onmessage = async function (e) {
-        try {
-          await handleSignal(JSON.parse(e.data));
-        } catch (err) {
+      // Serialize signal processing: EventSource fires onmessage per
+      // message without awaiting the previous handler, so concurrent
+      // renegotiations would race (glare). Chain them sequentially.
+      signalES.onmessage = function (e) {
+        signalChain = signalChain.then(function () {
+          return handleSignal(JSON.parse(e.data));
+        }).catch(function (err) {
           log('signal handle error: ' + err.message);
-        }
+        });
       };
     }
 
