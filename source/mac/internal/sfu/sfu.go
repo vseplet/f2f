@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -335,12 +336,48 @@ func (s *SFU) handleOffer(tunnelIP, sdp string) ([]byte, error) {
 		return nil, fmt.Errorf("set local description: %w", err)
 	}
 
+	// If we have more sender tracks of a kind than the offer had m-lines
+	// for, some senders are orphaned (no m-line to carry them). This
+	// happens when a peer joins and existing tracks were added via
+	// AddParticipant before the browser's initial offer. Request another
+	// renegotiation round so the browser adds enough recvonly transceivers.
+	// Self-limiting: once the browser has enough m-lines, no more rounds.
+	var sendAudio, sendVideo int
+	for _, snd := range p.PC.GetSenders() {
+		t := snd.Track()
+		if t == nil {
+			continue
+		}
+		if t.Kind() == webrtc.RTPCodecTypeAudio {
+			sendAudio++
+		} else if t.Kind() == webrtc.RTPCodecTypeVideo {
+			sendVideo++
+		}
+	}
+	mAudio, mVideo := countMLines(answer.SDP)
+	if sendAudio > mAudio || sendVideo > mVideo {
+		log.Printf("sfu: %s has unnegotiated senders (a=%d/%d v=%d/%d), renegotiating",
+			tunnelIP, sendAudio, mAudio, sendVideo, mVideo)
+		s.renegotiate(p)
+	}
+
 	resp, _ := json.Marshal(signalMsg{
 		Kind: "answer",
 		SDP:  answer.SDP,
 		From: "sfu",
 	})
 	return resp, nil
+}
+
+func countMLines(sdp string) (audio, video int) {
+	for _, line := range strings.Split(sdp, "\n") {
+		if strings.HasPrefix(line, "m=audio") {
+			audio++
+		} else if strings.HasPrefix(line, "m=video") {
+			video++
+		}
+	}
+	return audio, video
 }
 
 func (s *SFU) handleAnswer(tunnelIP, sdp string) error {
