@@ -53,6 +53,17 @@ import (
 // hub uses the same prefix when allocating tunnel_ips.
 const tunnelSubnetCIDR = overlay.V4Subnet
 
+// packetLogEnabled gates per-packet tunnel logging (the [utun]/[udp]
+// per-packet lines). Off by default — these flood the log and bury
+// everything else. Enable with F2F_PACKET_LOG=1.
+var packetLogEnabled = os.Getenv("F2F_PACKET_LOG") == "1"
+
+func packetLog(format string, args ...any) {
+	if packetLogEnabled {
+		log.Printf(format, args...)
+	}
+}
+
 // CampConfig points the engine at a rendezvous (camp) server: instead of
 // the user supplying the peer's UDP endpoint via --peer, we discover our
 // own external endpoint via STUN, register with camp under (Name, ID),
@@ -3134,7 +3145,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		summary := packet.Summary(pkt)
 		action := "drop"
 		if !hasPeer {
-			log.Printf("[%s] %s [%s]", e.tun.Name(), summary, action)
+			packetLog("[%s] %s [%s]", e.tun.Name(), summary, action)
 			continue
 		}
 		// Two routing modes:
@@ -3151,7 +3162,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 			} else {
 				action = "drop-no-peer"
 			}
-			log.Printf("[%s] %s [%s]", e.tun.Name(), summary, action)
+			packetLog("[%s] %s [%s]", e.tun.Name(), summary, action)
 			continue
 		}
 		if n, werr := e.udp.WriteToUDP(pkt, peerAddr); werr != nil {
@@ -3164,7 +3175,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 			e.txPackets.Add(1)
 			action = "→peer"
 		}
-		log.Printf("[%s] %s [%s]", e.tun.Name(), summary, action)
+		packetLog("[%s] %s [%s]", e.tun.Name(), summary, action)
 	}
 }
 
@@ -3291,7 +3302,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		}
 		version := pkt[0] >> 4
 		if version != 4 && version != 6 {
-			log.Printf("[udp %s] drop non-IP byte=0x%02x (%d bytes)", from, pkt[0], n)
+			packetLog("[udp %s] drop non-IP byte=0x%02x (%d bytes)", from, pkt[0], n)
 			continue
 		}
 		summary := packet.Summary(pkt)
@@ -3300,11 +3311,11 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			if ctx.Err() == nil {
 				log.Printf("WARN: utun write from %s: %v", from, werr)
 			}
-			log.Printf("[udp %s] %s [→utun-failed]", from, summary)
+			packetLog("[udp %s] %s [→utun-failed]", from, summary)
 		} else {
 			e.rxBytes.Add(uint64(n))
 			e.rxPackets.Add(1)
-			log.Printf("[udp %s] %s [→utun]", from, summary)
+			packetLog("[udp %s] %s [→utun]", from, summary)
 		}
 	}
 }
