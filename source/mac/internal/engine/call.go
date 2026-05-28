@@ -122,6 +122,9 @@ func (e *Engine) CreateCall() (*CallState, error) {
 		return nil, fmt.Errorf("engine not running")
 	}
 
+	// Can't be joined to a remote SFU while hosting our own.
+	e.ClearJoinedSFUHost()
+
 	sfuInst := sfu.New(st.LocalIP, st.UtunName, func(to string, msg []byte) {
 		e.deliverSFUSignal(to, msg)
 	})

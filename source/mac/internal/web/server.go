@@ -1352,6 +1352,10 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
 	// If the SFU host is remote, proxy the join request through the tunnel.
 	if req.SFUHost != "" && req.SFUHost != st.LocalIP {
+		// Can't host and join simultaneously — end any local call first.
+		// Otherwise our browser receives SFU signals from both our local
+		// SFU and the remote one, corrupting the single PeerConnection.
+		s.engine.EndCall()
 		s.engine.SetJoinedSFUHost(req.SFUHost)
 		s.proxyCallJoinToHost(w, req.SFUHost, req.Name)
 		return
