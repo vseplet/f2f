@@ -40,6 +40,8 @@
     let pendingCandidates = [];
     let hasRemoteDesc = false;
     let negotiating = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
 
     function timestamp() {
       return new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -230,7 +232,11 @@
 
       conn.onconnectionstatechange = function () {
         log('pc state: ' + conn.connectionState);
-        if (conn.connectionState === 'failed' || conn.connectionState === 'closed') {
+        if (conn.connectionState === 'connected') {
+          reconnectAttempts = 0;
+        } else if (conn.connectionState === 'failed') {
+          scheduleReconnect();
+        } else if (conn.connectionState === 'closed') {
           leaveCall();
         }
       };
@@ -540,11 +546,31 @@
 
     // --- call actions ---
 
+    function scheduleReconnect() {
+      if (!inCall || reconnectTimer) return;
+      if (reconnectAttempts >= 5) {
+        log('giving up after 5 reconnect attempts');
+        leaveCall();
+        return;
+      }
+      reconnectAttempts++;
+      var delay = Math.min(1000 * reconnectAttempts, 5000);
+      var host = sfuHost;
+      log('connection failed, reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + ')');
+      reconnectTimer = setTimeout(async function () {
+        reconnectTimer = null;
+        if (!inCall) return;
+        await leaveCall();
+        sfuHost = host;
+        await joinCall();
+      }, delay);
+    }
+
     async function createCall() {
       if (inCall) await leaveCall();
       log('creating call...');
       try {
-        var cs = await fetchJSON('/api/call/create', { method: 'POST' });
+        await fetchJSON('/api/call/create', { method: 'POST' });
         log('SFU started on ' + myTunnelIP + ':' + (location.port || '2202'));
         sfuHost = myTunnelIP;
         await joinSFU();
@@ -605,6 +631,10 @@
     async function leaveCall() {
       if (!inCall) return;
       inCall = false;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       if (screenStream) stopScreenShare();
       stopSignalStream();
       dataChannel = null;
