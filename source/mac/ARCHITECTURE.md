@@ -1074,6 +1074,41 @@ handlers. Тайлы чистятся через `syncPeerTiles` + `stream.onrem
 ответы от SFU шли по LAN напрямую, минуя tunnel → tx/rx не считались.
 **Решение**: фильтр в `onicecandidate` — удалённый пир отправляет только
 кандидаты содержащие свой tunnel IP. Хост — все (ему нужен loopback).
+**Trade-off**: при tunnel-only остаётся единственная candidate-пара —
+нет fallback'а если туннель моргнул. Поэтому критичны переподключения (см. ниже).
+
+**12. Хост и участник одновременно → краш**
+Пир мог быть хостом своей группы И участником чужой одновременно
+(`e.call` + `joinedSFUHost` оба активны). Браузер получал SFU-сигналы
+от ДВУХ SFU на один `pc` → SDP корраптился → `failed` → бесконечный
+реконнект-флап. Симптом: своя группа не закрывалась при входе в чужую.
+**Решение**: взаимное исключение — `handleCallJoin` при join'е на
+удалённый SFU вызывает `EndCall()`; `CreateCall` чистит `joinedSFUHost`.
+
+**13. Гонка обработки SSE-сигналов**
+`EventSource.onmessage` вызывается для каждого сообщения независимо, без
+ожидания предыдущего async-обработчика. Два renegotiate-сигнала близко
+(при screen share SFU шлёт renegotiate всем) → два `handleSignal`
+параллельно → конкурирующие offer'ы → glare → часть падает. Screen share
+доходил не до всех. **Решение**: сериализация через promise-цепочку
+`signalChain` — все сигналы обрабатываются строго последовательно.
+
+**14. Late-joiner не получал screen share (orphaned senders)**
+При join'е `AddParticipant` добавляет существующие треки других пиров в
+PC новичка. Но initial offer новичка имеет только свои m-line (2: a/v).
+SFU's answer вмещает лишь часть треков; остальные (например screen share
+= ещё 2 трека) остаются orphaned — нет m-line. Renegotiate не триггерился
+при join'е (только в `handleTrack` для НОВЫХ треков). **Решение**:
+`handleOffer` после answer считает sender'ов по типу vs m-line в answer —
+если sender'ов больше, запрашивает ещё раунд renegotiation. Браузер
+добавляет recvonly transceivers, переотправляет offer, получает все треки.
+Self-limiting: как только m-line хватает, раунды прекращаются.
+
+**15. Авто-переподключение при обрыве**
+При `pc state: failed` браузер просто ронял звонок. **Решение**:
+`scheduleReconnect` — полный реджойн (`leaveCall` + `joinCall`) с backoff
+(1-5с) и лимитом 5 попыток. На `connected` счётчик сбрасывается, на
+кнопку leave таймер отменяется. `disconnected` не трогаем (транзиентное).
 
 ### Известные ограничения
 
@@ -1090,43 +1125,29 @@ handlers. Тайлы чистятся через `syncPeerTiles` + `stream.onrem
   нераспознаваемым stream ID (без tunnel IP префикса). Тайлы создаются с
   лейблом "peer". Причина не установлена — возможно, Pion не всегда сохраняет
   кастомный stream ID из `NewTrackLocalStaticRTP`.
+- **`mux: short buffer`**: Pion'овский mux иногда не может прочитать
+  крупный входящий пакет (вероятно большой RTCP compound по loopback от
+  хоста, принимающего много треков — loopback без MTU-лимита). Теряется
+  один RTCP-пакет. Обычно безобидно; при артефактах видео лечится через
+  `SettingEngine.SetReceiveMTU(больше)`.
 
-### TODO: устойчивые переподключения
+### Переподключения (сделано)
 
-**Проблема**: при `pc state: failed` браузер просто роняет звонок
-(`leaveCall()`). Туннель может кратко моргнуть (NAT rebinding, refresh
-hole-punch, смена маршрута/WiFi), и при tunnel-only ICE (единственная
-candidate-пара) нет fallback'а → `failed` → звонок упал. Пир реджойнит руками.
+При `pc state: failed` браузер раньше просто ронял звонок. Туннель может
+кратко моргнуть (NAT rebinding, refresh hole-punch, смена маршрута/WiFi),
+и при tunnel-only ICE (единственная candidate-пара) нет fallback'а.
 
-**План**: на `failed` восстанавливаться, а не сразу выходить.
+**Реализовано** (`scheduleReconnect` в meet2.js): на `failed` — полный
+реджойн (`leaveCall` + `joinCall` на тот же хост) с backoff (1-5с) и
+лимитом 5 попыток. `AddParticipant` replacement зачищает stale-участника.
+На `connected` счётчик сбрасывается, на кнопку leave таймер отменяется.
+`disconnected` не трогаем (WebRTC сам восстанавливается).
 
-1. **ICE restart** — браузер шлёт offer с `{iceRestart: true}` →
-   новые ICE credentials → re-gather → перепунч туннеля. SFU обрабатывает
-   (Pion при новых ufrag/pwd рестартит ICE на своей стороне).
-2. **Fallback на авто-реджойн** — если ICE restart не восстановил за
-   ~5-8с → `leaveCall()` + `joinCall()` на тот же хост. `AddParticipant`
-   replacement зачистит stale-участника.
-3. **Лимит попыток** — N реджойнов с backoff, потом сдаёмся (показываем
-   ошибку), чтобы не зациклиться при фатальном обрыве.
-4. **`disconnected` не трогаем** — транзиентное состояние, WebRTC часто
-   восстанавливается сам. Реагируем только на `failed`.
-
-Связано с tunnel-only ICE: при единственной паре переподключения
-критичны — fallback-путей нет по дизайну.
-
-### TODO: взаимное исключение host/join (частично сделано)
-
-Движок хранит `e.call` (локальный SFU) и `joinedSFUHost` (удалённый).
-Без взаимного исключения пир мог оказаться **хостом И участником**
-одновременно — браузер получал SFU-сигналы от обоих SFU на один `pc` →
-SDP корраптился → `failed`.
-
-**Сделано**: `handleCallJoin` при join'е на удалённый SFU вызывает
-`EndCall()`; `CreateCall` чистит `joinedSFUHost`.
-
-**Осталось**: UI-индикация что нельзя/закрылась своя группа при переходе;
-проверка что авто-реджойн (`/api/call/state`) не воскрешает локальный
-звонок после перехода в чужой.
+**Потенциальное улучшение**: ICE restart (`{iceRestart: true}`) вместо
+полного реджойна — легче, не дёргает других участников каскадом
+renegotiation. Но SFU удаляет участника при failed (его PC тоже детектит
+обрыв), так что ICE restart упёрся бы в "unknown participant" → всё равно
+нужен fallback на полный реджойн.
 
 ---
 
@@ -2039,6 +2060,11 @@ engine (root) → общение по localhost. Платформо-специф
 - Флаг `--verbose` / `--quiet` (или `LOG_LEVEL` env var).
 - Группировка: "Starting DNS..." → "DNS ready (50ms)" вместо 5 отдельных строк.
 - Библиотека: `log/slog` (stdlib Go 1.21+) — zero-dependency, structured, leveled.
+
+**Частично сделано**: per-packet логи (`[utun]`/`[udp]` на каждый пакет)
+вынесены за флаг `F2F_PACKET_LOG=1` (по умолчанию off) — они топили SFU-логи
+и всё остальное. См. `packetLog()` в engine.go. Это первый шаг к управляемой
+verbosity; полноценный leveled logger ещё впереди.
 
 ### 2. Тесты (высокий приоритет)
 
