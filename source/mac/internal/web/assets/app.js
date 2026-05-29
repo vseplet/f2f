@@ -1246,7 +1246,7 @@ $(function () {
       const $list = $('#trusted-peers-list');
       $list.empty();
       if (rows.length === 0) {
-        $list.append('<div class="ax-list-empty">no peer CAs installed yet · they appear automatically as peers join and you confirm with your macOS password.</div>');
+        $list.append('<div class="ax-list-empty">no peer CAs discovered yet · they appear automatically as peers join. click install to trust a peer (asks your macOS password once).</div>');
         return;
       }
       rows.forEach((r) => {
@@ -1258,18 +1258,37 @@ $(function () {
           $head.append($('<span class="ax-pill ax-pill-peer">').text(r.common_name));
         }
         $head.append($('<span class="ax-pill ax-pill-fp">').text(r.fingerprint || ''));
-        const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '—';
-        $head.append($('<span class="ax-intercept-meta">').text('installed ' + when));
-        const $rm = $('<button class="ax-list-remove">');
-        armRemove($rm, () => {
-          $.ajax({
-            url: '/api/trusted-peers/' + encodeURIComponent(r.fingerprint),
-            method: 'DELETE',
-          })
-            .done(refreshTrustedPeers)
-            .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
-        });
-        $head.append($rm);
+        if (r.installed) {
+          const when = r.installed_at ? humanAgo(r.installed_at * 1000) : '';
+          $head.append($('<span class="ax-pill ax-pill-active" style="background:#86b86b;color:#000">').text('installed'));
+          if (when) $head.append($('<span class="ax-intercept-meta">').text(when));
+          const $rm = $('<button class="ax-list-remove">');
+          armRemove($rm, () => {
+            $.ajax({
+              url: '/api/trusted-peers/' + encodeURIComponent(r.fingerprint),
+              method: 'DELETE',
+            })
+              .done(refreshTrustedPeers)
+              .fail((xhr) => alert('Remove failed: ' + errorOf(xhr)));
+          });
+          $head.append($rm);
+        } else {
+          $head.append($('<span class="ax-intercept-meta">').text('not trusted'));
+          const $install = $('<button class="ax-btn ax-btn-primary" style="padding:2px 10px">').text('install');
+          $install.on('click', () => {
+            $install.prop('disabled', true).text('installing…');
+            $.ajax({
+              url: '/api/trusted-peers/' + encodeURIComponent(r.fingerprint) + '/install',
+              method: 'POST',
+            })
+              .done(refreshTrustedPeers)
+              .fail((xhr) => {
+                alert('Install failed: ' + errorOf(xhr));
+                $install.prop('disabled', false).text('install');
+              });
+          });
+          $head.append($install);
+        }
         $row.append($head);
         $list.append($row);
       });

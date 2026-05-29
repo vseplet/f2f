@@ -334,6 +334,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/my-ca", s.handleMyCA)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
+	mux.HandleFunc("POST /api/trusted-peers/{fp}/install", s.handleInstallTrustedPeer)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
 
 	// Per-camp configuration. /api/camps is the global view (list +
@@ -745,10 +746,26 @@ func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTrustedPeers returns the UI's view of which peer CAs we've
-// installed locally — fingerprint, common name, install timestamp.
+// handleTrustedPeers returns the UI's view of discovered peer CAs —
+// fingerprint, common name, install state.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+}
+
+// handleInstallTrustedPeer adds a discovered peer CA to the system
+// keychain (macOS prompts for the admin password). Triggered by the
+// user clicking "install".
+func (s *Server) handleInstallTrustedPeer(w http.ResponseWriter, r *http.Request) {
+	fp := r.PathValue("fp")
+	if fp == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
+		return
+	}
+	if err := s.engine.InstallPeerCA(fp); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRemovePeerDomain drops one (peer, domain) entry from the

@@ -439,6 +439,7 @@ type TrustedPeerCA struct {
 	CommonName  string `json:"common_name"`
 	Fingerprint string `json:"fingerprint"`
 	InstalledAt int64  `json:"installed_at"`
+	Installed   bool   `json:"installed"` // true once added to the system keychain
 }
 
 // domainHealth is the latest health-check result for one local service.
@@ -1607,15 +1608,20 @@ func (e *Engine) loadTrustedPeerCAs() {
 			continue
 		}
 		fp := certFingerprint(cert)
+		full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
+		installed := keychain.IsInstalledByFingerprint(full256)
 		installedAt := int64(0)
-		if fi, err := os.Stat(full); err == nil {
-			installedAt = fi.ModTime().Unix()
+		if installed {
+			if fi, err := os.Stat(full); err == nil {
+				installedAt = fi.ModTime().Unix()
+			}
 		}
 		e.trustedPeerCAs[fp] = TrustedPeerCA{
 			PeerName:    strings.TrimSuffix(en.Name(), ".crt"),
 			CommonName:  cert.Subject.CommonName,
 			Fingerprint: fp,
 			InstalledAt: installedAt,
+			Installed:   installed,
 		}
 	}
 }
@@ -1699,14 +1705,16 @@ func (e *Engine) pollAllPeerCAs(ctx context.Context) {
 			log.Printf("ca-poll: peer %s: HTTP %d (peer running an old f2f-mac without /api/ca-cert?)", t.name, resp.StatusCode)
 			continue
 		}
-		e.maybeInstallPeerCA(t.name, body)
+		e.discoverPeerCA(t.name, body)
 	}
 }
 
-// maybeInstallPeerCA parses the PEM body, computes a fingerprint,
-// and if not already known, persists to disk and runs `security
-// add-trusted-cert`. Failures are logged but non-fatal.
-func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
+// discoverPeerCA parses the PEM body, computes a fingerprint, persists
+// the cert to disk, and records it as a known-but-not-installed peer CA.
+// It does NOT touch the system keychain — installing (which prompts for
+// the macOS password) is a deliberate user action via InstallPeerCA.
+// If the CA already happens to be in the keychain, it's marked installed.
+func (e *Engine) discoverPeerCA(peerName string, pem []byte) {
 	cert, err := parseCACert(pem)
 	if err != nil {
 		log.Printf("ca: peer %s: parse: %v", peerName, err)
@@ -1731,27 +1739,52 @@ func (e *Engine) maybeInstallPeerCA(peerName string, pem []byte) {
 		log.Printf("ca: write %s: %v", certPath, err)
 		return
 	}
+
 	full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
-	if keychain.IsInstalledByFingerprint(full256) {
-		log.Printf("ca: peer %s CA already in keychain (fp %s) — no prompt", peerName, fp)
-	} else {
-		log.Printf("ca: installing peer %s CA %q (fp %s) — macOS will prompt for password", peerName, cert.Subject.CommonName, fp)
-		if err := keychain.AddTrustedRoot(certPath); err != nil {
-			log.Printf("ca: install peer %s: %v", peerName, err)
-			return
-		}
-	}
+	installed := keychain.IsInstalledByFingerprint(full256)
+
 	e.trustedPeerCAsMu.Lock()
 	entry := TrustedPeerCA{
 		PeerName:    peerName,
 		CommonName:  cert.Subject.CommonName,
 		Fingerprint: fp,
-		InstalledAt: time.Now().Unix(),
+		Installed:   installed,
+	}
+	if installed {
+		entry.InstalledAt = time.Now().Unix()
 	}
 	e.trustedPeerCAs[fp] = entry
 	e.trustedPeerCAsMu.Unlock()
 	e.persistTrustedPeerToCamp(entry)
-	log.Printf("ca: trusted peer %s", peerName)
+	log.Printf("ca: discovered peer %s CA (fp %s, installed=%v)", peerName, fp, installed)
+}
+
+// InstallPeerCA adds a previously-discovered peer CA to the system
+// keychain as a trusted root. macOS prompts for the admin password.
+// Triggered by the user clicking "install" in the UI.
+func (e *Engine) InstallPeerCA(fp string) error {
+	e.trustedPeerCAsMu.Lock()
+	entry, ok := e.trustedPeerCAs[fp]
+	e.trustedPeerCAsMu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown peer CA %s", fp)
+	}
+	if entry.Installed {
+		return nil
+	}
+	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
+	log.Printf("ca: installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
+	if err := keychain.AddTrustedRoot(certPath); err != nil {
+		return fmt.Errorf("install peer %s: %w", entry.PeerName, err)
+	}
+	e.trustedPeerCAsMu.Lock()
+	entry.Installed = true
+	entry.InstalledAt = time.Now().Unix()
+	e.trustedPeerCAs[fp] = entry
+	e.trustedPeerCAsMu.Unlock()
+	e.persistTrustedPeerToCamp(entry)
+	log.Printf("ca: installed peer %s CA", entry.PeerName)
+	return nil
 }
 
 // persistTrustedPeerToCamp upserts the trusted-CA metadata into camp
