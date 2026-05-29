@@ -297,6 +297,27 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	target, _ := url.Parse("http://" + net.JoinHostPort(upHost, strconv.Itoa(port)))
 	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	// Tell the backend the request reached us over HTTPS (we terminate TLS
+	// and forward plain HTTP). Without this, apps like Gitea generate
+	// http:// links. The proto is derived from which listener served the
+	// request: r.TLS is non-nil only on the :443 HTTPS listener.
+	fwdProto := "http"
+	if r.TLS != nil {
+		fwdProto = "https"
+	}
+	fwdHost := r.Host
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Header.Set("X-Forwarded-Proto", fwdProto)
+		req.Header.Set("X-Forwarded-Host", fwdHost)
+		if clientIP != "" {
+			req.Header.Set("X-Forwarded-For", clientIP)
+		}
+	}
+
 	// httputil's default ErrorHandler logs to stderr; replace with a
 	// 502 so the client gets a meaningful response instead of a half-open
 	// connection.
