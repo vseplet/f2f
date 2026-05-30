@@ -157,13 +157,15 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	label := strings.TrimSuffix(name, s.suffix)
-	if label == "" || strings.Contains(label, ".") {
-		// Multi-level under the TLD aren't supported.
+	if label == "" {
 		m.Rcode = dns.RcodeNameError
 		s.attachSOA(m)
 		_ = w.WriteMsg(m)
 		return
 	}
+	// Nested labels (gitea.mini) and wildcard subzones (*.mini) are
+	// resolved via the Resolver — it walks MyDomains and peer domains
+	// for both exact and wildcard matches.
 
 	host, ok := s.res.LookupHost(label)
 	if !ok {

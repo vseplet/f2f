@@ -731,7 +731,31 @@ func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cleaned)
 }
 
+// isValidDomainLabel accepts three forms used in MyDomains:
+//   - simple:  "gitea"
+//   - nested:  "gitea.mini"
+//   - wildcard catch-all: "*.mini"
+//
+// Each dot-separated piece is checked as a DNS label.
 func isValidDomainLabel(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	if strings.HasPrefix(s, "*.") {
+		s = s[2:]
+		if s == "" {
+			return false
+		}
+	}
+	for _, part := range strings.Split(s, ".") {
+		if !isValidDNSPart(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidDNSPart(s string) bool {
 	if len(s) == 0 || len(s) > 63 {
 		return false
 	}
