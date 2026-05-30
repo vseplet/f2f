@@ -2159,6 +2159,10 @@ func (e *Engine) checkMyDomainsHealth(ctx context.Context) {
 		if d.Port == 0 {
 			continue
 		}
+		// Wildcard entries don't have a concrete backend to probe.
+		if IsWildcardLabel(d.Name) {
+			continue
+		}
 		status := "fail"
 		addr := net.JoinHostPort(d.upstreamHost(), strconv.Itoa(d.Port))
 		dialer := net.Dialer{Timeout: 2 * time.Second}
@@ -2768,6 +2772,20 @@ func sortedDomains(in []DomainEntry) []DomainEntry {
 	return out
 }
 
+// IsWildcardLabel returns true for entries of the form "*.X" — a
+// catch-all claim over the subdomain X.
+func IsWildcardLabel(name string) bool {
+	return strings.HasPrefix(name, "*.") && len(name) > 2
+}
+
+// MatchesWildcard reports whether label is covered by pattern of the
+// form "*.X" — i.e. label ends with ".X". Pattern must already be
+// known wildcard.
+func MatchesWildcard(pattern, label string) bool {
+	suffix := pattern[1:] // drop the "*", keep ".X"
+	return len(label) > len(suffix) && strings.HasSuffix(strings.ToLower(label), strings.ToLower(suffix))
+}
+
 func sortedFiles(in []PeerFile) []PeerFile {
 	out := append([]PeerFile(nil), in...)
 	sort.Slice(out, func(i, j int) bool {
@@ -2869,8 +2887,15 @@ func (e *Engine) SetMyDomains(list []DomainEntry) {
 // peer we can't currently UDP-reach would just make apps stall.
 func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
 	// Self first — MyDomains doesn't need the engine lock.
-	for _, d := range e.MyDomains() {
-		if strings.EqualFold(d.Name, label) {
+	// Two-pass: exact match wins over wildcard.
+	mine := e.MyDomains()
+	for _, d := range mine {
+		if !IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
+			return internaldns.Host{V4: "127.0.0.1"}, true
+		}
+	}
+	for _, d := range mine {
+		if IsWildcardLabel(d.Name) && MatchesWildcard(d.Name, label) {
 			return internaldns.Host{V4: "127.0.0.1"}, true
 		}
 	}
@@ -2879,12 +2904,29 @@ func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Pass 1: exact match across peers.
 	for _, p := range e.peers {
 		if !p.IsOnline() || p.UDPAddr == nil || p.Pub == "" {
 			continue
 		}
 		for _, d := range p.Domains {
-			if !strings.EqualFold(d.Name, label) {
+			if IsWildcardLabel(d.Name) || !strings.EqualFold(d.Name, label) {
+				continue
+			}
+			v4addr, err := overlay.PubToV4Addr(p.Pub)
+			if err != nil {
+				return internaldns.Host{}, false
+			}
+			return internaldns.Host{V4: v4addr.String()}, true
+		}
+	}
+	// Pass 2: wildcard match across peers.
+	for _, p := range e.peers {
+		if !p.IsOnline() || p.UDPAddr == nil || p.Pub == "" {
+			continue
+		}
+		for _, d := range p.Domains {
+			if !IsWildcardLabel(d.Name) || !MatchesWildcard(d.Name, label) {
 				continue
 			}
 			v4addr, err := overlay.PubToV4Addr(p.Pub)

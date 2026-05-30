@@ -931,15 +931,21 @@ $(function () {
       return;
     }
     myDomains.forEach((d) => {
+      const isWildcard = (d.name || '').startsWith('*.');
       const fqdn = d.name + '.' + campLabelOrPlaceholder() + '.f2f';
       const $row = $('<div class="ax-intercept">');
       const $head = $('<div class="ax-intercept-head" style="cursor:default">');
       $head.append($('<span class="ax-intercept-caret">').text(' '));
-      $head.append(makeHealthDot(d));
-      const $link = $('<a class="ax-intercept-spec ax-domain-link" target="_blank">')
-        .attr('href', 'https://' + fqdn + '/')
-        .text(fqdn);
+      if (!isWildcard) $head.append(makeHealthDot(d));
+      const $link = isWildcard
+        ? $('<span class="ax-intercept-spec">').text(fqdn)
+        : $('<a class="ax-intercept-spec ax-domain-link" target="_blank">')
+            .attr('href', 'https://' + fqdn + '/')
+            .text(fqdn);
       $head.append($link);
+      if (isWildcard) {
+        $head.append($('<span class="ax-pill ax-pill-fp">').text('wildcard'));
+      }
       const target = (d.host || '127.0.0.1') + (d.port ? ':' + d.port : '');
       if (d.port) {
         $head.append($('<span class="ax-pill ax-pill-peer">').text('→ ' + target));
@@ -969,8 +975,17 @@ $(function () {
   $('#btn-add-my-domain').on('click', () => {
     const name = ($('#my-domain-name').val() || '').trim().toLowerCase();
     if (!name) return;
-    if (!/^[a-z0-9-]+$/.test(name)) {
-      alert('Name may contain only lowercase letters, digits, and "-".');
+    // Allowed forms:
+    //   - simple:  gitea
+    //   - nested:  gitea.mini
+    //   - wildcard catch-all: *.mini
+    const isWildcard = name.startsWith('*.');
+    const rest = isWildcard ? name.slice(2) : name;
+    if (
+      rest.length === 0 ||
+      !/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(rest)
+    ) {
+      alert('Name must be like "gitea", "gitea.mini", or "*.mini".');
       return;
     }
     const port = parseInt($('#my-domain-port').val(), 10);

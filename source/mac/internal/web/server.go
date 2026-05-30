@@ -271,24 +271,35 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := strings.TrimSuffix(host, suffix)
-	if label == "" || strings.Contains(label, ".") {
+	if label == "" {
 		http.Error(w, "bad subdomain", http.StatusNotFound)
 		return
 	}
 
+	// Two-pass match against MyDomains: exact wins over wildcard.
 	var (
-		port    int
-		upHost  string
+		port   int
+		upHost string
 	)
-	for _, d := range s.engine.MyDomains() {
-		if strings.EqualFold(d.Name, label) {
+	mine := s.engine.MyDomains()
+	for _, d := range mine {
+		if !engine.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
 			port = d.Port
 			upHost = d.Host
-			if upHost == "" {
-				upHost = "127.0.0.1"
-			}
 			break
 		}
+	}
+	if port == 0 {
+		for _, d := range mine {
+			if engine.IsWildcardLabel(d.Name) && engine.MatchesWildcard(d.Name, label) {
+				port = d.Port
+				upHost = d.Host
+				break
+			}
+		}
+	}
+	if upHost == "" {
+		upHost = "127.0.0.1"
 	}
 	if port == 0 {
 		http.Error(w, "no such domain published locally", http.StatusNotFound)
