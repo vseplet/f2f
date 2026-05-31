@@ -1150,6 +1150,15 @@ a.ax-domain-link:hover {
     border-color: #4a7c59;
 }
 
+/* Mirror only the self camera — matches what people are used to
+   seeing in a real mirror. Remote tiles stay un-mirrored (we want
+   to see peers as they really are; text behind them would read
+   backwards otherwise). The screen-share tile lives under a
+   different class (.m2-tile-screen) and is not flipped. */
+.m2-tile-self video {
+    transform: scaleX(-1);
+}
+
 .m2-tile-label {
     position: absolute;
     bottom: 4px;

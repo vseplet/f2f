@@ -306,12 +306,16 @@ var campIDRe = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
 func validCampID(id string) bool { return campIDRe.MatchString(id) }
 
 // userHome returns the home directory of the invoking (non-root)
-// user. f2f-mac runs as root via sudo; we want files to live under
-// the user's home and be readable from Finder, so we resolve via
-// SUDO_USER first.
+// user. The helper runs as root via sudo; we want files to live
+// under the user's home and be readable from their file manager,
+// so we resolve via SUDO_USER first and look up the actual home
+// from the OS user database — /Users/<name> on macOS,
+// /home/<name> on linux, etc.
 func userHome() string {
 	if su := os.Getenv("SUDO_USER"); su != "" {
-		return filepath.Join("/Users", su)
+		if u, err := user.Lookup(su); err == nil && u.HomeDir != "" {
+			return u.HomeDir
+		}
 	}
 	if h := os.Getenv("HOME"); h != "" {
 		return h

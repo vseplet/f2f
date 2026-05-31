@@ -34,13 +34,14 @@ func EnableFilterEngine() (FilterEngineToken, error) { return "", nil }
 func DisableFilterEngine(FilterEngineToken) error { return nil }
 
 // InstallNAT creates an nftables postrouting masquerade for traffic
-// leaving from Subnet via EgressIface. The table is recreated
-// atomically by deleting any prior instance first.
+// leaving from Subnet via EgressIface. The declare-then-delete
+// header makes the install/replace atomic — nft runs the whole
+// script as one transaction, so there's no window where masquerade
+// is half-installed.
 func InstallNAT(r NATRules) error {
-	// Replace any prior table; nft is fine if the delete fails because
-	// the table didn't exist.
-	_ = RemoveNAT()
-	rules := fmt.Sprintf(`table ip f2fnat {
+	rules := fmt.Sprintf(`table ip f2fnat {}
+delete table ip f2fnat
+table ip f2fnat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     ip saddr %s oif "%s" masquerade

@@ -371,6 +371,12 @@ type Engine struct {
 	// main via SetTunnelHTTPPort.
 	tunnelHTTPPort string
 
+	// defaultListen is the UDP address autostart binds the peer
+	// transport to. Wired by main via SetDefaultListen (default
+	// ":9000") so multiple helpers on one host can pick disjoint
+	// ports without recompiling.
+	defaultListen string
+
 	// trustedPeerCAs tracks which peer CAs we've already installed in
 	// the system keychain (by SHA-256 fingerprint of the cert). Avoids
 	// repeated `security add-trusted-cert` calls (each one popping a
@@ -926,13 +932,13 @@ func (e *Engine) CA() *ca.CA {
 // camp it was added to (peer tunnel_ips are camp-local), and mixing
 // state across camps causes stale-peer dial loops after switching.
 //
-// shared lives under the internal app-support path (under camp_id, so
+// shared lives under the platform's app-support dir (under camp_id, so
 // new-format ids with a 64-hex prefix get full isolation). downloads
 // goes to a user-visible ~/Downloads/f2f-drops/<short> so people can
-// open it from Finder without staring at hex.
+// open it from their file manager without staring at hex.
 func (e *Engine) torrentSharedDir() string {
 	home := userHome()
-	return filepath.Join(home, "Library", "Application Support", "f2f", e.campStateDirSegment(), "shared")
+	return filepath.Join(platform.AppSupportDir(home), "f2f", e.campStateDirSegment(), "shared")
 }
 
 func (e *Engine) torrentDownloadsDir() string {
@@ -967,12 +973,16 @@ func (e *Engine) campUserVisibleSegment() string {
 	return label + "_" + id[:8]
 }
 
-// userHome returns the home of the invoking (non-root) user. Engine runs
-// as root via sudo, but files should be owned/visible to the user.
+// userHome returns the home of the invoking (non-root) user. Engine
+// runs as root via sudo, but files should be owned/visible to the
+// user. Resolves via SUDO_USER through the OS user database so the
+// real path comes out (/Users/<name> on macOS, /home/<name> on
+// linux).
 func userHome() string {
 	if su := os.Getenv("SUDO_USER"); su != "" {
-		// /Users/<su>
-		return filepath.Join("/Users", su)
+		if u, err := user.Lookup(su); err == nil && u.HomeDir != "" {
+			return u.HomeDir
+		}
 	}
 	if h := os.Getenv("HOME"); h != "" {
 		return h
@@ -2288,6 +2298,14 @@ func domainPollPort(e *Engine) string {
 
 func (e *Engine) SetTunnelHTTPPort(port string) {
 	e.tunnelHTTPPort = port
+}
+
+// SetDefaultListen wires the UDP listen address autostart should use
+// when bringing the last camp up. Empty falls back to ":0" so the
+// kernel picks a free port — peers learn our reflex after NAT, so
+// the local port number does not need to be fixed or coordinated.
+func (e *Engine) SetDefaultListen(addr string) {
+	e.defaultListen = addr
 }
 
 func (e *Engine) holePunchLoop(ctx context.Context) {

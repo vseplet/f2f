@@ -5,7 +5,7 @@
 //  2. OS packet-filter engine enabled (macOS pf only; no-op on Linux)
 //  3. a NAT rule installed via the platform package
 //
-// All changes are persisted to /var/run/f2f-mac.egress.json before
+// All changes are persisted to /var/run/f2f.egress.json before
 // they happen; on startup any leftover state from a dead prior
 // instance is rolled back automatically.
 package egress
@@ -22,7 +22,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
-const statePath = "/var/run/f2f-mac.egress.json"
+const statePath = "/var/run/f2f.egress.json"
 
 // state is what we persist between invocations to survive crashes.
 type state struct {

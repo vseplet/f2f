@@ -56,3 +56,7 @@ func IfDisableMulticast(iface string) error {
 	}
 	return nil
 }
+
+// IfDisableOffload is a no-op on macOS — utun does not expose GSO/TSO
+// the way Linux TUN does, and packets always arrive ≤ MTU.
+func IfDisableOffload(iface string) error { return nil }

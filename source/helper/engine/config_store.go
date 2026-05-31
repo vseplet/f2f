@@ -284,9 +284,13 @@ func (e *Engine) StartLastCamp() error {
 		log.Printf("autostart: skipping camp %s (no config or missing name)", st.LastCampID)
 		return nil
 	}
+	listen := e.defaultListen
+	if listen == "" {
+		listen = ":0"
+	}
 	cfg := Config{
 		LocalIP: "10.99.0.1", // placeholder; camp announce overrides
-		Listen:  ":9000",
+		Listen:  listen,
 		Camp: &CampConfig{
 			URL:      "wss://f2f-camp.fly.dev/ws",
 			StunAddr: "f2f-camp.fly.dev:3478",

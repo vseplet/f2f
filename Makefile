@@ -8,7 +8,7 @@ WAILS ?= $(shell go env GOPATH)/bin/wails
 help:
 	@echo "f2f targets:"
 	@echo "  make run                  run mac client (sudo, web UI on 127.0.0.1:2202)"
-	@echo "  make dev                  run helper (sudo, web UI on 127.0.0.1:2202)"
+	@echo "  make dev                  run helper (cross-platform: works inside a linux VM too)"
 	@echo "  make build                build release binary at ./f2f-mac"
 	@echo "  make kill                 kill any running f2f-mac process"
 	@echo "  make camp-run             run camp server locally with bun"
@@ -23,7 +23,7 @@ run:
 	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/mac/internal/web/assets go run ./source/mac
 
 dev:
-	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper
+	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper $(ARGS)
 
 build:
 	go build -o f2f-mac ./source/mac

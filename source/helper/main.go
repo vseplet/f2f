@@ -135,11 +135,13 @@ func runCmd(args []string) error {
 func uiCmd(args []string) error {
 	fs := flag.NewFlagSet("ui", flag.ExitOnError)
 	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI; default keeps the UI off the LAN")
+	listen := fs.String("listen", ":0", "UDP address to listen on for peer transport; default :0 lets the kernel pick a free port (camp learns reflex after NAT anyway)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	eng := engine.New()
+	eng.SetDefaultListen(*listen)
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	srv := web.New(eng, *bind)
@@ -167,11 +169,15 @@ func uiCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("UI listening on http://%s", *bind)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
+			// UI listener failure is logged but non-fatal — the
+			// engine keeps the tunnel/firewall/peerping up so an
+			// in-flight call doesn't drop because the user picked
+			// a bad --bind value. They can ^C and retry, or run
+			// without UI if autostart did its job.
+			log.Printf("UI server error: %v (engine continues; fix --bind and restart)", err)
 		}
 	}()
 
@@ -188,12 +194,8 @@ func uiCmd(args []string) error {
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		log.Println("shutting down…")
-	case err := <-serverErr:
-		log.Printf("HTTP server error: %v", err)
-	}
+	<-ctx.Done()
+	log.Println("shutting down…")
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

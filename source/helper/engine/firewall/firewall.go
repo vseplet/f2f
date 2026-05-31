@@ -8,7 +8,7 @@
 // peer at <tunnel_ip>:<port>. The firewall makes the tunnel as
 // restrictive as any incoming-from-internet interface by default.
 //
-// State is persisted at /var/run/f2f-mac.firewall.json so a crashed
+// State is persisted at /var/run/f2f.firewall.json so a crashed
 // process can be cleaned up by the next invocation. The actual
 // pf/nft work is in platform; this package owns the high-level
 // lifecycle (sweep, install, persist, teardown).
@@ -26,7 +26,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
-const statePath = "/var/run/f2f-mac.firewall.json"
+const statePath = "/var/run/f2f.firewall.json"
 
 // PortRule is one allow entry. Protocol is "tcp" or "udp".
 type PortRule struct {
