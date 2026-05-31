@@ -340,11 +340,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes(mux *http.ServeMux) {
-	sub, err := fs.Sub(assetsFS, "assets")
-	if err != nil {
-		panic(err) // build-time; embed is wrong
+	if devDir := os.Getenv("F2F_DEV_ASSETS"); devDir != "" {
+		log.Printf("web: serving assets from disk (F2F_DEV_ASSETS=%s)", devDir)
+		mux.Handle("/", http.FileServer(http.Dir(devDir)))
+	} else {
+		sub, err := fs.Sub(assetsFS, "assets")
+		if err != nil {
+			panic(err) // build-time; embed is wrong
+		}
+		mux.Handle("/", http.FileServer(http.FS(sub)))
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("POST /api/start", s.handleStart)
