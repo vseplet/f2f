@@ -56,6 +56,13 @@
         const tileH = bestTileW / ratio;
         $grid.style.gridTemplateColumns = 'repeat(' + bestCols + ', ' + bestTileW + 'px)';
         $grid.style.gridTemplateRows    = 'repeat(' + bestRows + ', ' + tileH + 'px)';
+        // Center the last row's orphan tiles if it's incomplete.
+        const orphans = n - (bestRows - 1) * bestCols;
+        const firstOrphanIdx = (bestRows - 1) * bestCols;
+        const offset = orphans < bestCols ? (bestCols - orphans) * (bestTileW + gap) / 2 : 0;
+        for (let i = 0; i < n; i++) {
+          $grid.children[i].style.marginLeft = (i === firstOrphanIdx && offset > 0) ? offset + 'px' : '';
+        }
       });
     }
     new MutationObserver(reflowGrid).observe($grid, { childList: true });
