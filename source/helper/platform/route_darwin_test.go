@@ -1,6 +1,6 @@
 //go:build darwin
 
-package route
+package platform
 
 import (
 	"net/netip"
@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRouteArgs(t *testing.T) {
+func TestRouteIfaceArgs(t *testing.T) {
 	cases := []struct {
 		name   string
 		action string
@@ -58,7 +58,7 @@ func TestRouteArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse prefix %q: %v", c.prefix, err)
 			}
-			got := routeArgs(c.action, p, c.iface)
+			got := routeIfaceArgs(c.action, p, c.iface)
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("\n got: %v\nwant: %v", got, c.want)
 			}

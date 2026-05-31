@@ -1,5 +1,3 @@
-//go:build darwin
-
 package engine
 
 import (
@@ -9,8 +7,8 @@ import (
 	"path/filepath"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/keychain"
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // ensureStore lazily opens $HOME/.f2f/. Called from Start so test code
@@ -370,8 +368,8 @@ func (e *Engine) RemoveTrustedPeer(fingerprint string) error {
 	if err := os.Remove(certPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("ca: remove %s: %v", certPath, err)
 	}
-	if err := keychain.RemoveByCommonName(entry.CommonName); err != nil {
-		log.Printf("ca: keychain remove %s: %v", entry.CommonName, err)
+	if err := platform.TrustStoreRemove(entry.CommonName); err != nil {
+		log.Printf("ca: trust store remove %s: %v", entry.CommonName, err)
 	}
 	e.mu.Lock()
 	if e.camp != nil {

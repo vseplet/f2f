@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package torrent wraps anacrolix/torrent for f2f's BitTorrent-based
 // file sharing across a camp.
 //

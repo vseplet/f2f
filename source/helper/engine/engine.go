@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package engine owns the tunnel runtime: utun, UDP, routes, and (optionally)
 // egress NAT setup. It exposes a Start/Stop lifecycle plus methods to mutate
 // the intercept list while running, so that both the CLI and the web UI can
@@ -36,7 +34,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/firewall"
 	"github.com/vseplet/f2f/source/helper/identity"
-	"github.com/vseplet/f2f/source/helper/keychain"
 	internaltorrent "github.com/vseplet/f2f/source/helper/torrent"
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
 	"github.com/vseplet/f2f/source/helper/engine/packet"
@@ -44,6 +41,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
 	"github.com/vseplet/f2f/source/helper/engine/route"
 	"github.com/vseplet/f2f/source/helper/engine/tunnel"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // tunnelSubnetCIDR is the CGNAT /10 the overlay carves per-peer
@@ -97,7 +95,6 @@ type Status struct {
 	PeerAddr     string `json:"peer_addr,omitempty"`       // active peer's UDP endpoint
 	EgressActive bool   `json:"egress_active"`
 	EgressIface  string `json:"egress_iface,omitempty"`
-	EgressAnchor string `json:"egress_anchor,omitempty"`
 	CampActive   bool   `json:"camp_active"`
 	CampURL      string `json:"camp_url,omitempty"`
 	CampName     string `json:"camp_name,omitempty"`
@@ -588,7 +585,11 @@ func (e *Engine) Start(cfg Config) error {
 	// We always run egress in camp mode — the tunnel is useless without
 	// a path to the internet.
 	if cfg.EgressIface == "" {
-		cfg.EgressIface = detectDefaultRouteIface()
+		if iface, err := platform.DefaultEgressInterface(); err != nil {
+			log.Printf("egress: %v; skipping NAT (peers won't reach internet through this node)", err)
+		} else {
+			cfg.EgressIface = iface
+		}
 	}
 	if cfg.EgressIface != "" {
 		subnet := netip.MustParsePrefix(tunnelSubnetCIDR)
@@ -597,10 +598,7 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("egress setup: %w", err)
 		}
 		e.egr = egr
-		log.Printf("egress: NAT %s → %s via pf anchor %q, ip.forwarding=1",
-			subnet, cfg.EgressIface, egr.Anchor())
-	} else {
-		log.Printf("egress: could not detect default route iface; skipping NAT (peers won't reach internet through this node)")
+		log.Printf("egress: NAT %s → %s, ip-forwarding=1", subnet, cfg.EgressIface)
 	}
 
 	// UDP socket.
@@ -716,8 +714,8 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
 	} else {
 		e.fw = fw
-		log.Printf("firewall: pf anchor %q on %s scoped to %s/32, %d built-in + %d user rule(s)",
-			fw.Anchor(), tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
+		log.Printf("firewall: installed on %s scoped to %s/32, %d built-in + %d user rule(s)",
+			tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
@@ -828,13 +826,14 @@ func (e *Engine) Start(cfg Config) error {
 			log.Printf("dns: %v (resolver disabled)", err)
 		} else {
 			e.dnsSrv = srv
-			if rerr := internaldns.WriteResolver(zone, dnsAddr); rerr != nil {
-				log.Printf("dns: write resolver: %v", rerr)
+			if rerr := platform.InstallZoneResolver(zone, dnsAddr); rerr != nil {
+				log.Printf("dns: install zone resolver: %v", rerr)
 			} else {
 				log.Printf("dns: serving %s.f2f on %s", zone, dnsAddr)
-				// Flush macOS's resolver cache so any stale NXDOMAIN
-				// pinned before our DNS was up gets dropped immediately.
-				internaldns.FlushCache()
+				// Flush the system's resolver cache so any stale
+				// NXDOMAIN pinned before our DNS was up gets dropped
+				// immediately.
+				_ = platform.FlushDNSCache()
 			}
 		}
 	}
@@ -878,7 +877,7 @@ func (e *Engine) Start(cfg Config) error {
 const caDir = "/var/lib/f2f/ca"
 
 // ensureCA loads the on-disk CA, regenerates it if missing or pinned to
-// a different camp_id, and installs the cert into the system keychain.
+// a different camp_id, and installs the cert into the system trust store.
 // Idempotent: safe to call repeatedly on Start.
 func (e *Engine) ensureCA() error {
 	loaded, err := ca.Load(caDir)
@@ -888,7 +887,7 @@ func (e *Engine) ensureCA() error {
 	}
 	if loaded != nil && !loaded.MatchesZone(identity.CampLabel(e.cfg.Camp.ID)) {
 		log.Printf("ca: existing CA pinned to a different camp_id; rotating")
-		_ = keychain.RemoveByCommonName(loaded.CommonName())
+		_ = loaded.RemoveSystemTrust()
 		loaded = nil
 	}
 	if loaded == nil {
@@ -904,12 +903,12 @@ func (e *Engine) ensureCA() error {
 	} else {
 		log.Printf("ca: loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
 	}
-	if keychain.IsInstalledByFingerprint(loaded.Fingerprint256Hex()) {
-		log.Printf("ca: already in keychain (fp %s) — skipping install", loaded.Fingerprint())
-	} else if err := keychain.AddTrustedRoot(ca.CertPath(caDir)); err != nil {
-		log.Printf("ca: install in keychain: %v (https will show warnings)", err)
+	if loaded.IsSystemTrusted() {
+		log.Printf("ca: already in system trust store (fp %s) — skipping install", loaded.Fingerprint())
+	} else if err := loaded.EnsureSystemTrust(ca.CertPath(caDir)); err != nil {
+		log.Printf("ca: install in system trust store: %v (https will show warnings)", err)
 	} else {
-		log.Printf("ca: installed in keychain (fp %s)", loaded.Fingerprint())
+		log.Printf("ca: installed in system trust store (fp %s)", loaded.Fingerprint())
 	}
 	e.ca = loaded
 	return nil
@@ -1609,7 +1608,7 @@ func (e *Engine) loadTrustedPeerCAs() {
 		}
 		fp := certFingerprint(cert)
 		full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
-		installed := keychain.IsInstalledByFingerprint(full256)
+		installed := platform.TrustStoreContains(full256)
 		installedAt := int64(0)
 		if installed {
 			if fi, err := os.Stat(full); err == nil {
@@ -1741,7 +1740,7 @@ func (e *Engine) discoverPeerCA(peerName string, pem []byte) {
 	}
 
 	full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
-	installed := keychain.IsInstalledByFingerprint(full256)
+	installed := platform.TrustStoreContains(full256)
 
 	e.trustedPeerCAsMu.Lock()
 	entry := TrustedPeerCA{
@@ -1760,8 +1759,8 @@ func (e *Engine) discoverPeerCA(peerName string, pem []byte) {
 }
 
 // InstallPeerCA adds a previously-discovered peer CA to the system
-// keychain as a trusted root. macOS prompts for the admin password.
-// Triggered by the user clicking "install" in the UI.
+// trust store as a trusted root. macOS prompts for the admin
+// password. Triggered by the user clicking "install" in the UI.
 func (e *Engine) InstallPeerCA(fp string) error {
 	e.trustedPeerCAsMu.Lock()
 	entry, ok := e.trustedPeerCAs[fp]
@@ -1774,7 +1773,7 @@ func (e *Engine) InstallPeerCA(fp string) error {
 	}
 	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
 	log.Printf("ca: installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
-	if err := keychain.AddTrustedRoot(certPath); err != nil {
+	if err := platform.TrustStoreAdd(certPath); err != nil {
 		return fmt.Errorf("install peer %s: %w", entry.PeerName, err)
 	}
 	e.trustedPeerCAsMu.Lock()
@@ -1790,7 +1789,7 @@ func (e *Engine) InstallPeerCA(fp string) error {
 // persistTrustedPeerToCamp upserts the trusted-CA metadata into camp
 // config. PEM bytes stay under trustedPeersDir — config carries only
 // fingerprint + display fields so the UI can list and (eventually)
-// remove CAs without re-reading the keychain.
+// remove CAs without re-reading the trust store.
 func (e *Engine) persistTrustedPeerToCamp(t TrustedPeerCA) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -2424,7 +2423,7 @@ func (e *Engine) diagnosticsLocked() *Diagnostics {
 		d.DNSLastQueryMs = s.LastQueryMs
 	}
 	if e.cfg.Camp != nil {
-		d.DNSResolverOK = internaldns.ResolverFileExists(identity.CampLabel(e.cfg.Camp.ID))
+		d.DNSResolverOK = platform.ZoneResolverInstalled(identity.CampLabel(e.cfg.Camp.ID))
 	}
 	return d
 }
@@ -2486,12 +2485,12 @@ func (e *Engine) Stop() error {
 	}
 	e.mu.Unlock()
 
-	// Local DNS first — drop the /etc/resolver file so macOS stops
-	// routing queries our way as soon as Stop begins, then shut the
-	// listener down. Failures here are advisory.
+	// Local DNS first — remove the zone resolver hint so the OS
+	// stops routing queries our way as soon as Stop begins, then
+	// shut the listener down. Failures here are advisory.
 	if dnsZone != "" {
-		if err := internaldns.RemoveResolver(dnsZone); err != nil {
-			log.Printf("dns: remove resolver: %v", err)
+		if err := platform.RemoveZoneResolver(dnsZone); err != nil {
+			log.Printf("dns: remove zone resolver: %v", err)
 		}
 	}
 	if dnsSrv != nil {
@@ -2607,7 +2606,6 @@ func (e *Engine) Status() Status {
 		}
 		if e.egr != nil {
 			st.EgressIface = e.cfg.EgressIface
-			st.EgressAnchor = e.egr.Anchor()
 		}
 		if e.cfg.Camp != nil {
 			st.CampActive = e.announce != nil

@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package identity owns the per-camp Ed25519 keypair used to prove
 // ownership of a tunnel_ip to the camp server. Each camp gets its own
 // keypair under /var/lib/f2f/identity/<camp_id>/ so different camps

@@ -1,5 +1,3 @@
-//go:build darwin
-
 // f2f-mac is the macOS-side CLI for the f2f UDP tunnel. By default it
 // launches the web UI on 127.0.0.1:2202 and lets the user drive the
 // engine from a browser. `run` is a headless escape hatch (CLI only,

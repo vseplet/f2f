@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package ca generates and manages a per-camp local Certificate
 // Authority. The CA is name-constrained to the camp's <camp_id>.f2f
 // zone via the RFC 5280 NameConstraints extension, so even if the CA

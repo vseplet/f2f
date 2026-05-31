@@ -1,18 +1,17 @@
-//go:build darwin
-
-// Package firewall installs a pf anchor on the utun interface that
-// default-denies inbound traffic and explicitly allows a small set of
-// ports — f2f's own (HTTP API, proxies, BT) plus any user-defined
-// ones from the Tunnel tab UI.
+// Package firewall installs an inbound filter on the tunnel
+// interface that default-denies traffic to our tunnel_ip and
+// explicitly allows a small set of ports — f2f's own (HTTP API,
+// proxies, BT) plus user-defined ones from the Tunnel tab UI.
 //
-// Without this, any service the user has listening on 0.0.0.0 (sshd,
-// postgres, dev servers) becomes reachable from every camp peer at
-// <tunnel_ip>:<port>. The firewall makes the tunnel as restrictive as
-// any incoming-from-internet interface would be by default.
+// Without this, any service the user has listening on 0.0.0.0
+// (sshd, postgres, dev servers) becomes reachable from every camp
+// peer at <tunnel_ip>:<port>. The firewall makes the tunnel as
+// restrictive as any incoming-from-internet interface by default.
 //
 // State is persisted at /var/run/f2f-mac.firewall.json so a crashed
-// process can be cleaned up by the next invocation. Modeled on
-// internal/egress.
+// process can be cleaned up by the next invocation. The actual
+// pf/nft work is in platform; this package owns the high-level
+// lifecycle (sweep, install, persist, teardown).
 package firewall
 
 import (
@@ -21,19 +20,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
-const (
-	// anchorName lives under com.apple/* so the default pf.conf
-	// evaluates it without us touching /etc/pf.conf.
-	anchorName = "com.apple/f2f-mac-fw"
-
-	statePath = "/var/run/f2f-mac.firewall.json"
-)
+const statePath = "/var/run/f2f-mac.firewall.json"
 
 // PortRule is one allow entry. Protocol is "tcp" or "udp".
 type PortRule struct {
@@ -41,24 +34,22 @@ type PortRule struct {
 	Protocol string `json:"protocol"`
 }
 
-// Firewall holds the live pf anchor. Call Close to remove it.
+// Firewall holds the live firewall state. Call Close to remove it.
 type Firewall struct {
 	state state
 }
 
 type state struct {
 	PID      int        `json:"pid"`
-	Anchor   string     `json:"anchor"`
 	Iface    string     `json:"iface"`
 	TunnelIP string     `json:"tunnel_ip"`
 	Allowed  []PortRule `json:"allowed"`
 }
 
-// Open installs the anchor on iface, scoped to packets destined for
-// tunnelIP / tunnelV6 (our overlay addresses — packets destined to
-// other peers' IPs or public IPs being forwarded through egress are
-// unaffected). tunnelV6 is optional: leave empty in static --peer mode
-// or any setup with no overlay v6.
+// Open installs the firewall on iface, scoped to packets destined
+// for tunnelIP. Packets to other peers or to public IPs being
+// forwarded through egress are unaffected.
+//
 // If a stale state file exists from a dead prior process, it is
 // cleaned up first.
 func Open(iface, tunnelIP string, allowed []PortRule) (*Firewall, error) {
@@ -74,14 +65,13 @@ func Open(iface, tunnelIP string, allowed []PortRule) (*Firewall, error) {
 	f := &Firewall{
 		state: state{
 			PID:      os.Getpid(),
-			Anchor:   anchorName,
 			Iface:    iface,
 			TunnelIP: tunnelIP,
 			Allowed:  dedup(allowed),
 		},
 	}
-	if err := pfLoadAnchor(anchorName, buildRules(iface, tunnelIP, f.state.Allowed)); err != nil {
-		return nil, fmt.Errorf("load pf anchor: %w", err)
+	if err := platform.InstallFirewall(policyFrom(f.state)); err != nil {
+		return nil, fmt.Errorf("install firewall: %w", err)
 	}
 	if err := writeState(f.state); err != nil {
 		log.Printf("WARN: write firewall state file: %v", err)
@@ -89,26 +79,26 @@ func Open(iface, tunnelIP string, allowed []PortRule) (*Firewall, error) {
 	return f, nil
 }
 
-// Apply re-writes the anchor with a new allow list. The previous
-// ruleset is replaced atomically (pfctl -f). iface and tunnelIP are
-// taken from the live state — they don't change between calls.
+// Apply re-installs the firewall with a new allow list. The previous
+// ruleset is replaced atomically. iface and tunnelIP are taken from
+// the live state — they don't change between calls.
 func (f *Firewall) Apply(allowed []PortRule) error {
 	allowed = dedup(allowed)
-	if err := pfLoadAnchor(f.state.Anchor, buildRules(f.state.Iface, f.state.TunnelIP, allowed)); err != nil {
-		return fmt.Errorf("reload pf anchor: %w", err)
-	}
 	f.state.Allowed = allowed
+	if err := platform.InstallFirewall(policyFrom(f.state)); err != nil {
+		return fmt.Errorf("reinstall firewall: %w", err)
+	}
 	if err := writeState(f.state); err != nil {
 		log.Printf("WARN: write firewall state file: %v", err)
 	}
 	return nil
 }
 
-// Close removes the anchor. Idempotent.
+// Close removes the firewall. Idempotent.
 func (f *Firewall) Close() error {
 	var errs []error
-	if err := pfFlushAnchor(f.state.Anchor); err != nil {
-		errs = append(errs, fmt.Errorf("flush pf anchor: %w", err))
+	if err := platform.RemoveFirewall(); err != nil {
+		errs = append(errs, fmt.Errorf("remove firewall: %w", err))
 	}
 	if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("remove state file: %w", err))
@@ -116,65 +106,24 @@ func (f *Firewall) Close() error {
 	return errors.Join(errs...)
 }
 
-// Anchor returns the pf anchor name (exposed for logging).
-func (f *Firewall) Anchor() string { return f.state.Anchor }
-
-// buildRules generates the pf ruleset for the given iface + allow list.
-//
-// Scope is intentionally narrow: only packets whose destination is OUR
-// tunnel_ip get filtered. Packets destined for other peers' addresses,
-// or public IPs being forwarded through egress (Bob runs an intercept
-// → his packet appears here as `in on utun` heading for the public
-// internet) — pass freely, because they're not directed at any
-// service on this machine.
-//
-// pf uses last-matching-rule semantics (no `quick` here), so within
-// the to-us subset: `block` first, then `pass` rules override per
-// match. ICMP to us is always allowed (ping diagnostics). State is
-// kept on every pass so return packets fly. Outbound (`out on`) is
-// fully permitted.
-func buildRules(iface, tunnelIP string, allowed []PortRule) string {
-	var sb strings.Builder
-	sb.WriteString("# generated by f2f-mac; do not edit by hand\n")
-	fmt.Fprintf(&sb, "pass out on %s keep state\n", iface)
-	fmt.Fprintf(&sb, "block in on %s from any to %s/32\n", iface, tunnelIP)
-	fmt.Fprintf(&sb, "pass in on %s proto icmp from any to %s/32 keep state\n", iface, tunnelIP)
-	tcp := []int{}
-	udp := []int{}
-	for _, r := range allowed {
-		switch strings.ToLower(r.Protocol) {
+func policyFrom(s state) platform.FirewallPolicy {
+	p := platform.FirewallPolicy{
+		Iface:    s.Iface,
+		TunnelIP: s.TunnelIP,
+	}
+	for _, r := range s.Allowed {
+		switch r.Protocol {
 		case "tcp":
-			tcp = append(tcp, r.Port)
+			p.AllowTCP = append(p.AllowTCP, r.Port)
 		case "udp":
-			udp = append(udp, r.Port)
+			p.AllowUDP = append(p.AllowUDP, r.Port)
 		}
 	}
-	sort.Ints(tcp)
-	sort.Ints(udp)
-	if len(tcp) > 0 {
-		fmt.Fprintf(&sb, "pass in on %s proto tcp from any to %s/32 port { %s } keep state\n",
-			iface, tunnelIP, joinInts(tcp))
-	}
-	if len(udp) > 0 {
-		fmt.Fprintf(&sb, "pass in on %s proto udp from any to %s/32 port { %s } keep state\n",
-			iface, tunnelIP, joinInts(udp))
-	}
-	return sb.String()
+	return p
 }
 
-func joinInts(xs []int) string {
-	if len(xs) == 0 {
-		return ""
-	}
-	parts := make([]string, len(xs))
-	for i, x := range xs {
-		parts[i] = fmt.Sprint(x)
-	}
-	return strings.Join(parts, " ")
-}
-
-// dedup removes (port, proto) duplicates, normalises protocol to lower
-// case, and drops invalid entries.
+// dedup removes (port, proto) duplicates, normalises protocol to
+// lower case, and drops invalid entries.
 func dedup(in []PortRule) []PortRule {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]PortRule, 0, len(in))
@@ -206,13 +155,11 @@ func sweepLeftover() error {
 	}
 	if processAlive(s.PID) {
 		return fmt.Errorf("state file references running pid %d — refusing to touch; "+
-			"another f2f-mac is using the firewall, or remove %s manually", s.PID, statePath)
+			"another f2f is using the firewall, or remove %s manually", s.PID, statePath)
 	}
 	log.Printf("found stale firewall state from pid %d, rolling back", s.PID)
-	if s.Anchor != "" {
-		if err := pfFlushAnchor(s.Anchor); err != nil {
-			log.Printf("WARN: sweep flush anchor: %v", err)
-		}
+	if err := platform.RemoveFirewall(); err != nil {
+		log.Printf("WARN: sweep remove firewall: %v", err)
 	}
 	return os.Remove(statePath)
 }
@@ -246,25 +193,4 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
-}
-
-func pfLoadAnchor(anchor, rules string) error {
-	cmd := exec.Command("/sbin/pfctl", "-a", anchor, "-f", "-")
-	cmd.Stdin = strings.NewReader(rules)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Include the ruleset we attempted to load — pfctl's "syntax
-		// error" messages reference a line number, useless without
-		// the source.
-		return fmt.Errorf("pfctl -a %s -f -: %w: %s\nruleset:\n%s", anchor, err, out, rules)
-	}
-	return nil
-}
-
-func pfFlushAnchor(anchor string) error {
-	out, err := exec.Command("/sbin/pfctl", "-a", anchor, "-F", "all").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pfctl -a %s -F all: %w: %s", anchor, err, out)
-	}
-	return nil
 }

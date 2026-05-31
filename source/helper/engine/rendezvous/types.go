@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package rendezvous talks to the f2f-camp server using a UDP announce
 // protocol on the same socket as the tunnel, plus an HTTP peer-list
 // poller. There is no WebSocket — see TODO.md for the history of why

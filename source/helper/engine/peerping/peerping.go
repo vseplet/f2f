@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package peerping implements a bidirectional UDP ping/pong with peers.
 //
 // Why this exists: the engine's existing peerState.LastSeenMs only tells

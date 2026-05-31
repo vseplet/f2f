@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package dns runs a minimal DNS server on 127.0.0.1 that answers
 // <name>.<camp_id>.f2f queries from a peer-domain catalog. The macOS
 // system resolver routes these queries here via /etc/resolver/<camp_id>.f2f.

@@ -1,4 +1,4 @@
-.PHONY: run build kill camp-run camp-deploy camp-logs \
+.PHONY: run build kill dev camp-run camp-deploy camp-logs \
         desktop-dev desktop-build desktop-open desktop-install-wails help
 
 # wails CLI lives under $GOPATH/bin — use it directly so a stale PATH
@@ -8,6 +8,7 @@ WAILS ?= $(shell go env GOPATH)/bin/wails
 help:
 	@echo "f2f targets:"
 	@echo "  make run                  run mac client (sudo, web UI on 127.0.0.1:2202)"
+	@echo "  make dev                  run helper (sudo, web UI on 127.0.0.1:2202)"
 	@echo "  make build                build release binary at ./f2f-mac"
 	@echo "  make kill                 kill any running f2f-mac process"
 	@echo "  make camp-run             run camp server locally with bun"
@@ -20,6 +21,9 @@ help:
 
 run:
 	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/mac/internal/web/assets go run ./source/mac
+
+dev:
+	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper
 
 build:
 	go build -o f2f-mac ./source/mac

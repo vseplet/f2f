@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package web is the HTTP UI for f2f-mac. It serves an embedded SPA from
 // assets/ and exposes a small REST + SSE API over the engine.
 package web
@@ -20,7 +18,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -32,6 +29,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 //go:embed assets
@@ -1184,17 +1182,7 @@ func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	// Engine runs as root via sudo — `open` itself only works in a
-	// user GUI session, so drop privileges to the invoking user.
-	// SUDO_USER is always set when launched through sudo; fall
-	// through to a raw `open` if we weren't sudo'd (unusual).
-	var cmd *exec.Cmd
-	if su := os.Getenv("SUDO_USER"); su != "" {
-		cmd = exec.Command("/usr/bin/sudo", "-u", su, "/usr/bin/open", "-R", abs)
-	} else {
-		cmd = exec.Command("/usr/bin/open", "-R", abs)
-	}
-	if err := cmd.Start(); err != nil {
+	if err := platform.RevealInFileManager(abs); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

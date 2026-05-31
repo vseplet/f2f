@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Package config persists user-editable engine configuration under
 // $HOME/.f2f/. Two file types live there:
 //
