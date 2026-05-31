@@ -23,6 +23,44 @@
 
     const $chatInput  = document.getElementById('m2-chat-input');
     const $btnShare   = document.getElementById('m2-btn-share');
+    const $btnChat    = document.getElementById('m2-btn-chat');
+    const $chatPanel  = document.getElementById('m2-chat-panel');
+
+    $btnChat.addEventListener('click', function () {
+      const open = $chatPanel.classList.toggle('open');
+      $btnChat.querySelector('.ax-btn-state').textContent = open ? '■' : '▢';
+    });
+
+    // Pick cols × rows that maximize total tile area at 16:9 (Google Meet style).
+    // Measures parent (m2-body) since the grid's own size depends on the
+    // tracks we set, which would create a feedback loop.
+    let reflowRAF = 0;
+    function reflowGrid() {
+      cancelAnimationFrame(reflowRAF);
+      reflowRAF = requestAnimationFrame(function () {
+        const n = $grid.children.length;
+        if (n === 0) return;
+        const parent = $grid.parentElement;
+        const W = parent.clientWidth, H = parent.clientHeight;
+        if (W <= 0 || H <= 0) return;
+        const ratio = 16 / 9, gap = 8;
+        let bestCols = 1, bestRows = n, bestTileW = 0;
+        for (let cols = 1; cols <= n; cols++) {
+          const rows = Math.ceil(n / cols);
+          const cellW = (W - (cols - 1) * gap) / cols;
+          const cellH = (H - (rows - 1) * gap) / rows;
+          if (cellW <= 0 || cellH <= 0) continue;
+          const tileW = Math.min(cellW, cellH * ratio);
+          if (tileW > bestTileW) { bestTileW = tileW; bestCols = cols; bestRows = rows; }
+        }
+        const tileH = bestTileW / ratio;
+        $grid.style.gridTemplateColumns = 'repeat(' + bestCols + ', ' + bestTileW + 'px)';
+        $grid.style.gridTemplateRows    = 'repeat(' + bestRows + ', ' + tileH + 'px)';
+      });
+    }
+    new MutationObserver(reflowGrid).observe($grid, { childList: true });
+    new ResizeObserver(reflowGrid).observe($grid.parentElement);
+    $(document).on('f2f:tab-changed', function (_, tab) { if (tab === 'meet2') reflowGrid(); });
 
     let pc = null;
     let dataChannel = null;

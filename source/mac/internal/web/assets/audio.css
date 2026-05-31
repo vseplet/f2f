@@ -1121,13 +1121,6 @@ a.ax-domain-link:hover {
     margin-bottom: 12px;
 }
 
-.m2-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 14px;
-}
-
 .m2-tile {
     position: relative;
     background: #1c1915;
@@ -1141,8 +1134,9 @@ a.ax-domain-link:hover {
     border-radius: 4px;
     overflow: hidden;
     width: 100%;
-    aspect-ratio: 4/3;
-    flex-shrink: 0;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
 }
 
 .m2-tile video {
@@ -1248,41 +1242,45 @@ a.ax-domain-link:hover {
 
 #tab-meet2 .m2-body {
     display: flex;
-    gap: 12px;
     flex: 1;
     min-height: 0;
+    position: relative;
 }
 
-.m2-left {
-    display: flex;
-    flex-direction: column;
-    width: 260px;
-    flex-shrink: 0;
-    min-height: 0;
-}
 .m2-grid {
-    display: flex;
-    flex-direction: column;
-    flex-wrap: nowrap;
+    display: grid;
+    place-content: center;
     gap: 8px;
-    overflow-y: auto;
     flex: 1;
     min-height: 0;
+    overflow: hidden;
 }
 
-.m2-right {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
+.m2-chat-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 360px;
+    background: #181614;
+    border-left: 1px dotted #3a3024;
+    display: none;
+    flex-direction: column;
+    z-index: 10;
 }
-.m2-right .m2-log {
+.m2-chat-panel.open {
+    display: flex;
+}
+.m2-chat-panel .m2-log {
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    padding: 8px 12px;
     margin: 0;
+    box-sizing: border-box;
 }
-.m2-right .m2-log .ax-log-body {
+.m2-chat-panel .ax-log-body {
     flex: 1;
     max-height: none;
     min-height: 0;
@@ -1294,8 +1292,6 @@ a.ax-domain-link:hover {
     justify-content: center;
     gap: 8px;
     padding-top: 8px;
-    border-top: 1px solid #2a251c;
-    margin-top: 8px;
     flex: 0 0 auto;
 }
 .m2-bottombar .ax-vol {

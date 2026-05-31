@@ -675,29 +675,27 @@
                     </div>
 
                     <div class="m2-body">
-                        <div class="m2-left">
-                            <div class="m2-grid" id="m2-grid">
+                        <div class="m2-grid" id="m2-grid">
+                            <div
+                                class="m2-tile m2-tile-self"
+                                id="m2-tile-self"
+                            >
+                                <video
+                                    id="m2-video-self"
+                                    autoplay
+                                    muted
+                                    playsinline
+                                ></video>
                                 <div
-                                    class="m2-tile m2-tile-self"
-                                    id="m2-tile-self"
+                                    class="m2-tile-label"
+                                    id="m2-label-self"
                                 >
-                                    <video
-                                        id="m2-video-self"
-                                        autoplay
-                                        muted
-                                        playsinline
-                                    ></video>
-                                    <div
-                                        class="m2-tile-label"
-                                        id="m2-label-self"
-                                    >
-                                        you
-                                    </div>
-                                    <button class="m2-tile-fs" title="fullscreen">⛶</button>
+                                    you
                                 </div>
+                                <button class="m2-tile-fs" title="fullscreen">⛶</button>
                             </div>
                         </div>
-                        <div class="m2-right">
+                        <div class="m2-chat-panel" id="m2-chat-panel">
                             <div class="ax-log m2-log">
                                 <div class="ax-log-header">
                                     <span
@@ -750,6 +748,13 @@
                         >
                             <span class="ax-btn-state">▢</span>
                             <span>share</span>
+                        </button>
+                        <button
+                            id="m2-btn-chat"
+                            class="ax-btn ax-btn-chat"
+                        >
+                            <span class="ax-btn-state">▢</span>
+                            <span>chat</span>
                         </button>
                         <div class="ax-vol">
                             <span class="ax-vol-label">vol</span>
