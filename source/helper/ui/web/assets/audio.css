@@ -1,0 +1,1300 @@
+/* Audio tab — terminal aesthetic. Self-contained: scoped under .ax-frame
+   so it doesn't bleed into the tunnel tab's tailwind layout. */
+
+.ax-frame {
+    background: #181614;
+    color: #d4c8a6;
+    font-family:
+        "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco, Consolas,
+        monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 18px 20px;
+    border: 1px dotted #3a3024;
+    border-radius: 0;
+}
+
+/* Tabbar sits flush with the single .ax-frame below it: dotted border
+   on the tabbar's bottom doubles as the frame's top, so the two render
+   as one continuous box. Every tab-panel uses the same one-frame layout
+   (see HTML). */
+.ax-tabbar {
+    padding: 14px 20px;
+    margin-bottom: 0;
+    border-radius: 0;
+    border-bottom: 1px solid #221d16;
+    border-left-style: none;
+    border-right-style: none;
+    border-top-style: none;
+}
+.ax-tabbar .ax-header {
+    margin-bottom: 0;
+}
+
+.tab-panel:not(.hidden) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.tab-panel > .ax-frame {
+    border-top-style: none;
+    border-left-style: none;
+    border-right-style: none;
+    border-radius: 0;
+    margin-top: 0;
+    min-height: 100%;
+    box-sizing: border-box;
+    padding-bottom: 40px;
+}
+
+/* Header row (used inside .ax-tabbar — no bottom margin since the
+   tabbar's solid 1px divider already separates it from content below). */
+.ax-frame .ax-header {
+    display: flex;
+    justify-content: space-between;
+}
+.ax-frame .ax-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ax-frame .ax-tab {
+    display: inline-block;
+    padding: 4px 12px;
+    color: #7a6e5a;
+    border-radius: 3px;
+    background: transparent;
+    border: none;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    line-height: 1.4;
+}
+.ax-frame .ax-tab:hover {
+    color: #d4c8a6;
+}
+.ax-frame .ax-tab-active {
+    color: #d4c8a6;
+    background: #2a251c;
+}
+.ax-frame .ax-tab-active:hover {
+    color: #d4c8a6;
+}
+
+/* Engine toggle in the tabbar (right side): one button that both shows
+ * the current state ("running · utun7" / "stopped") and starts/stops
+ * the engine on click. Replaces the old status pill + start/stop button
+ * pair in the tunnel section. */
+.ax-frame .ax-engine-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    border-radius: 3px;
+    border: 1px solid #3a3024;
+    background: transparent;
+    color: #7a6e5a;
+    cursor: pointer;
+}
+.ax-frame .ax-engine-btn:hover {
+    background: #1c1915;
+}
+.ax-frame .ax-engine-btn .ax-engine-state {
+    font-size: 11px;
+}
+.ax-frame .ax-engine-btn .ax-engine-meta:empty {
+    display: none;
+}
+.ax-frame .ax-engine-btn .ax-engine-meta {
+    color: inherit;
+    opacity: 0.75;
+}
+
+.ax-frame .ax-engine-btn.state-running {
+    color: #86b86b;
+    border-color: #3a5a30;
+    background: rgba(134, 184, 107, 0.06);
+}
+.ax-frame .ax-engine-btn.state-running:hover {
+    background: rgba(134, 184, 107, 0.14);
+}
+
+.ax-frame .ax-engine-btn.state-loading {
+    font-style: italic;
+    cursor: wait;
+}
+
+.ax-frame .ax-engine-btn.state-error {
+    color: #c25656;
+    border-color: #6a3030;
+    background: rgba(194, 86, 86, 0.1);
+}
+.ax-frame .ax-engine-btn.state-error:hover {
+    background: rgba(194, 86, 86, 0.18);
+}
+.ax-frame .ax-sep {
+    color: #4a4030;
+}
+.ax-frame .ax-hint {
+    color: #7a6e5a;
+}
+.ax-frame .ax-hint .ax-kbd {
+    margin-left: 4px;
+}
+
+/* Two video panes */
+.ax-frame .ax-panes {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 12px;
+    margin-bottom: 14px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 4px;
+    /* macOS hides scrollbars by default on non-trackpad pointer devices;
+     force a thin, always-visible bar so the user can see overflow
+     and grab it. */
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: #4a4030 transparent; /* Firefox */
+}
+/* WebKit (Safari + Chrome on macOS): style the native scrollbar. */
+.ax-frame .ax-panes::-webkit-scrollbar {
+    height: 8px;
+}
+.ax-frame .ax-panes::-webkit-scrollbar-track {
+    background: transparent;
+}
+.ax-frame .ax-panes::-webkit-scrollbar-thumb {
+    background: #3a3024;
+    border-radius: 4px;
+}
+.ax-frame .ax-panes::-webkit-scrollbar-thumb:hover {
+    background: #4a4030;
+}
+.ax-frame .ax-pane {
+    background: #1c1915;
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 8px,
+        rgba(255, 255, 255, 0.02) 8px,
+        rgba(255, 255, 255, 0.02) 9px
+    );
+    border-radius: 4px;
+    aspect-ratio: 4/3;
+    position: relative;
+    overflow: hidden;
+    flex: 1 0 360px;
+}
+.ax-frame .ax-pane.hidden {
+    display: none;
+}
+.ax-frame .ax-pane[data-pane="peer"] {
+    background-color: #151a1d;
+}
+.ax-frame .ax-pane-screen {
+    flex: 1 0 480px;
+    aspect-ratio: 16/9;
+    background-color: #161412;
+}
+
+.ax-frame .ax-pane-header {
+    position: absolute;
+    inset: 8px 12px auto 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: #7a6e5a;
+    z-index: 2;
+    pointer-events: none;
+}
+.ax-frame .ax-pane-fs {
+    pointer-events: auto;
+    background: rgba(20, 18, 14, 0.6);
+    color: #d4c8a6;
+    border: 1px solid #3a3024;
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+}
+.ax-frame .ax-pane-fs:hover {
+    background: rgba(20, 18, 14, 0.9);
+}
+.ax-frame .ax-pane-label .ax-corner {
+    color: #4a4030;
+    margin-right: 6px;
+}
+.ax-frame .ax-pane-host {
+    color: #d4c8a6;
+}
+@keyframes ax-rec-blink {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.4;
+    }
+}
+
+.ax-frame .ax-pane video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: none;
+}
+.ax-frame .ax-pane.has-video video {
+    display: block;
+}
+/* Mirror local cam preview (selfie style); peer feed and any screen
+   shares stay as captured. */
+.ax-frame .ax-pane[data-pane="you"] video {
+    transform: scaleX(-1);
+}
+.ax-frame .ax-pane-screen video {
+    transform: none;
+}
+.ax-frame .ax-pane-screen video {
+    object-fit: contain;
+    background: #000;
+}
+
+.ax-frame .ax-cam-off {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #6a5e4a;
+}
+.ax-frame .ax-pane.has-video .ax-cam-off {
+    display: none;
+}
+.ax-frame .ax-cam-off svg {
+    width: 36px;
+    height: 28px;
+    opacity: 0.8;
+}
+
+.ax-frame .ax-pane-footer {
+    position: absolute;
+    inset: auto 10px 6px 10px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    color: #7a6e5a;
+    font-size: 11px;
+    z-index: 2;
+    pointer-events: none;
+}
+.ax-frame .ax-res {
+    display: none;
+}
+.ax-frame .ax-pane.has-video .ax-res {
+    display: inline;
+}
+
+/* dB meter */
+.ax-frame .ax-db {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+    color: #7a6e5a;
+    font-size: 11px;
+}
+.ax-frame .ax-db-min {
+    white-space: nowrap;
+}
+.ax-frame .ax-db-max {
+    white-space: nowrap;
+}
+.ax-frame .ax-db-bars {
+    flex: 1;
+    height: 18px;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+}
+.ax-frame .ax-db-bar {
+    flex: 1;
+    background: #2a251c;
+    border-radius: 1px;
+    min-height: 2px;
+    height: 2px;
+    transition: height 60ms linear;
+}
+.ax-frame .ax-db-bar.live {
+    background: #86b86b;
+}
+.ax-frame .ax-db-bar.warm {
+    background: #c4a554;
+}
+.ax-frame .ax-db-bar.hot {
+    background: #c25656;
+}
+/* Gap between the local (left) and peer (right) halves of the meter. */
+.ax-frame .ax-db-bar:nth-child(33) {
+    margin-left: 10px;
+}
+
+/* Controls row */
+.ax-frame .ax-controls {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(
+            140px,
+            1.2fr
+        ) auto auto auto minmax(160px, 1.4fr);
+    gap: 8px;
+    margin-bottom: 14px;
+}
+.ax-frame .ax-controls > select#ax-call-peer {
+    height: 100%;
+}
+.ax-frame .ax-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: #1c1915;
+    border: 1px solid #3a3024;
+    border-radius: 4px;
+    color: #d4c8a6;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+}
+.ax-frame .ax-btn:hover {
+    background: #221d16;
+}
+.ax-frame .ax-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.ax-frame .ax-btn.hidden {
+    display: none;
+}
+.ax-frame .ax-btn .ax-btn-state {
+    color: #6a5e4a;
+}
+.ax-frame .ax-btn .ax-btn-kbd {
+    margin-left: auto;
+}
+
+.ax-frame .ax-btn.active .ax-btn-state {
+    color: #86b86b;
+}
+
+/* Big call/hangup button */
+.ax-frame .ax-btn-call {
+    font-size: 14px;
+    font-weight: 500;
+}
+.ax-frame .ax-btn-call .ax-btn-state {
+    color: #86b86b;
+}
+.ax-frame .ax-btn-call.state-connecting {
+    background: rgba(194, 86, 86, 0.12);
+    border-color: #6a3030;
+    color: #d8a8a8;
+}
+.ax-frame .ax-btn-call.state-connecting .ax-btn-state {
+    color: #c25656;
+    animation: ax-rec-blink 1.4s infinite;
+}
+.ax-frame .ax-btn-call.state-connected {
+    background: rgba(194, 86, 86, 0.18);
+    border-color: #8a3030;
+    color: #e8b8b8;
+}
+.ax-frame .ax-btn-call.state-connected .ax-btn-state {
+    color: #c25656;
+}
+.ax-frame .ax-btn-call .ax-btn-meta {
+    margin-left: 4px;
+    color: #a07474;
+    font-size: 12px;
+}
+
+/* Volume control */
+.ax-frame .ax-vol {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: #1c1915;
+    border: 1px solid #3a3024;
+    border-radius: 4px;
+}
+.ax-frame .ax-vol-label {
+    color: #7a6e5a;
+    font-size: 12px;
+}
+.ax-frame .ax-vol-track {
+    flex: 1;
+    height: 12px;
+    background: #2a251c;
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+}
+.ax-frame .ax-vol-fill {
+    height: 100%;
+    background-image:
+        radial-gradient(
+            circle at center,
+            rgba(196, 165, 84, 0.85) 1px,
+            transparent 1.2px
+        ),
+        linear-gradient(90deg, rgba(196, 165, 84, 0.1), rgba(196, 165, 84, 0.1));
+    background-size:
+        4px 4px,
+        100% 100%;
+    width: 82%;
+    pointer-events: none;
+}
+.ax-frame .ax-vol-value {
+    color: #d4c8a6;
+    font-size: 12px;
+    min-width: 24px;
+    text-align: right;
+}
+
+/* Debug log */
+.ax-frame .ax-log {
+    background: #15130f;
+    border: 1px solid #2a251c;
+    border-radius: 4px;
+    margin-bottom: 14px;
+}
+.ax-frame .ax-log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #7a6e5a;
+    border-bottom: 1px solid #2a251c;
+}
+.ax-frame .ax-log-clear {
+    background: transparent;
+    border: none;
+    color: #7a6e5a;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ax-frame .ax-log-clear:hover {
+    color: #d4c8a6;
+}
+
+.ax-frame .ax-log-body {
+    max-height: 180px;
+    overflow-y: auto;
+    font-size: 12px;
+    padding: 8px 12px;
+}
+
+/* Stretch the active tab's frame to fill the viewport below the tabbar.
+   Used by every tab uniformly (formerly meet-only). The frame's last
+   child grows to soak up leftover space so the bottom doesn't feel
+   empty when content is short. */
+html,
+body {
+    height: 100vh;
+    overflow: hidden;
+}
+.tab-panel.hidden {
+    display: none;
+}
+
+#tab-audio > .ax-frame {
+    overflow: hidden;
+}
+
+/* Meet's log body needs to scroll independently inside its section. */
+#tab-audio .ax-log {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+#tab-audio .ax-log-body {
+    flex: 1;
+    max-height: none;
+    min-height: 0;
+}
+
+/* ---- Sections inside .ax-frame ---- */
+/* Each tab-panel is one .ax-frame containing sequential .ax-section
+   blocks. Sections inherit frame padding via the outer .ax-frame; they
+   add only inter-section spacing + a dotted divider so the seams feel
+   intentional. */
+.ax-section {
+    padding: 0;
+}
+.ax-frame > .ax-section + .ax-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px dotted #2a251c;
+}
+
+.ax-section-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: #7a6e5a;
+    margin-bottom: 12px;
+}
+.ax-section-title .ax-meta {
+    color: #9a8e7a;
+    font-size: 12px;
+}
+
+.ax-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.ax-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.ax-field > label {
+    font-size: 11px;
+    color: #7a6e5a;
+    letter-spacing: 0.3px;
+}
+.ax-input,
+.ax-select {
+    background: #15130f;
+    border: 1px solid #2a251c;
+    color: #d4c8a6;
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 3px;
+    outline: none;
+}
+.ax-select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6' fill='none' stroke='%237a6e5a' stroke-width='1.4'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 9px 6px;
+    cursor: pointer;
+}
+.ax-input:focus,
+.ax-select:focus {
+    border-color: #4a4030;
+    background-color: #1a1814;
+}
+.ax-input:disabled,
+.ax-select:disabled {
+    color: #7a6e5a;
+    cursor: default;
+}
+.ax-input::placeholder {
+    color: #4a4030;
+    opacity: 1;
+}
+.ax-input:focus::placeholder {
+    color: #5a4e3a;
+}
+
+details.ax-advanced {
+    margin-top: 12px;
+}
+details.ax-advanced > summary {
+    cursor: pointer;
+    color: #7a6e5a;
+    font-size: 12px;
+    list-style: none;
+    padding: 4px 0;
+    user-select: none;
+}
+details.ax-advanced > summary::before {
+    content: "▸ ";
+}
+details.ax-advanced[open] > summary::before {
+    content: "▾ ";
+}
+details.ax-advanced > summary:hover {
+    color: #d4c8a6;
+}
+details.ax-advanced > .ax-advanced-body {
+    padding: 10px 0 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ax-section-status {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #9a8e7a;
+    padding: 8px 10px;
+    background: rgba(196, 165, 84, 0.05);
+    border-left: 2px solid #c4a554;
+    border-radius: 2px;
+    display: none;
+}
+.ax-section-status.live {
+    display: block;
+}
+
+.ax-section-actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 8px;
+}
+
+.ax-kv {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+}
+.ax-kv td {
+    padding: 4px 24px 4px 0;
+    vertical-align: top;
+}
+.ax-kv td:first-child {
+    color: #7a6e5a;
+    width: 110px;
+    white-space: nowrap;
+}
+.ax-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-all;
+    cursor: pointer;
+}
+.ax-mono:hover {
+    color: #c4a554;
+}
+.muted {
+    color: #7a6e5a;
+}
+
+/* Camp tab — peers table with reachability dot and active selection. */
+.ax-frame .ax-peers {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13px;
+}
+.ax-frame .ax-peers th {
+    text-align: left;
+    padding: 4px 16px 6px 0;
+    font-weight: normal;
+    color: #666;
+    border-bottom: 1px solid #2a2622;
+}
+.ax-frame .ax-peers td {
+    padding: 6px 16px 6px 0;
+    vertical-align: middle;
+}
+.ax-frame .ax-peers tbody tr {
+    cursor: default;
+}
+.ax-frame .ax-peers tbody tr.is-self {
+    opacity: 0.7;
+}
+
+.ax-frame .ax-peers-dot {
+    width: 16px;
+}
+
+.ax-frame .ax-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4a4234;
+}
+.ax-frame .ax-dot.reachable {
+    background: #86b86b;
+    box-shadow: 0 0 4px rgba(134, 184, 107, 0.5);
+}
+.ax-frame .ax-dot.degraded {
+    background: #d97a3a;
+    box-shadow: 0 0 4px rgba(217, 122, 58, 0.5);
+}
+.ax-frame .ax-dot.unreachable {
+    background: #c25656;
+}
+.ax-frame .ax-dot.self {
+    background: #c4a554;
+}
+.ax-frame .ax-dot.offline {
+    background: #555;
+}
+.ax-dot.unknown {
+    background: #4a4030;
+}
+
+/* Camp-link health table: udp + http rows with dot/label/rtt/meta. */
+.ax-frame .ax-health {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+}
+.ax-frame .ax-health td {
+    padding: 4px 8px;
+    vertical-align: middle;
+}
+.ax-frame .ax-health-label {
+    width: 140px;
+}
+.ax-frame .ax-health-rtt {
+    width: 80px;
+    font-variant-numeric: tabular-nums;
+}
+.ax-frame .ax-health-meta {
+    color: #888;
+}
+
+/* drop-tab dropzone */
+.ax-dropzone {
+    border: 1px dashed #3a3024;
+    border-radius: 4px;
+    padding: 32px 16px;
+    text-align: center;
+    color: #7a6e5a;
+    cursor: pointer;
+    margin: 12px 0;
+    transition:
+        background 80ms linear,
+        border-color 80ms linear;
+}
+.ax-dropzone:hover {
+    background: rgba(212, 200, 166, 0.03);
+    border-color: #4a4030;
+}
+.ax-dropzone.is-drag {
+    background: rgba(134, 184, 107, 0.06);
+    border-color: #3a5a30;
+    color: #86b86b;
+}
+.ax-frame .ax-peers tbody tr.is-offline {
+    opacity: 0.55;
+}
+
+.ax-frame .ax-peers .muted {
+    color: #666;
+}
+.ax-btn-primary {
+    background: rgba(134, 184, 107, 0.08);
+    border-color: #3a5a30;
+    color: #86b86b;
+}
+.ax-btn-primary:hover {
+    background: rgba(134, 184, 107, 0.15);
+}
+.ax-btn-danger {
+    background: rgba(194, 86, 86, 0.1);
+    border-color: #6a3030;
+    color: #d8a8a8;
+}
+.ax-btn-danger:hover {
+    background: rgba(194, 86, 86, 0.18);
+}
+
+/* List of intercepts */
+.ax-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.ax-list-empty {
+    color: #6a5e4a;
+    font-size: 12px;
+    padding: 6px 4px;
+}
+
+.ax-intercept {
+    background: #15130f;
+    border: 1px solid #2a251c;
+    border-radius: 3px;
+    font-size: 12px;
+}
+.ax-intercept-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    user-select: none;
+}
+.ax-intercept-head:hover {
+    background: rgba(212, 200, 166, 0.03);
+}
+.ax-intercept.is-expanded .ax-intercept-head {
+    border-bottom: 1px dotted #2a251c;
+}
+.ax-intercept-caret {
+    color: #4a4030;
+    font-size: 10px;
+    width: 10px;
+    display: inline-block;
+}
+.ax-intercept-spec {
+    color: #d4c8a6;
+    font-weight: 500;
+}
+a.ax-domain-link {
+    color: #86b86b;
+    text-decoration: none;
+    font-weight: 500;
+}
+a.ax-domain-link:hover {
+    text-decoration: underline;
+    color: #a0d28a;
+}
+.ax-intercept-meta {
+    margin-left: auto;
+    color: #7a6e5a;
+    font-size: 11px;
+    white-space: nowrap;
+}
+.ax-meta-routes {
+    color: #86b86b;
+}
+.ax-meta-reject {
+    color: #c47070;
+}
+
+.ax-intercept .ax-pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 2px;
+    border: 1px solid;
+}
+.ax-pill-active {
+    color: #86b86b;
+    border-color: #3a5a30;
+    background: rgba(134, 184, 107, 0.06);
+}
+.ax-pill-pending {
+    color: #c4a554;
+    border-color: #6a5030;
+    background: rgba(196, 165, 84, 0.06);
+}
+.ax-pill-peer {
+    color: #8aa8c8;
+    border-color: #355068;
+    background: rgba(138, 168, 200, 0.06);
+}
+/* Fingerprint pill — used in the peers table next to nicknames. Has its
+   own padding/border because the base .ax-pill rule is scoped to
+   .ax-intercept and we render outside that context. */
+.ax-pill-fp {
+    display: inline-block;
+    font-size: 10px;
+    font-family: monospace;
+    padding: 1px 6px;
+    border-radius: 2px;
+    border: 1px solid #555044;
+    color: #888070;
+    background: rgba(136, 128, 112, 0.06);
+}
+
+.ax-intercept-body {
+    padding: 8px 12px 12px 30px;
+}
+.ax-intercept-empty {
+    color: #6a5e4a;
+    font-size: 12px;
+}
+
+.ax-intercept-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.ax-intercept-table th {
+    text-align: left;
+    color: #6a5e4a;
+    font-weight: normal;
+    font-size: 11px;
+    padding-bottom: 6px;
+}
+.ax-intercept-table th.ax-policy {
+    text-align: right;
+}
+.ax-intercept-table td {
+    padding: 2px 0;
+    vertical-align: top;
+}
+.ax-intercept-table td.ax-kind {
+    color: #6a5e4a;
+    width: 40px;
+}
+.ax-intercept-table td.ax-resolved {
+    color: #d4c8a6;
+    word-break: break-all;
+}
+.ax-intercept-table tr.v6 td.ax-resolved {
+    color: #c47070;
+}
+.ax-intercept-table td.ax-policy {
+    color: #7a6e5a;
+    text-align: right;
+    white-space: nowrap;
+}
+.ax-intercept-table tr.v6 td.ax-policy {
+    color: #c47070;
+}
+
+.ax-list-remove {
+    background: transparent;
+    border: none;
+    color: #7a6e5a;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    padding: 0 4px;
+}
+.ax-list-remove:hover {
+    color: #c25656;
+}
+.ax-list-remove.is-armed {
+    color: #c25656;
+    text-decoration: underline;
+}
+
+.ax-add-row {
+    display: flex;
+    gap: 8px;
+}
+.ax-add-row .ax-input {
+    flex: 1;
+}
+
+/* Counters */
+.ax-counters {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    font-size: 12px;
+}
+.ax-counter {
+    background: #15130f;
+    border: 1px solid #2a251c;
+    border-radius: 3px;
+    padding: 8px 10px;
+}
+.ax-counter-label {
+    color: #7a6e5a;
+    font-size: 11px;
+}
+.ax-counter-value {
+    color: #d4c8a6;
+    font-size: 14px;
+    margin-top: 2px;
+}
+
+/* Tunnel log (existing #log) */
+#log {
+    background: #15130f !important;
+    border: 1px solid #2a251c !important;
+    color: #86b86b !important;
+    border-radius: 3px !important;
+    font-size: 11px !important;
+    padding: 10px !important;
+    margin: 0;
+}
+.ax-frame .ax-log-event {
+    display: grid;
+    grid-template-columns: 90px auto 1fr;
+    gap: 8px;
+    padding: 1px 0;
+}
+.ax-frame .ax-log-time {
+    color: #6a5e4a;
+}
+.ax-frame .ax-log-icon {
+    color: #4a4030;
+    text-align: right;
+    padding-right: 6px;
+    white-space: nowrap;
+}
+.ax-frame .ax-log-icon.event {
+    color: #7a6e5a;
+}
+.ax-frame .ax-log-msg {
+    color: #d4c8a6;
+    word-break: break-word;
+}
+.ax-frame .ax-log-event.is-chat .ax-log-icon {
+    text-align: right;
+    color: #c4a554;
+}
+.ax-frame .ax-log-event.is-chat.from-you .ax-log-icon {
+    color: #86b86b;
+}
+
+/* Chat input row */
+.ax-frame .ax-chat-input {
+    border-top: 1px solid #2a251c;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.ax-frame .ax-chat-prompt {
+    color: #7a6e5a;
+}
+.ax-frame .ax-chat-input input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #d4c8a6;
+    font: inherit;
+    font-size: 12px;
+    outline: none;
+    padding: 2px 0;
+}
+.ax-frame .ax-chat-input input::placeholder {
+    color: #6a5e4a;
+}
+.ax-frame .ax-chat-input input:disabled {
+    cursor: not-allowed;
+}
+
+/* Footer */
+.ax-frame .ax-footer {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding-top: 10px;
+    border-top: 1px dotted #2a251c;
+    font-size: 11px;
+    color: #7a6e5a;
+}
+.ax-frame .ax-shortcut {
+    margin-left: 12px;
+}
+.ax-frame .ax-shortcut:first-child {
+    margin-left: 0;
+}
+
+/* Keyboard hint pill */
+.ax-frame .ax-kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid #3a3024;
+    border-radius: 3px;
+    font-size: 10px;
+    color: #9a8e7a;
+    background: #1c1915;
+    line-height: 1.4;
+    margin-right: 4px;
+    vertical-align: 1px;
+}
+
+/* ---- meet-2 (group calls) ---- */
+
+.m2-status {
+    margin-bottom: 12px;
+}
+
+.m2-tile {
+    position: relative;
+    background: #1c1915;
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 8px,
+        rgba(255, 255, 255, 0.02) 8px,
+        rgba(255, 255, 255, 0.02) 9px
+    );
+    border-radius: 4px;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+}
+
+.m2-tile video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.m2-tile-self {
+    border-color: #4a7c59;
+}
+
+.m2-tile-label {
+    position: absolute;
+    bottom: 4px;
+    left: 6px;
+    font-size: 11px;
+    color: #b0a48c;
+    background: rgba(12, 10, 8, 0.7);
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+
+.m2-controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.m2-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.m2-participants {
+    margin-bottom: 12px;
+}
+
+.m2-tile-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #151a1d;
+}
+
+.m2-no-video {
+    color: #5a5040;
+    font-size: 14px;
+    text-align: center;
+}
+
+.m2-tile-fs {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    pointer-events: auto;
+    background: rgba(20, 18, 14, 0.6);
+    color: #d4c8a6;
+    border: 1px solid #3a3024;
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.m2-tile:hover .m2-tile-fs {
+    opacity: 1;
+}
+.m2-tile-fs:hover {
+    background: rgba(20, 18, 14, 0.9);
+}
+
+#tab-meet2 > .ax-frame {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding-bottom: 18px;
+}
+
+.m2-topbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    flex: 0 0 auto;
+}
+.m2-topbar .ax-select {
+    width: 360px;
+}
+.m2-topbar .ax-btn {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    margin-left: auto;
+}
+
+#tab-meet2 .m2-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    position: relative;
+}
+
+.m2-grid {
+    display: grid;
+    place-content: center;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.m2-chat-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 360px;
+    background: #181614;
+    border-left: 1px dotted #3a3024;
+    display: none;
+    flex-direction: column;
+    z-index: 10;
+}
+.m2-chat-panel.open {
+    display: flex;
+}
+.m2-chat-panel .m2-log {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px;
+    margin: 0;
+    box-sizing: border-box;
+}
+.m2-chat-panel .ax-log-body {
+    flex: 1;
+    max-height: none;
+    min-height: 0;
+}
+
+#tab-meet2 .m2-bottombar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding-top: 8px;
+    flex: 0 0 auto;
+}
+.m2-bottombar .ax-vol {
+    min-width: 200px;
+    flex-shrink: 0;
+}

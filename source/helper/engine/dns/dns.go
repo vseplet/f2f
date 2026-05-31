@@ -1,0 +1,222 @@
+//go:build darwin
+
+// Package dns runs a minimal DNS server on 127.0.0.1 that answers
+// <name>.<camp_id>.f2f queries from a peer-domain catalog. The macOS
+// system resolver routes these queries here via /etc/resolver/<camp_id>.f2f.
+//
+// We only handle A records — every peer's published name resolves to
+// its tunnel_ip on the camp's /24. Anything else returns SERVFAIL.
+package dns
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+// Resolver is implemented by engine.Engine — exposed as an interface so
+// this package doesn't depend on the engine package.
+type Resolver interface {
+	// LookupHost resolves label (the part before <camp>.f2f) to an A
+	// and/or AAAA address. Empty v4 → omit the A; empty v6 → omit the
+	// AAAA. Returns ok=false on NXDOMAIN.
+	LookupHost(label string) (host Host, ok bool)
+}
+
+// Host is the address pair (any of v4/v6 may be empty) that a label
+// resolves to. v4 only present for self-published names (loopback) so
+// legacy v4-only apps still reach our own services; peers are reached
+// over overlay v6 exclusively.
+type Host struct {
+	V4 string
+	V6 string
+}
+
+// Server is the live DNS listener. Created by Open, stopped via Close.
+type Server struct {
+	srv    *dns.Server
+	suffix string // ".<camp_id>.f2f." — lowercase, trailing dot
+	res    Resolver
+
+	// Per-rcode query counters and last-query timestamp, for the UI's
+	// diagnostics tab. Atomic — read concurrently with handle().
+	totalQueries atomic.Int64
+	noerrCount   atomic.Int64
+	nxdomCount   atomic.Int64
+	refusedCount atomic.Int64
+	lastQueryMs  atomic.Int64
+}
+
+// Stats is a snapshot of DNS-server activity.
+type Stats struct {
+	Total       int64 `json:"total"`
+	NoError     int64 `json:"noerror"`
+	NXDomain    int64 `json:"nxdomain"`
+	Refused     int64 `json:"refused"`
+	LastQueryMs int64 `json:"last_query_ms"`
+}
+
+// Stats returns a snapshot of query counters. Safe for concurrent use.
+func (s *Server) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	return Stats{
+		Total:       s.totalQueries.Load(),
+		NoError:     s.noerrCount.Load(),
+		NXDomain:    s.nxdomCount.Load(),
+		Refused:     s.refusedCount.Load(),
+		LastQueryMs: s.lastQueryMs.Load(),
+	}
+}
+
+// Open binds to bindAddr (typically "127.0.0.1:5353") and starts
+// answering. zone is the second-level label under .f2f — typically
+// identity.CampLabel(camp_id), kept short enough to fit a DNS label.
+func Open(bindAddr, zone string, res Resolver) (*Server, error) {
+	suffix := "." + strings.ToLower(zone) + ".f2f."
+	s := &Server{
+		srv:    &dns.Server{Net: "udp", Addr: bindAddr},
+		suffix: suffix,
+		res:    res,
+	}
+	mux := dns.NewServeMux()
+	mux.HandleFunc(strings.TrimPrefix(suffix, "."), s.handle)
+	s.srv.Handler = mux
+
+	started := make(chan error, 1)
+	s.srv.NotifyStartedFunc = func() { started <- nil }
+	go func() {
+		if err := s.srv.ListenAndServe(); err != nil {
+			// Quietly ignore the "use of closed network connection" we
+			// get on graceful shutdown.
+			if !strings.Contains(err.Error(), "use of closed") {
+				log.Printf("dns: serve: %v", err)
+			}
+		}
+	}()
+	// Wait briefly for the socket to bind so callers can rely on the
+	// resolver being ready when /etc/resolver gets dropped.
+	select {
+	case <-started:
+		return s, nil
+	case <-time.After(2 * time.Second):
+		_ = s.srv.Shutdown()
+		return nil, fmt.Errorf("dns: bind %s timed out", bindAddr)
+	}
+}
+
+// Close shuts down the listener.
+func (s *Server) Close() error {
+	if s == nil || s.srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return s.srv.ShutdownContext(ctx)
+}
+
+// handle answers A queries for *.suffix. Anything else returns SERVFAIL.
+func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetReply(req)
+	m.Authoritative = true
+	s.totalQueries.Add(1)
+	s.lastQueryMs.Store(time.Now().UnixMilli())
+	defer func() {
+		switch m.Rcode {
+		case dns.RcodeSuccess:
+			s.noerrCount.Add(1)
+		case dns.RcodeNameError:
+			s.nxdomCount.Add(1)
+		case dns.RcodeRefused:
+			s.refusedCount.Add(1)
+		}
+	}()
+	if len(req.Question) == 0 {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
+	q := req.Question[0]
+	if q.Qclass != dns.ClassINET {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
+	name := strings.ToLower(q.Name)
+	if !strings.HasSuffix(name, s.suffix) {
+		m.Rcode = dns.RcodeRefused
+		_ = w.WriteMsg(m)
+		return
+	}
+	label := strings.TrimSuffix(name, s.suffix)
+	if label == "" {
+		m.Rcode = dns.RcodeNameError
+		s.attachSOA(m)
+		_ = w.WriteMsg(m)
+		return
+	}
+	// Nested labels (gitea.mini) and wildcard subzones (*.mini) are
+	// resolved via the Resolver — it walks MyDomains and peer domains
+	// for both exact and wildcard matches.
+
+	host, ok := s.res.LookupHost(label)
+	if !ok {
+		m.Rcode = dns.RcodeNameError
+		s.attachSOA(m)
+		_ = w.WriteMsg(m)
+		return
+	}
+	if (q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY) && host.V4 != "" {
+		if addr := net.ParseIP(host.V4).To4(); addr != nil {
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+				A:   addr,
+			})
+		}
+	}
+	if (q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) && host.V6 != "" {
+		if addr6 := net.ParseIP(host.V6).To16(); addr6 != nil {
+			m.Answer = append(m.Answer, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+				AAAA: addr6,
+			})
+		}
+	}
+	// Empty answer (qtype the host doesn't satisfy, or anything other
+	// than A/AAAA/ANY) is a NOERROR negative response; attach SOA so
+	// RFC 2308 negative cache stays at one second.
+	if len(m.Answer) == 0 {
+		s.attachSOA(m)
+	}
+	_ = w.WriteMsg(m)
+}
+
+// attachSOA appends a minimal SOA RR with Minimum=1 to the authority
+// section so RFC 2308 negative caching is capped at one second. The
+// values don't need to be real — no one polls this zone over DNS, the
+// data comes from the camp HTTP API. We just need MinTTL low so
+// macOS's mDNSResponder cache doesn't pin a stale NXDOMAIN.
+func (s *Server) attachSOA(m *dns.Msg) {
+	zone := strings.TrimPrefix(s.suffix, ".")
+	m.Ns = append(m.Ns, &dns.SOA{
+		Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 1},
+		Ns:      "ns." + zone,
+		Mbox:    "hostmaster." + zone,
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  1,
+	})
+}
+
+// lookup scans the peer-domains catalog for the matching label and
+// (Resolver.LookupHost replaced the old PeerDomains map walk.)

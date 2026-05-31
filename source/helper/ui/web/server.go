@@ -1,0 +1,1682 @@
+//go:build darwin
+
+// Package web is the HTTP UI for f2f-mac. It serves an embedded SPA from
+// assets/ and exposes a small REST + SSE API over the engine.
+package web
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/engine"
+	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/engine/overlay"
+)
+
+//go:embed assets
+var assetsFS embed.FS
+
+// Server wraps an Engine with an HTTP handler. Two listeners are kept:
+//   - srv on the user-facing loopback bind (the full UI + all API endpoints).
+//   - tunnelSrv on the utun tunnel_ip, exposed once the engine is up,
+//     serving ONLY POST /api/signal/inbox so the remote peer can deliver
+//     WebRTC signalling through the tunnel without us exposing the UI to
+//     the LAN.
+type Server struct {
+	engine *engine.Engine
+	addr   string
+	srv    *http.Server
+
+	mu        sync.Mutex
+	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
+	proxySrvs []*http.Server // HTTP/HTTPS reverse proxies on :80/:443
+
+	signals     *signalHub
+	callSignals *signalHub // SSE hub for SFU signals → local browser
+	signalHTTP  *http.Client
+}
+
+func New(eng *engine.Engine, addr string) *Server {
+	s := &Server{
+		engine:      eng,
+		addr:        addr,
+		signals:     newSignalHub(),
+		callSignals: newSignalHub(),
+		signalHTTP: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}
+	eng.OnLocalSFUSignal = func(msg []byte) {
+		s.callSignals.broadcast(msg)
+	}
+	return s
+}
+
+// Addr returns the configured bind address.
+func (s *Server) Addr() string { return s.addr }
+
+// ListenAndServe blocks until the server is shut down. Returns http.ErrServerClosed
+// on graceful shutdown.
+func (s *Server) ListenAndServe() error {
+	mux := http.NewServeMux()
+	s.routes(mux)
+	s.srv = &http.Server{
+		Addr:              s.addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return s.srv.ListenAndServe()
+}
+
+// Shutdown gracefully stops the HTTP server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	_ = s.UnbindTunnel()
+	_ = s.UnbindProxies()
+	if s.srv == nil {
+		return nil
+	}
+	return s.srv.Shutdown(ctx)
+}
+
+// BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
+func (s *Server) BindTunnel(ip string) error {
+	if ip == "" {
+		return nil
+	}
+	_ = s.UnbindTunnel()
+	_, port, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
+	}
+	addr := net.JoinHostPort(ip, port)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
+	mux.HandleFunc("GET /api/domains", s.handleListDomains)
+	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/files", s.handleListFiles)
+	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
+	mux.HandleFunc("POST /api/call/signal", s.handleCallSignalInbound)
+	mux.HandleFunc("GET /api/call/state", s.handleCallState)
+	mux.HandleFunc("POST /api/call/join", s.handleCallJoinRemote)
+	mux.HandleFunc("POST /api/call/leave", s.handleCallLeaveRemote)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	s.mu.Lock()
+	s.tunnelSrv = srv
+	s.mu.Unlock()
+	go func() {
+		log.Printf("tunnel inbox listening on http://%s", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("WARN: tunnel inbox listener: %v", err)
+		}
+	}()
+	return nil
+}
+
+// UnbindTunnel stops the tunnel-side listener.
+func (s *Server) UnbindTunnel() error {
+	s.mu.Lock()
+	srv := s.tunnelSrv
+	s.tunnelSrv = nil
+	s.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
+	return srv.Shutdown(ctx)
+}
+
+// BindProxies starts reverse-proxy listeners for the local published
+// domains on standard web ports — both tunnel_ip and 127.0.0.1:
+//
+//   - :80   plain HTTP
+//   - :443  HTTPS, terminated with leaf certs issued on demand by the
+//           local CA (engine.CA()). Only enabled when a CA is available.
+//
+// The proxy reads Host/SNI, looks up engine.MyDomains, and forwards
+// to 127.0.0.1:<configured port> over plain HTTP. Bind failures (port
+// busy, no CA) are logged but not fatal — users can keep typing
+// explicit ports.
+func (s *Server) BindProxies(tunnelIP string) error {
+	_ = s.UnbindProxies()
+	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
+	if tunnelIP != "" {
+		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
+	}
+	for _, a := range httpAddrs {
+		s.startProxyListener(a, nil)
+	}
+	if ca := s.engine.CA(); ca != nil {
+		tlsCfg := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				host := strings.ToLower(strings.TrimSpace(hello.ServerName))
+				if host == "" {
+					return nil, fmt.Errorf("tls: empty SNI")
+				}
+				return ca.IssueLeaf(host)
+			},
+		}
+		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443")}
+		if tunnelIP != "" {
+			tlsAddrs = append(tlsAddrs, net.JoinHostPort(tunnelIP, "443"))
+		}
+		for _, a := range tlsAddrs {
+			s.startProxyListener(a, tlsCfg)
+		}
+	}
+	return nil
+}
+
+// startProxyListener brings up one listener (HTTP if tlsCfg is nil,
+// HTTPS otherwise) and stashes it on s.proxySrvs for shutdown.
+func (s *Server) startProxyListener(addr string, tlsCfg *tls.Config) {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           http.HandlerFunc(s.handleProxy),
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig:         tlsCfg,
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		scheme := "HTTP"
+		if tlsCfg != nil {
+			scheme = "HTTPS"
+		}
+		log.Printf("proxy: bind %s %s: %v (skipping)", scheme, addr, err)
+		return
+	}
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
+	}
+	s.mu.Lock()
+	s.proxySrvs = append(s.proxySrvs, srv)
+	s.mu.Unlock()
+	go func() {
+		scheme := "HTTP"
+		if tlsCfg != nil {
+			scheme = "HTTPS"
+		}
+		log.Printf("proxy: %s listening on %s", scheme, addr)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("WARN: proxy %s: %v", addr, err)
+		}
+	}()
+}
+
+// UnbindProxies stops every active proxy listener. Idempotent.
+func (s *Server) UnbindProxies() error {
+	s.mu.Lock()
+	srvs := s.proxySrvs
+	s.proxySrvs = nil
+	s.mu.Unlock()
+	for _, srv := range srvs {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = srv.Shutdown(ctx)
+		cancel()
+		log.Printf("proxy: stopped %s", srv.Addr)
+	}
+	return nil
+}
+
+// handleProxy is the single reverse-proxy handler shared between both
+// proxy listeners. Looks up the Host header's label in the local
+// published-domains list and forwards to <host>:<port> where host
+// defaults to 127.0.0.1 but the user can override per-domain (e.g.
+// "localhost" for IPv6-only dev servers, or a LAN IP). Anything
+// outside our zone or with no matching label returns 404.
+func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	campID := strings.ToLower(strings.TrimSpace(st.CampID))
+	if campID == "" {
+		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
+		return
+	}
+	zone := identity.CampLabel(campID)
+	suffix := "." + zone + ".f2f"
+
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		host = h
+	}
+	host = strings.ToLower(host)
+	if !strings.HasSuffix(host, suffix) {
+		http.Error(w, "not in this camp's f2f zone", http.StatusNotFound)
+		return
+	}
+	label := strings.TrimSuffix(host, suffix)
+	if label == "" {
+		http.Error(w, "bad subdomain", http.StatusNotFound)
+		return
+	}
+
+	// Two-pass match against MyDomains: exact wins over wildcard.
+	var (
+		port   int
+		upHost string
+	)
+	mine := s.engine.MyDomains()
+	for _, d := range mine {
+		if !engine.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
+			port = d.Port
+			upHost = d.Host
+			break
+		}
+	}
+	if port == 0 {
+		for _, d := range mine {
+			if engine.IsWildcardLabel(d.Name) && engine.MatchesWildcard(d.Name, label) {
+				port = d.Port
+				upHost = d.Host
+				break
+			}
+		}
+	}
+	if upHost == "" {
+		upHost = "127.0.0.1"
+	}
+	if port == 0 {
+		http.Error(w, "no such domain published locally", http.StatusNotFound)
+		return
+	}
+
+	target, _ := url.Parse("http://" + net.JoinHostPort(upHost, strconv.Itoa(port)))
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	// Tell the backend the request reached us over HTTPS (we terminate TLS
+	// and forward plain HTTP). Without this, apps like Gitea generate
+	// http:// links. The proto is derived from which listener served the
+	// request: r.TLS is non-nil only on the :443 HTTPS listener.
+	fwdProto := "http"
+	if r.TLS != nil {
+		fwdProto = "https"
+	}
+	fwdHost := r.Host
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Header.Set("X-Forwarded-Proto", fwdProto)
+		req.Header.Set("X-Forwarded-Host", fwdHost)
+		if clientIP != "" {
+			req.Header.Set("X-Forwarded-For", clientIP)
+		}
+	}
+
+	// httputil's default ErrorHandler logs to stderr; replace with a
+	// 502 so the client gets a meaningful response instead of a half-open
+	// connection.
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("proxy: %s → %s: %v", host, target, err)
+		http.Error(w, "upstream unreachable", http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func (s *Server) routes(mux *http.ServeMux) {
+	if devDir := os.Getenv("F2F_DEV_ASSETS"); devDir != "" {
+		log.Printf("web: serving assets from disk (F2F_DEV_ASSETS=%s)", devDir)
+		mux.Handle("/", http.FileServer(http.Dir(devDir)))
+	} else {
+		sub, err := fs.Sub(assetsFS, "assets")
+		if err != nil {
+			panic(err) // build-time; embed is wrong
+		}
+		mux.Handle("/", http.FileServer(http.FS(sub)))
+	}
+
+	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("POST /api/start", s.handleStart)
+	mux.HandleFunc("POST /api/stop", s.handleStop)
+	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
+	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
+	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
+	mux.HandleFunc("GET /api/topology", s.handleTopology)
+	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
+
+	// Local DNS / domain management. /api/my-domains is the UI side
+	// (read/write our own list); /api/domains is the read-only side
+	// exposed on the tunnel listener for peers to poll.
+	mux.HandleFunc("GET /api/my-domains", s.handleListMyDomains)
+	mux.HandleFunc("PUT /api/my-domains", s.handleSetMyDomains)
+	mux.HandleFunc("GET /api/domains", s.handleListDomains)
+	mux.HandleFunc("DELETE /api/peer-domains/{peer}/{name}", s.handleRemovePeerDomain)
+	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
+	mux.HandleFunc("GET /api/my-ca", s.handleMyCA)
+	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
+	mux.HandleFunc("POST /api/trusted-peers/{fp}/install", s.handleInstallTrustedPeer)
+	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
+
+	// Per-camp configuration. /api/camps is the global view (list +
+	// last selected); /api/camp/{id} returns the full config file so
+	// the UI can preview before switching.
+	mux.HandleFunc("GET /api/camps", s.handleListCamps)
+	mux.HandleFunc("GET /api/camp/{id}", s.handleGetCamp)
+
+	// Firewall: default-deny inbound on utun + user-configurable
+	// allow list (in addition to f2f's own ports). Loopback-only,
+	// settings for *this* peer.
+	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
+	mux.HandleFunc("PUT /api/firewall", s.handleSetFirewall)
+
+	// File sharing via BitTorrent (camp-only, no DHT/public trackers).
+	// /api/files/mine — UI-facing CRUD for what we publish.
+	// /api/files — read-only listing exposed on the tunnel listener
+	// so peers can browse our catalog.
+	mux.HandleFunc("GET /api/files/mine", s.handleListMyFiles)
+	mux.HandleFunc("POST /api/files/mine", s.handleAddMyFile)
+	mux.HandleFunc("POST /api/files/mine/upload", s.handleUploadMyFile)
+	mux.HandleFunc("DELETE /api/files/mine/{hash}", s.handleRemoveMyFile)
+	mux.HandleFunc("POST /api/files/download", s.handleAddDownload)
+	mux.HandleFunc("GET /api/files/downloads", s.handleListDownloads)
+	mux.HandleFunc("DELETE /api/files/downloads/{hash}", s.handleRemoveDownload)
+	mux.HandleFunc("POST /api/files/reveal", s.handleRevealFile)
+	mux.HandleFunc("GET /api/files", s.handleListFiles)
+
+	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
+	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
+	// verbatim; only the browsers care about their contents.
+	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
+	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
+	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
+
+	// Group calls (SFU-based). Browser-facing endpoints on the UI
+	// server; /api/call/signal also registered on the tunnel listener
+	// so remote peers can deliver SFU signals.
+	mux.HandleFunc("GET /api/call/state", s.handleCallState)
+	mux.HandleFunc("GET /api/call/list", s.handleCallList)
+	mux.HandleFunc("POST /api/call/create", s.handleCallCreate)
+	mux.HandleFunc("POST /api/call/join", s.handleCallJoin)
+	mux.HandleFunc("POST /api/call/leave", s.handleCallLeave)
+	mux.HandleFunc("POST /api/call/signal", s.handleCallSignal)
+	mux.HandleFunc("GET /api/call/signal/stream", s.handleCallSignalStream)
+}
+
+// signalHub is a tiny in-memory broadcaster. Every browser connected to
+// /api/signal/stream gets its own channel; signals arriving from the peer
+// are fanned out to all of them.
+type signalHub struct {
+	mu          sync.Mutex
+	subscribers map[chan []byte]struct{}
+}
+
+func newSignalHub() *signalHub {
+	return &signalHub{subscribers: map[chan []byte]struct{}{}}
+}
+
+func (h *signalHub) subscribe() (<-chan []byte, func()) {
+	ch := make(chan []byte, 32)
+	h.mu.Lock()
+	h.subscribers[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch, func() {
+		h.mu.Lock()
+		if _, ok := h.subscribers[ch]; ok {
+			delete(h.subscribers, ch)
+			close(ch)
+		}
+		h.mu.Unlock()
+	}
+}
+
+func (h *signalHub) broadcast(data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subscribers {
+		select {
+		case ch <- data:
+		default:
+			// Subscriber too slow; drop. Browsers will reconnect on stream
+			// error if they really fell behind.
+		}
+	}
+}
+
+// mdnsHostCandidateRE matches the address inside a WebRTC ICE candidate
+// of type "host" that uses an mDNS hostname (e.g. "abc-123.local"). Chrome
+// and Firefox both mask local IPs this way for privacy, which breaks our
+// no-STUN setup because *.local names are only resolvable on the
+// originating machine. We rewrite those addresses to our tunnel IP on the
+// way out, so the peer sees a candidate it can actually reach.
+var mdnsHostCandidateRE = regexp.MustCompile(`(?i)((?:udp|tcp)\s+\d+\s+)([A-Za-z0-9.-]+\.local)(\s+\d+\s+typ\s+host)`)
+
+func rewriteMDNS(body []byte, tunnelIP string) []byte {
+	if tunnelIP == "" {
+		return body
+	}
+	return mdnsHostCandidateRE.ReplaceAll(body, []byte("${1}"+tunnelIP+"${3}"))
+}
+
+// handleSignalOutbox accepts a JSON signalling message from the local
+// browser and forwards it as-is to the peer's /api/signal/inbox over the
+// tunnel. The peer IP comes from the engine config; the port is assumed
+// to match ours (both sides run the UI on the same port).
+func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	st := s.engine.Status()
+	if !st.Running {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running"))
+		return
+	}
+	// Find the active peer's pub-derived v4 and forward the signal there.
+	var peerIP string
+	for _, p := range st.Peers {
+		if !p.Self && p.Pub != "" && p.Pub == st.ActivePeerPub {
+			if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
+				peerIP = a.String()
+			}
+		}
+	}
+	if peerIP == "" {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no active peer (set one in /api/peers/active)"))
+		return
+	}
+	body = rewriteMDNS(body, st.LocalIP)
+	_, port, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
+		return
+	}
+	url := "http://" + net.JoinHostPort(peerIP, port) + "/api/signal/inbox"
+	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.signalHTTP.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("forward to peer: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("peer returned %s", resp.Status))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSignalInbox receives forwarded signalling messages from the peer
+// and broadcasts them to local browser subscribers. As a side effect it
+// auto-selects the sending peer as active — so the receiver doesn't have
+// to manually pick the caller from a dropdown before being able to
+// answer. The source tunnel_ip is read from RemoteAddr, which is the
+// peer's address as routed through utun.
+func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Auto-select active peer by matching the caller's v4 overlay
+	// address (pub-derived, unique per peer) to a known peer.
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
+		st := s.engine.Status()
+		if st.Running {
+			for _, p := range st.Peers {
+				if p.Self || p.Pub == "" {
+					continue
+				}
+				if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a.String() == host && p.Pub != st.ActivePeerPub {
+					_ = s.engine.SetActivePeer(p.Pub)
+					break
+				}
+			}
+		}
+	}
+	s.signals.broadcast(body)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSignalStream is an SSE endpoint so the browser can receive
+// signalling messages from the peer.
+func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.signals.subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+// topologyNode and topologyEdge feed the d3 force graph in the UI. The
+// graph is: self in the middle, one node per known camp peer, and each
+// intercept hung off its bound peer's node. Orphan intercepts (peer
+// unknown) hang off self.
+type topologyNode struct {
+	ID     string   `json:"id"`
+	Label  string   `json:"label"`
+	Kind   string   `json:"kind"` // "self" | "peer" | "intercept"
+	Spec   string   `json:"spec,omitempty"`
+	IPs    []string `json:"ips,omitempty"`
+	Online bool     `json:"online,omitempty"` // peer nodes only
+}
+
+type topologyEdge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+type topology struct {
+	Running bool           `json:"running"`
+	Nodes   []topologyNode `json:"nodes"`
+	Edges   []topologyEdge `json:"edges"`
+}
+
+func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	t := topology{Running: st.Running, Nodes: []topologyNode{}, Edges: []topologyEdge{}}
+	if !st.Running {
+		writeJSON(w, http.StatusOK, t)
+		return
+	}
+	// Unified node labels: every actor in the camp is "<name> · <tunnel_ip>".
+	// Interface name (utun7) and public endpoints are diagnostic detail,
+	// shown elsewhere — here we want the user-visible identity.
+	selfName := st.CampName
+	if selfName == "" {
+		selfName = "you"
+	}
+	selfLabel := selfName
+	if st.LocalIP != "" {
+		selfLabel += " · " + st.LocalIP
+	}
+	t.Nodes = append(t.Nodes, topologyNode{ID: "self", Label: selfLabel, Kind: "self"})
+
+	peerIDByName := map[string]string{}
+	for _, p := range st.Peers {
+		if p.Self {
+			continue
+		}
+		id := "peer:" + p.Name
+		peerIDByName[p.Name] = id
+		label := p.Name
+		if p.OverlayV4 != "" {
+			label += " · " + p.OverlayV4
+		}
+		t.Nodes = append(t.Nodes, topologyNode{ID: id, Label: label, Kind: "peer", Online: p.Online})
+		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})
+	}
+
+	for _, it := range st.Intercepts {
+		id := "intercept:" + it.ID
+		t.Nodes = append(t.Nodes, topologyNode{
+			ID: id, Label: it.Spec, Kind: "intercept",
+			Spec: it.Spec, IPs: it.Prefixes,
+		})
+		parent := peerIDByName[it.Peer]
+		if parent == "" {
+			parent = "self" // orphan — peer not visible right now
+		}
+		t.Edges = append(t.Edges, topologyEdge{Source: parent, Target: id})
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.Status())
+}
+
+// handleCampPeers serves the engine's view of the camp: peer list with
+// reachability flags and the active selection. Reads from local engine
+// state — no camp HTTP call here (the engine's poller refreshes the
+// cache every ~30s).
+func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	if !st.CampActive {
+		writeJSON(w, http.StatusOK, map[string]any{"running": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": true,
+		"you":     st.CampName,
+		"camp_id": st.CampID,
+		"active":  st.ActivePeerPub,
+		"peers":   st.Peers,
+	})
+}
+
+// handleListMyDomains returns this peer's own published domain list.
+// UI-facing — served only on the loopback listener.
+func (s *Server) handleListMyDomains(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+}
+
+// handleSetMyDomains replaces the entire list. PUT semantics — the
+// body is the new full list; missing entries are removed.
+func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
+	var list []engine.DomainEntry
+	if err := json.NewDecoder(r.Body).Decode(&list); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cleaned := make([]engine.DomainEntry, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, e := range list {
+		name := strings.ToLower(strings.TrimSpace(e.Name))
+		if name == "" || !isValidDomainLabel(name) {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		entry := engine.DomainEntry{Name: name}
+		if e.Port > 0 && e.Port < 65536 {
+			entry.Port = e.Port
+		}
+		if e.Proto != "" {
+			entry.Proto = e.Proto
+		}
+		if h := strings.TrimSpace(e.Host); h != "" {
+			entry.Host = h
+		}
+		cleaned = append(cleaned, entry)
+	}
+	s.engine.SetMyDomains(cleaned)
+	writeJSON(w, http.StatusOK, cleaned)
+}
+
+// isValidDomainLabel accepts three forms used in MyDomains:
+//   - simple:  "gitea"
+//   - nested:  "gitea.mini"
+//   - wildcard catch-all: "*.mini"
+//
+// Each dot-separated piece is checked as a DNS label.
+func isValidDomainLabel(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	if strings.HasPrefix(s, "*.") {
+		s = s[2:]
+		if s == "" {
+			return false
+		}
+	}
+	for _, part := range strings.Split(s, ".") {
+		if !isValidDNSPart(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidDNSPart(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return s[0] != '-' && s[len(s)-1] != '-'
+}
+
+// handleListDomains exposes the list to OTHER peers. Identical body to
+// handleListMyDomains but mounted on the tunnel listener so cross-peer
+// polling works. Mounted on the loopback listener too as a debug aid.
+func (s *Server) handleListDomains(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+}
+
+// handleCACert serves the local CA's public cert in PEM form. Polled
+// by peers to install us as a trusted root for HTTPS.
+func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
+	ca := s.engine.CA()
+	if ca == nil {
+		http.Error(w, "ca not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	_, _ = w.Write(ca.CertPEM)
+}
+
+func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
+	ca := s.engine.CA()
+	if ca == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"common_name": ca.CommonName(),
+		"fingerprint": ca.Fingerprint(),
+	})
+}
+
+// handleTrustedPeers returns the UI's view of discovered peer CAs —
+// fingerprint, common name, install state.
+func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+}
+
+// handleInstallTrustedPeer adds a discovered peer CA to the system
+// keychain (macOS prompts for the admin password). Triggered by the
+// user clicking "install".
+func (s *Server) handleInstallTrustedPeer(w http.ResponseWriter, r *http.Request) {
+	fp := r.PathValue("fp")
+	if fp == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
+		return
+	}
+	if err := s.engine.InstallPeerCA(fp); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRemovePeerDomain drops one (peer, domain) entry from the
+// peer-catalog in camp config and from the live peer's Domains. If
+// the peer is still publishing the name, next poll re-adds it.
+func (s *Server) handleRemovePeerDomain(w http.ResponseWriter, r *http.Request) {
+	peer := r.PathValue("peer")
+	name := r.PathValue("name")
+	if peer == "" || name == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("peer and name required"))
+		return
+	}
+	if err := s.engine.RemovePeerDomain(peer, name); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRemoveTrustedPeer drops one peer CA by fingerprint — file on
+// disk, keychain entry, and config entry. 204 on success; 404 if the
+// fingerprint isn't known.
+func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request) {
+	fp := r.PathValue("fp")
+	if fp == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
+		return
+	}
+	if err := s.engine.RemoveTrustedPeer(fp); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListCamps returns the global state file — last selected
+// camp_id and the roster of every camp the user has ever joined.
+// Powers the UI's camp dropdown / switcher.
+func (s *Server) handleListCamps(w http.ResponseWriter, r *http.Request) {
+	st, err := s.engine.ListCamps()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if st.KnownCamps == nil {
+		st.KnownCamps = []config.KnownCamp{}
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleGetCamp returns the full on-disk config for one camp_id —
+// intercepts, my-domains, firewall, trusted-peer fingerprints, peer
+// catalog. 404 if no config exists yet for that id (i.e. the user
+// hasn't started the engine with this camp_id).
+func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing camp_id"))
+		return
+	}
+	c, err := s.engine.CampConfig(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if c == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no config for camp %q", id))
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// handleListFirewall returns the inbound-utun allow list: built-in
+// f2f ports (read-only) + user-configured ports. `active` reflects
+// whether the pf anchor is loaded — false = engine stopped or pf
+// load failed, in which case ports show as inactive in UI.
+func (s *Server) handleListFirewall(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  s.engine.FirewallActive(),
+		"builtin": s.engine.BuiltinFirewallPorts(),
+		"user":    s.engine.UserFirewallPorts(),
+	})
+}
+
+// handleSetFirewall replaces the user-configured allow list. Built-in
+// rules cannot be modified. Body shape: {"user": [{port, protocol,
+// description, enabled}, ...]}.
+func (s *Server) handleSetFirewall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		User []engine.FirewallPort `json:"user"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.SetUserFirewallPorts(body.User); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  s.engine.FirewallActive(),
+		"builtin": s.engine.BuiltinFirewallPorts(),
+		"user":    s.engine.UserFirewallPorts(),
+	})
+}
+
+// fileEntry is the JSON shape returned by /api/files and friends.
+type fileEntry struct {
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	InfoHash string `json:"info_hash"`
+	Magnet   string `json:"magnet"`
+	Path     string `json:"path,omitempty"` // omitted from peer-facing response
+}
+
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	out := []fileEntry{}
+	for _, h := range t.ListSeeds() {
+		out = append(out, fileEntry{
+			Name: h.Name, Size: h.Size,
+			InfoHash: h.InfoHash, Magnet: h.Magnet,
+			// Path intentionally omitted on peer-facing path; we strip
+			// below for tunnel listener requests.
+			Path: h.Path,
+		})
+	}
+	// Hide local filesystem path from peer-facing tunnel-listener requests.
+	if !isLoopback(r.RemoteAddr) {
+		for i := range out {
+			out[i].Path = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleListMyFiles(w http.ResponseWriter, r *http.Request) {
+	// Same as handleListFiles but always includes Path (UI is on loopback).
+	s.handleListFiles(w, r)
+}
+
+type addMyFileReq struct {
+	Path string `json:"path"`
+}
+
+func (s *Server) handleAddMyFile(w http.ResponseWriter, r *http.Request) {
+	var req addMyFileReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	h, err := t.AddSeed(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fileEntry{
+		Name: h.Name, Size: h.Size,
+		InfoHash: h.InfoHash, Magnet: h.Magnet, Path: h.Path,
+	})
+}
+
+// handleUploadMyFile saves an uploaded file into the shared directory
+// and starts seeding it. Body is multipart/form-data with a single
+// "file" part. Used by the UI's drag-and-drop area so the user doesn't
+// have to type filesystem paths.
+func (s *Server) handleUploadMyFile(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	// 8GiB cap on a single upload — generous, our overlay isn't a CDN.
+	if err := r.ParseMultipartForm(8 << 30); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer file.Close()
+	dstPath := filepath.Join(t.SharedDir(), filepath.Base(hdr.Filename))
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		os.Remove(dstPath)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	dst.Close()
+	h, err := t.AddSeed(dstPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fileEntry{
+		Name: h.Name, Size: h.Size,
+		InfoHash: h.InfoHash, Magnet: h.Magnet, Path: h.Path,
+	})
+}
+
+func (s *Server) handleRemoveMyFile(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	if err := t.RemoveSeed(r.PathValue("hash")); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type addDownloadReq struct {
+	Magnet string   `json:"magnet"`
+	Peers  []string `json:"peers"`
+}
+
+func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
+	var req addDownloadReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	d, err := s.engine.AddDownload(req.Magnet, req.Peers)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, fileEntry{
+		Name: d.Name, Size: d.Size, InfoHash: d.InfoHash,
+	})
+}
+
+func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	out := []map[string]any{}
+	for _, d := range t.ListDownloads() {
+		row := map[string]any{
+			"info_hash":  d.InfoHash,
+			"name":       d.Name,
+			"size":       d.Size,
+			"started_at": d.StartedAt.Unix(),
+			// Source peers fed at AddDownload time. Used by the UI to
+			// show "from peer-X" even before torrent metadata arrives,
+			// so users can tell what they were trying to download.
+			"peers": d.Peers,
+		}
+		// fetching_metadata = magnet added, but anacrolix hasn't pulled
+		// the .torrent yet (source peer offline or didn't connect).
+		// Without this the UI can't distinguish "active 0%" from "stuck
+		// waiting on metadata forever" — shows up as just an info_hash.
+		if d.Torrent == nil || d.Torrent.Info() == nil {
+			row["fetching_metadata"] = true
+		} else {
+			info := d.Torrent.Info()
+			total := info.TotalLength()
+			done := d.Torrent.BytesCompleted()
+			row["bytes_completed"] = done
+			row["bytes_missing"] = total - done
+			// Compare BytesCompleted to total length — robust check
+			// that doesn't depend on BytesMissing's internal piece
+			// bitmap state (which can briefly mis-report when a new
+			// torrent is being added in parallel).
+			complete := total > 0 && done >= total
+			// t.Seeding() is anacrolix's own authority on "is this
+			// torrent currently uploading without wanting anything".
+			// Use it for the seeding flag rather than re-deriving.
+			seeding := d.Torrent.Seeding() && complete
+			row["complete"] = complete
+			row["seeding"] = seeding
+			if complete {
+				row["path"] = t.DownloadPath(d)
+			}
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRemoveDownload cancels an in-progress download (or removes a
+// completed one from seeding). info_hash in URL path. 204 on success.
+// Files on disk are kept — anacrolix marks them as no longer managed
+// but doesn't unlink. The engine's pruneLoop catches up later.
+func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	hash := r.PathValue("hash")
+	if hash == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing info_hash"))
+		return
+	}
+	// Engine.RemoveDownload also drops the entry from downloads.json
+	// so it doesn't come back on restart. It returns false for unknown
+	// info_hashes — we still 204 to keep DELETE idempotent.
+	_ = t
+	s.engine.RemoveDownload(hash)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRevealFile runs `open -R <path>` so macOS selects the file in
+// Finder. Restricted to paths under SharedDir or DownloadsDir — we
+// don't want this endpoint to double as a generic "open anything on
+// the filesystem" backdoor.
+func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	abs, err := filepath.Abs(body.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.engine.Torrent()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	shared, _ := filepath.Abs(t.SharedDir())
+	downloads, _ := filepath.Abs(s.engine.DownloadsDir())
+	if !strings.HasPrefix(abs, shared+string(filepath.Separator)) &&
+		!strings.HasPrefix(abs, downloads+string(filepath.Separator)) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("path outside f2f-managed dirs"))
+		return
+	}
+	if _, err := os.Stat(abs); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	// Engine runs as root via sudo — `open` itself only works in a
+	// user GUI session, so drop privileges to the invoking user.
+	// SUDO_USER is always set when launched through sudo; fall
+	// through to a raw `open` if we weren't sudo'd (unusual).
+	var cmd *exec.Cmd
+	if su := os.Getenv("SUDO_USER"); su != "" {
+		cmd = exec.Command("/usr/bin/sudo", "-u", su, "/usr/bin/open", "-R", abs)
+	} else {
+		cmd = exec.Command("/usr/bin/open", "-R", abs)
+	}
+	if err := cmd.Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1"
+}
+
+type startRequest struct {
+	CampName  string `json:"camp_name,omitempty"`
+	CampID    string `json:"camp_id"`
+	CampLabel string `json:"camp_label,omitempty"`
+}
+
+// handleStart accepts only camp identity from the UI now; everything else
+// (utun addresses, UDP listen port, camp endpoint) uses sensible defaults
+// that the engine fills in. Static-peer mode is no longer reachable from
+// the UI — use the CLI if you need it.
+//
+// camp_name is optional when a per-camp config already exists on disk
+// (the engine reads it from $HOME/.f2f/<camp_id>.config.json). It is
+// required on the first start for a given camp_id.
+//
+// If the engine is already running with a different camp_id, we stop
+// it first — gives the UI a one-click "switch camp" affordance.
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	var req startRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Two flows in one endpoint:
+	//   - join/resume: req.CampID populated (a known camp on disk or a
+	//     full <pub>_<label> id pasted from an invite).
+	//   - create: req.CampID empty, req.CampLabel populated → engine
+	//     generates identity and derives ID = <pub>_<label>.
+	// req.CampName is the user's nickname inside the camp either way.
+	if req.CampID == "" && req.CampLabel == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id or camp_label is required"))
+		return
+	}
+	if cur := s.engine.Status(); cur.Running {
+		if req.CampID != "" && cur.CampID == req.CampID {
+			writeJSON(w, http.StatusOK, cur)
+			return
+		}
+		if err := s.engine.Stop(); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("stop current: %w", err))
+			return
+		}
+	}
+	name := req.CampName
+	if name == "" && req.CampID != "" {
+		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
+			name = existing.Identity.Name
+		}
+	}
+	if name == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required"))
+		return
+	}
+	cfg := engine.Config{
+		LocalIP: "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
+		Listen:  ":9000",
+		Camp: &engine.CampConfig{
+			URL:      "wss://f2f-camp.fly.dev/ws",
+			StunAddr: "f2f-camp.fly.dev:3478",
+			Name:     name,
+			ID:       req.CampID,
+			Label:    req.CampLabel,
+		},
+	}
+	if err := s.engine.Start(cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.Status())
+}
+
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.Stop(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.Status())
+}
+
+type addInterceptRequest struct {
+	Spec string `json:"spec"`
+	Peer string `json:"peer"`
+}
+
+func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
+	var req addInterceptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	info, err := s.engine.AddIntercept(req.Spec, req.Peer)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.engine.RemoveIntercept(id); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSetActivePeer sets the user-selected active peer (catch-all
+// tunnel destination and meet signalling target). Body: {pub}. Empty
+// string clears.
+func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pub string `json:"pub"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.SetActivePeer(req.Pub); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ch, unsubscribe := s.engine.Subscribe(64)
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+
+	// Send an initial comment so the client knows the stream is alive.
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case entry, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// --- Group call (SFU) handlers ---
+
+func (s *Server) handleCallState(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.CallState()
+	if st == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleCallList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.AllCalls())
+}
+
+func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
+	cs, err := s.engine.CreateCall()
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cs)
+}
+
+func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		TunnelIP string `json:"tunnel_ip"`
+		Name     string `json:"name"`
+		SFUHost  string `json:"sfu_host"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	st := s.engine.Status()
+	// If the SFU host is remote, proxy the join request through the tunnel.
+	if req.SFUHost != "" && req.SFUHost != st.LocalIP {
+		// Can't host and join simultaneously — end any local call first.
+		// Otherwise our browser receives SFU signals from both our local
+		// SFU and the remote one, corrupting the single PeerConnection.
+		s.engine.EndCall()
+		s.engine.SetJoinedSFUHost(req.SFUHost)
+		s.proxyCallJoinToHost(w, req.SFUHost, req.Name)
+		return
+	}
+
+	if err := s.engine.JoinCall(req.TunnelIP, req.Name); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.CallState())
+}
+
+func (s *Server) proxyCallJoinToHost(w http.ResponseWriter, sfuHost, name string) {
+	_, port, _ := net.SplitHostPort(s.addr)
+	if port == "" {
+		port = "2202"
+	}
+	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/join"
+	body, _ := json.Marshal(map[string]string{"name": name})
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy join to %s: %w", sfuHost, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
+// handleCallJoinRemote is exposed on the tunnel listener so a remote peer
+// can register itself as a call participant.
+func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("cannot determine caller IP"))
+		return
+	}
+	if err := s.engine.JoinCall(host, req.Name); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.CallState())
+}
+
+func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
+	st := s.engine.Status()
+	sfuHost := s.engine.JoinedSFUHost()
+
+	// If we joined a remote SFU, proxy leave to the host.
+	if sfuHost != "" && sfuHost != st.LocalIP {
+		s.engine.ClearJoinedSFUHost()
+		_, port, _ := net.SplitHostPort(s.addr)
+		if port == "" {
+			port = "2202"
+		}
+		url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/leave"
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Post(url, "application/json", nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	s.engine.LeaveCall(st.LocalIP)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCallLeaveRemote is on the tunnel listener — a remote peer leaves.
+func (s *Server) handleCallLeaveRemote(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "" {
+		s.engine.LeaveCall(host)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCallSignal receives WebRTC signals for the SFU. On the tunnel
+// listener the sender is a remote peer; on the loopback listener it's
+// the local browser. If the SFU is remote, the loopback handler proxies
+// the signal to the SFU host through the tunnel.
+func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	from := ""
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+		from = host
+	}
+	isLocal := from == "" || from == "127.0.0.1" || from == "::1"
+
+	// If browser is sending a signal and the SFU is on a remote peer,
+	// proxy the request there.
+	if isLocal {
+		st := s.engine.Status()
+		sfuHost := s.engine.JoinedSFUHost()
+		if sfuHost != "" && sfuHost != st.LocalIP {
+			s.proxyCallSignalToHost(w, sfuHost, body)
+			return
+		}
+		from = st.LocalIP
+	}
+
+	resp, err := s.engine.HandleCallSignal(from, body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if resp != nil {
+		// Don't broadcast to SSE — the browser gets the answer from the
+		// POST response. SFU-initiated signals (renegotiation offers,
+		// candidates) arrive via deliverSFUSignal → handleCallSignalInbound.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, body []byte) {
+	_, port, _ := net.SplitHostPort(s.addr)
+	if port == "" {
+		port = "2202"
+	}
+	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/signal"
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy signal to %s: %w", sfuHost, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Don't broadcast the proxy response to SSE — the browser already
+	// gets it from the POST response. SFU-initiated offers/candidates
+	// arrive separately via deliverSFUSignal → handleCallSignalInbound.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
+// handleCallSignalInbound is registered on the tunnel listener. It handles:
+//
+//  1. Signals FROM the SFU (from: "sfu") → always broadcast to local browser SSE.
+//     This covers both: SFU host receiving its own renegotiation offers, and
+//     remote peers receiving SFU offers/candidates.
+//  2. Signals FROM a remote browser (no from: "sfu") → dispatch to local SFU.
+func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Check if this signal originates from the SFU itself.
+	var peek struct {
+		From string `json:"from"`
+	}
+	_ = json.Unmarshal(body, &peek)
+
+	if peek.From == "sfu" {
+		// SFU → browser: broadcast to local SSE so the browser can
+		// process renegotiation offers and ICE candidates.
+		s.callSignals.broadcast(body)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Browser/peer → SFU: dispatch to the local SFU engine.
+	from := ""
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+		from = host
+	}
+
+	if s.engine.CallSFU() != nil {
+		resp, err := s.engine.HandleCallSignal(from, body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if resp != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCallSignalStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.callSignals.subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
