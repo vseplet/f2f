@@ -11,7 +11,7 @@
     line-height: 1.6;
     padding: 18px 20px;
     border: 1px dotted #3a3024;
-    border-radius: 6px;
+    border-radius: 0;
 }
 
 /* Tabbar sits flush with the single .ax-frame below it: dotted border
@@ -21,17 +21,31 @@
 .ax-tabbar {
     padding: 14px 20px;
     margin-bottom: 0;
-    border-radius: 6px 6px 0 0;
+    border-radius: 0;
     border-bottom: 1px solid #221d16;
+    border-left-style: none;
+    border-right-style: none;
+    border-top-style: none;
 }
 .ax-tabbar .ax-header {
     margin-bottom: 0;
 }
 
+.tab-panel:not(.hidden) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
 .tab-panel > .ax-frame {
     border-top-style: none;
-    border-radius: 0 0 6px 6px;
+    border-left-style: none;
+    border-right-style: none;
+    border-radius: 0;
     margin-top: 0;
+    min-height: 100%;
+    box-sizing: border-box;
+    padding-bottom: 40px;
 }
 
 /* Header row (used inside .ax-tabbar — no bottom margin since the
@@ -505,30 +519,8 @@ body {
     height: 100vh;
     overflow: hidden;
 }
-.max-w-5xl {
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    box-sizing: border-box;
-}
-.tab-panel,
-.tab-panel > .ax-frame {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-}
 .tab-panel.hidden {
     display: none;
-}
-/* Default: when frame content exceeds viewport, scroll the frame itself.
-   Meet overrides this — its log scrolls inside a fixed frame instead. */
-.tab-panel > .ax-frame {
-    overflow-y: auto;
-}
-.tab-panel > .ax-frame > :last-child {
-    flex: 1;
-    min-height: 0;
 }
 
 #tab-audio > .ax-frame {
@@ -1233,6 +1225,9 @@ a.ax-domain-link:hover {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding-bottom: 18px;
 }
 
 .m2-topbar {

@@ -19,7 +19,7 @@ help:
 	@echo "  make desktop-install-wails  go install wails CLI (one-time)"
 
 run:
-	-sudo go run ./source/mac
+	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/mac/internal/web/assets go run ./source/mac
 
 build:
 	go build -o f2f-mac ./source/mac
