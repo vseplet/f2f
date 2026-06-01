@@ -182,6 +182,65 @@ func (i *Identity) X25519PubHex() string { return hex.EncodeToString(i.x25519Pub
 // Don't log this, don't ship this — it's the transport secret.
 func (i *Identity) X25519Priv() [32]byte { return i.x25519Priv }
 
+// helloCanonicalTag is the domain-separation prefix for hello signatures.
+// Bumping the suffix invalidates all existing hello signatures while
+// keeping priv.key intact — used if the canonical message format ever
+// needs to change.
+const helloCanonicalTag = "f2f-hello-v1"
+
+// HelloCanonical returns the byte string a hello signature covers.
+// Pipe-delimited: tag|name|pub_hex|wg_pub_hex. Name is restricted to
+// ASCII printable without '|' (see ValidHelloName) so the delimiter is
+// unambiguous; pub/wg_pub are hex and naturally pipe-free.
+func HelloCanonical(name, pubHex, wgPubHex string) []byte {
+	return []byte(helloCanonicalTag + "|" + name + "|" + pubHex + "|" + wgPubHex)
+}
+
+// ValidHelloName reports whether name is acceptable as the `name` field
+// of a hello (and therefore can be safely embedded in HelloCanonical
+// without ambiguity). Allows printable ASCII except '|', length 1..64.
+func ValidHelloName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 0x20 || c > 0x7E || c == '|' {
+			return false
+		}
+	}
+	return true
+}
+
+// SignHello signs the canonical hello message for this identity's own
+// keys + the given display name. Returns the 64-byte Ed25519 signature.
+// Caller is responsible for passing a name that satisfies ValidHelloName;
+// signing an invalid name is allowed but VerifyHello will reject it.
+func (i *Identity) SignHello(name string) []byte {
+	return ed25519.Sign(i.priv, HelloCanonical(name, i.PubHex(), i.X25519PubHex()))
+}
+
+// VerifyHello checks sig against (name, pubHex, wgPubHex) under the
+// canonical hello message. Returns true only when:
+//   - name passes ValidHelloName
+//   - pubHex decodes to a valid Ed25519 public key
+//   - sig is a valid Ed25519 signature of HelloCanonical(name, pubHex, wgPubHex)
+//
+// Length of sig must be ed25519.SignatureSize (64); anything else → false.
+func VerifyHello(name, pubHex, wgPubHex string, sig []byte) bool {
+	if !ValidHelloName(name) {
+		return false
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	pubBytes, err := hex.DecodeString(pubHex)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pubBytes), HelloCanonical(name, pubHex, wgPubHex), sig)
+}
+
 // Fingerprint returns the first 8 bytes of SHA-256(pub) as 16 hex
 // chars — short enough for the UI, wide enough to make collisions
 // effectively zero in a single camp.

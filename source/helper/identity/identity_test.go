@@ -81,6 +81,82 @@ func TestX25519PubHexShape(t *testing.T) {
 	}
 }
 
+// Sign / verify roundtrip: a hello signed by Identity A verifies under
+// A's pub. This is the basic crypto correctness check.
+func TestHelloSignVerifyRoundtrip(t *testing.T) {
+	id, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := id.SignHello("alice")
+	if !VerifyHello("alice", id.PubHex(), id.X25519PubHex(), sig) {
+		t.Fatal("VerifyHello rejected a freshly-signed hello")
+	}
+}
+
+// Each canonical-message field is bound by the signature — changing the
+// name, ed pub, or wg pub at verify time invalidates it. This is what
+// stops camp from MITM'ing by replacing wg_pub.
+func TestHelloVerifyRejectsFieldSwap(t *testing.T) {
+	id, _ := Generate()
+	sig := id.SignHello("alice")
+	other, _ := Generate()
+	cases := []struct {
+		label                 string
+		name, pubHex, wgPubHex string
+	}{
+		{"wrong name", "bob", id.PubHex(), id.X25519PubHex()},
+		{"wrong ed pub", "alice", other.PubHex(), id.X25519PubHex()},
+		{"wrong wg pub", "alice", id.PubHex(), other.X25519PubHex()},
+	}
+	for _, c := range cases {
+		if VerifyHello(c.name, c.pubHex, c.wgPubHex, sig) {
+			t.Errorf("%s: accepted swap", c.label)
+		}
+	}
+}
+
+// Bad inputs (non-hex pub, wrong-size sig) must be rejected without
+// panicking — these reach Verify from the network and must be safe.
+func TestHelloVerifyRejectsMalformed(t *testing.T) {
+	id, _ := Generate()
+	sig := id.SignHello("alice")
+	if VerifyHello("alice", "not-hex-pub", id.X25519PubHex(), sig) {
+		t.Error("accepted non-hex pub")
+	}
+	if VerifyHello("alice", id.PubHex(), id.X25519PubHex(), []byte("too short")) {
+		t.Error("accepted short sig")
+	}
+}
+
+// The signed message must contain its domain-separation tag — without
+// it, a hello signature could be replayed in another context that also
+// signs over name|pub|wg_pub. Lock the format down with a literal.
+func TestHelloCanonicalFormat(t *testing.T) {
+	got := string(HelloCanonical("alice", "abc", "def"))
+	want := "f2f-hello-v1|alice|abc|def"
+	if got != want {
+		t.Errorf("HelloCanonical = %q, want %q", got, want)
+	}
+}
+
+// Names that could break the pipe-delimited canonical form (containing
+// '|', control chars, empty, oversized) must be rejected.
+func TestValidHelloName(t *testing.T) {
+	good := []string{"alice", "user.name_42", "a-b-c", "x"}
+	for _, n := range good {
+		if !ValidHelloName(n) {
+			t.Errorf("rejected good name %q", n)
+		}
+	}
+	bad := []string{"", "with|pipe", "with\ttab", "with\x00null", string(make([]byte, 65))}
+	for _, n := range bad {
+		if ValidHelloName(n) {
+			t.Errorf("accepted bad name %q", n)
+		}
+	}
+}
+
 // ed25519Seeded returns a PrivateKey deterministically from a 32-byte
 // seed string. Pads/truncates to ed25519.SeedSize.
 func ed25519Seeded(t *testing.T, seed string) ed25519.PrivateKey {
