@@ -33,6 +33,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/config"
 	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/engine/egress"
+	"github.com/vseplet/f2f/source/helper/engine/awg"
 	"github.com/vseplet/f2f/source/helper/engine/firewall"
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/engine/pair"
@@ -411,6 +412,12 @@ type Engine struct {
 	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
 	// Built once at Start in camp mode; nil in static --peer mode.
 	obfenv *obfenv.Camp
+	// awgBind is the conn.Bind implementation that amneziawg-go's Device
+	// will use to send/receive its packets over our shared UDP socket.
+	// Created at Start once e.udp is up; peerToTunLoop forwards
+	// H1..H4-magic packets into it via Deliver. Device itself is wired
+	// in a later step — for now Bind just buffers.
+	awgBind *awg.Bind
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
 	// can dispatch announce replies before they hit IP-version parsing.
@@ -718,6 +725,14 @@ func (e *Engine) Start(cfg Config) error {
 				return fmt.Errorf("resolve peer: %w", err)
 			}
 			e.staticPeer.Store(initialPeer)
+		}
+		// AWG bind sits in front of the shared UDP socket. At this step
+		// Device isn't created yet — Bind just buffers any inbound AWG-
+		// shaped packets that peerToTunLoop forwards via Deliver. The
+		// next step (Device wiring) will Open() this Bind and start
+		// draining the inbox.
+		if e.obfenv != nil {
+			e.awgBind = awg.New(e.udp)
 		}
 	}
 
@@ -2765,9 +2780,14 @@ func (e *Engine) Stop() error {
 	if e.torrent != nil {
 		_ = e.torrent.Close()
 	}
+	if e.awgBind != nil {
+		_ = e.awgBind.Close()
+	}
 	e.running = false
 	e.tun = nil
 	e.udp = nil
+	e.awgBind = nil
+	e.obfenv = nil
 	e.routes = nil
 	e.egr = nil
 	e.fw = nil
@@ -3589,8 +3609,14 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 				continue
 			case obfenv.SlotAWGInit, obfenv.SlotAWGResponse,
 				obfenv.SlotAWGCookie, obfenv.SlotAWGTransport:
-				// AWG slots — device-side decrypt not wired yet, will
-				// land on awgBind once the AWG integration step happens.
+				// AWG slot — forward to Bind. Once Device is wired (next
+				// step) it will drain the Bind's inbox via the
+				// ReceiveFunc returned from Open. Until then the inbox
+				// fills to 64 and overflows silently — fine, AWG keepalive
+				// will retransmit.
+				if e.awgBind != nil {
+					e.awgBind.Deliver(pkt, from.AddrPort())
+				}
 				continue
 			case obfenv.SlotReserved6, obfenv.SlotReserved7, obfenv.SlotReserved8:
 				// Reserved control slots — no handler yet.
@@ -3664,6 +3690,10 @@ func ipv4Src(pkt []byte) (string, bool) {
 // rollbackPartial cleans up whatever Start managed to bring up before
 // failing. Called with e.mu held.
 func (e *Engine) rollbackPartial() {
+	if e.awgBind != nil {
+		_ = e.awgBind.Close()
+		e.awgBind = nil
+	}
 	if e.tun != nil {
 		_ = e.tun.Close()
 		e.tun = nil
@@ -3686,6 +3716,7 @@ func (e *Engine) rollbackPartial() {
 	}
 	e.announce = nil
 	e.poller = nil
+	e.obfenv = nil
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {
