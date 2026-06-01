@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	wgtun "golang.zx2c4.com/wireguard/tun"
+	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 // wgtun on Linux enables TUN's VNET_HDR mode (TUNSETOFFLOAD) for GSO

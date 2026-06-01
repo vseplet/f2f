@@ -3,9 +3,9 @@ module github.com/vseplet/f2f/source/helper
 go 1.26.3
 
 require (
+	github.com/amnezia-vpn/amneziawg-go v1.0.4
 	github.com/pion/interceptor v0.1.40
 	github.com/pion/webrtc/v4 v4.0.0
-	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 )
 
 require (
@@ -40,7 +40,7 @@ require (
 	github.com/go-llsqlite/crawshaw v0.5.6-0.20250312230104-194977a03421 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/google/btree v1.1.2 // indirect
+	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
@@ -59,7 +59,7 @@ require (
 	github.com/pion/logging v0.2.3 // indirect
 	github.com/pion/mdns/v2 v2.0.7 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.15 // indirect
+	github.com/pion/rtcp v1.2.15
 	github.com/pion/rtp v1.8.18 // indirect
 	github.com/pion/sctp v1.8.33 // indirect
 	github.com/pion/sdp/v3 v3.0.9 // indirect

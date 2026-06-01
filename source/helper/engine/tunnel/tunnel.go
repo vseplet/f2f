@@ -9,7 +9,7 @@ import (
 	"net/netip"
 
 	"github.com/vseplet/f2f/source/helper/platform"
-	wgtun "golang.zx2c4.com/wireguard/tun"
+	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 // MTU we configure on the tunnel. Conservative — leaves room for the

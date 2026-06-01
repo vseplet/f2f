@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	wgtun "golang.zx2c4.com/wireguard/tun"
+	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 // macOS utun: the kernel prepends a 4-byte address-family header on

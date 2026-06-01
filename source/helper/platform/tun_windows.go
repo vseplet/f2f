@@ -2,7 +2,7 @@
 
 package platform
 
-import wgtun "golang.zx2c4.com/wireguard/tun"
+import wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 
 const tunAFPrefixLen = 0
 
