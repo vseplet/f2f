@@ -17,16 +17,51 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/hkdf"
 )
 
-// Identity is a loaded Ed25519 keypair plus its on-disk location.
+// x25519HKDFInfo is the domain-separation tag for deriving the per-identity
+// X25519 keypair from the Ed25519 seed. Bump the version suffix if we ever
+// change the derivation scheme — the seed on disk stays the same, the new
+// version just produces a different X25519 keypair.
+const x25519HKDFInfo = "f2f-wg-static-v1"
+
+// Identity is a loaded Ed25519 keypair plus its on-disk location, and the
+// X25519 keypair derived from the Ed25519 seed. The X25519 part is used for
+// AmneziaWG transport encryption (Noise IK static keys) and is never
+// persisted — it's deterministic from priv.key.
 type Identity struct {
 	dir  string
 	priv ed25519.PrivateKey
 	pub  ed25519.PublicKey
+
+	x25519Priv [32]byte
+	x25519Pub  [32]byte
+}
+
+// newIdentity assembles an Identity from raw key material and derives the
+// X25519 keypair. All construction paths (Generate, load) go through this
+// so x25519Priv/Pub are always populated.
+func newIdentity(priv ed25519.PrivateKey, pub ed25519.PublicKey, dir string) *Identity {
+	i := &Identity{dir: dir, priv: priv, pub: pub}
+	seed := priv[:ed25519.SeedSize]
+	reader := hkdf.New(sha256.New, seed, nil, []byte(x25519HKDFInfo))
+	if _, err := io.ReadFull(reader, i.x25519Priv[:]); err != nil {
+		// HKDF-SHA256 has 8160 bytes of output, reading 32 cannot fail.
+		panic(fmt.Sprintf("identity: hkdf x25519: %v", err))
+	}
+	// X25519 clamp (RFC 7748 §5): zero low 3 bits, set bit 254, clear bit 255.
+	i.x25519Priv[0] &= 248
+	i.x25519Priv[31] &= 127
+	i.x25519Priv[31] |= 64
+	curve25519.ScalarBaseMult(&i.x25519Pub, &i.x25519Priv)
+	return i
 }
 
 // LoadOrGenerate returns the identity for `dir`, creating one if the
@@ -63,7 +98,7 @@ func Generate() (*Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identity: generate: %w", err)
 	}
-	return &Identity{priv: priv, pub: pub}, nil
+	return newIdentity(priv, pub, ""), nil
 }
 
 // Save writes the keypair to dir (priv.key 0600, pub.key 0644) and
@@ -99,7 +134,7 @@ func load(dir string) (*Identity, error) {
 	if len(pub) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("identity: %s has %d bytes, expected %d", pubPath, len(pub), ed25519.PublicKeySize)
 	}
-	return &Identity{dir: dir, priv: ed25519.PrivateKey(priv), pub: ed25519.PublicKey(pub)}, nil
+	return newIdentity(ed25519.PrivateKey(priv), ed25519.PublicKey(pub), dir), nil
 }
 
 // CampLabel returns the human-friendly suffix of a camp_id. New-format
@@ -132,6 +167,20 @@ func isHex64(s string) bool {
 func (i *Identity) PubHex() string {
 	return hex.EncodeToString(i.pub)
 }
+
+// X25519Pub returns the 32-byte X25519 public key derived from this
+// identity's Ed25519 seed. Used as the static pub for AmneziaWG handshakes.
+// Stable: same priv.key always produces the same value.
+func (i *Identity) X25519Pub() [32]byte { return i.x25519Pub }
+
+// X25519PubHex returns X25519Pub formatted as 64-char hex — the form we
+// ship over the wire in hello-packets.
+func (i *Identity) X25519PubHex() string { return hex.EncodeToString(i.x25519Pub[:]) }
+
+// X25519Priv returns the 32-byte X25519 private scalar (clamped per
+// RFC 7748). Goes into AmneziaWG device's `private_key=` UAPI field.
+// Don't log this, don't ship this — it's the transport secret.
+func (i *Identity) X25519Priv() [32]byte { return i.x25519Priv }
 
 // Fingerprint returns the first 8 bytes of SHA-256(pub) as 16 hex
 // chars — short enough for the UI, wide enough to make collisions
