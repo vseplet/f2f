@@ -94,6 +94,15 @@ func (b *Bind) Open(_ uint16) ([]conn.ReceiveFunc, uint16, error) {
 	}
 	actualPort := uint16(addr.Port)
 
+	// amneziawg-go's Device opens, closes and re-opens its Bind during
+	// IpcSet + Up() — listen_port assignment and state transitions each
+	// reshape the bind. A `closed` channel that was created once at
+	// New() would stay closed forever after the first Close, and every
+	// subsequent Open would hand out a ReceiveFunc that immediately
+	// returns net.ErrClosed. Refresh it here so each Open cycle starts
+	// with a live signal.
+	b.closed = make(chan struct{})
+
 	closed := b.closed
 	inbox := b.inbox
 	recv := func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
