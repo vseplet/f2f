@@ -783,30 +783,28 @@ $(function () {
     $campBody.empty();
     for (const p of peers) {
       const endpoint = p.udp_endpoint || (p.public_ip ? p.public_ip + (p.udp_port ? ':' + p.udp_port : '') : '—');
-      // Online   = we received any UDP from peer recently (one-way truth).
-      // Verified = we got a pong recently → round-trip works (two-way truth).
-      // InCamp   = camp server sees peer's announce.
+      // Paired      = bidirectional crypto-attested via pair_req + pair_res.
+      // HalfPaired  = exactly one direction of the pair handshake is fresh.
+      // InCamp      = camp server sees peer's announce.
       // Color matrix:
-      //   self                                  → yellow
-      //   online + verified                     → green (true bidirectional)
-      //   online without verified               → orange (asymmetric: peer
-      //                                                   reaches us, our
-      //                                                   pings unanswered)
-      //   in_camp without online                → red   (camp sees them, we can't reach)
-      //   neither                               → gray
+      //   self                                  → yellow (you)
+      //   paired                                → green  (bidirectional pair-handshake, RTT measured)
+      //   half_paired                           → orange (one-way only; we hear them OR they hear us, not both)
+      //   in_camp without paired/half_paired    → red    (in camp roster but no crypto signal — old version OR NAT blocked)
+      //   neither                               → gray   (not in camp)
       let dotClass, dotTitle;
       if (p.self) {
         dotClass = 'self';
         dotTitle = 'you';
-      } else if (p.verified) {
+      } else if (p.paired) {
         dotClass = 'reachable';
-        dotTitle = 'verified bidirectional' + (p.rtt_ms ? ' — rtt ' + p.rtt_ms + 'ms' : '');
-      } else if (p.online) {
+        dotTitle = 'paired — bidirectional crypto-attested' + (p.rtt_ms ? ' — rtt ' + p.rtt_ms + 'ms' : '');
+      } else if (p.half_paired) {
         dotClass = 'degraded';
-        dotTitle = 'one-way only — peer sends to us but our pings unanswered (peer outdated, or our send-path blocked)';
+        dotTitle = 'half-paired — one direction only (NAT-rebind or asymmetric path)';
       } else if (p.in_camp) {
         dotClass = 'unreachable';
-        dotTitle = 'in camp roster but no packets received yet (NAT / hole-punch issue?)';
+        dotTitle = 'in camp roster but no pair handshake (old version without pair support, or NAT blocking us)';
       } else {
         dotClass = 'offline';
         dotTitle = 'not in camp roster';

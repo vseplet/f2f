@@ -196,14 +196,22 @@ type PeerStatusInfo struct {
 	// we can reach the peer ourselves — the Online flag above is the
 	// local reachability view (we received UDP from them recently).
 	InCamp bool `json:"in_camp"`
-	// LastPongMs is the wall-clock ms of the most recent pong we got
-	// from this peer (0 = never). Verified=true means we've had a pong
-	// recently enough to trust the round-trip path is alive in BOTH
-	// directions, distinct from Online which only tells us the peer
-	// sends something our way.
+	// LastPongMs is the wall-clock ms of the most recent crypto-attested
+	// signal from this peer (= LastValidResMs — last valid pair_res to
+	// our pair_req). 0 = never. Kept under the historical "Pong" name
+	// for UI backward compat; semantically it's now "last pair_res".
 	LastPongMs int64 `json:"last_pong_ms,omitempty"`
 	RTTMs      int64 `json:"rtt_ms,omitempty"`
-	Verified   bool  `json:"verified"`
+	// Verified is an alias for Paired below — kept for UI backward compat.
+	// New UI code should switch to Paired / HalfPaired.
+	Verified bool `json:"verified"`
+	// Paired = both pair_req AND pair_res are fresh (<30s). The strict
+	// "🟢 paired" status — bidirectional crypto-attestation confirmed.
+	Paired bool `json:"paired"`
+	// HalfPaired = exactly one of pair_req / pair_res is fresh. The
+	// "🟡 half-paired" status — connection works one way only (e.g. we
+	// hear them, they don't hear us, or vice versa).
+	HalfPaired bool `json:"half_paired"`
 	// OverlayV4 is the per-peer 100.64.X.Y address derived from pub.
 	// Present for any peer whose Pub is known; empty for legacy peers
 	// announced without a pub. Used for BT peer addresses and display.
@@ -339,6 +347,47 @@ func (p *peerState) IsOnline() bool {
 		return false
 	}
 	return time.Now().UnixMilli()-seen < peerOnlineWindowMs
+}
+
+// pairFreshMs is the freshness window for pair-handshake signals. Same
+// 30s as peerOnlineWindowMs — pair_req keepalive is 25s in steady state,
+// so 30s comfortably covers one missed packet without flapping.
+const pairFreshMs = 30000
+
+// IsPaired reports whether we have a crypto-attested bidirectional
+// connection with this peer right now: their pair_req arrived recently
+// AND our pair_req got answered by their pair_res recently. Both
+// signals together ≈ "🟢 paired" in the UI.
+func (p *peerState) IsPaired() bool {
+	if p == nil {
+		return false
+	}
+	now := time.Now().UnixMilli()
+	req := p.LastValidReqMs.Load()
+	res := p.LastValidResMs.Load()
+	return req > 0 && now-req < pairFreshMs && res > 0 && now-res < pairFreshMs
+}
+
+// IsHalfPaired reports specifically: their pair_req reaches us
+// recently, but our pair_req gets no fresh pair_res from them. This
+// is "they're alive and trying to talk to me, but I can't confirm
+// the path back" — the meaningful orange state.
+//
+// We deliberately do NOT treat the inverse (res fresh, req stale) as
+// half-paired. If their pair_req keepalive stopped, the peer is
+// effectively gone from our side — leftover res from earlier rounds
+// is stale data, not a "half-working" connection. That case maps to
+// 🔴 unreachable.
+func (p *peerState) IsHalfPaired() bool {
+	if p == nil {
+		return false
+	}
+	now := time.Now().UnixMilli()
+	req := p.LastValidReqMs.Load()
+	res := p.LastValidResMs.Load()
+	reqFresh := req > 0 && now-req < pairFreshMs
+	resFresh := res > 0 && now-res < pairFreshMs
+	return reqFresh && !resFresh
 }
 
 // Engine is the long-lived tunnel runtime.
@@ -2825,7 +2874,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	if a := e.activePub.Load(); a != nil {
 		active = *a
 	}
-	now := time.Now().UnixMilli()
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
 		selfEndpoint := e.currentReflex()
@@ -2844,6 +2892,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Online:      true,
 			Reachable:   true,
 			Verified:    true,
+			Paired:      true,
 			Self:        true,
 			Domains:     e.MyDomains(),
 			OverlayV4:   e.cfg.LocalIP,
@@ -2861,13 +2910,15 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
 		online := p.IsOnline()
-		// Verified = a pair_res from this peer within the online window —
-		// i.e. our pair_req was answered, so the path is bidirectionally
-		// alive. LastPongMs is the same signal under the old field name,
-		// preserved so the UI doesn't need to be updated in this change.
+		// Pair-handshake state — single source of truth for UI color logic.
+		paired := p.IsPaired()
+		halfPaired := p.IsHalfPaired()
+		// LastPongMs / Verified are legacy fields kept for UI backward
+		// compat. Semantically they now reflect the pair_res signal and
+		// "fully paired" respectively. New UI code should use Paired /
+		// HalfPaired directly.
 		lastPong := p.LastValidResMs.Load()
 		rtt := p.LastRTTMs.Load()
-		verified := lastPong > 0 && now-lastPong < peerOnlineWindowMs
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			Pub:         p.Pub,
@@ -2886,7 +2937,9 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Firewall:    append([]FirewallPort(nil), p.Firewall...),
 			LastPongMs:  lastPong,
 			RTTMs:       rtt,
-			Verified:    verified,
+			Verified:    paired,
+			Paired:      paired,
+			HalfPaired:  halfPaired,
 			OverlayV4:   overlayV4OrEmpty(p.Pub),
 		})
 	}

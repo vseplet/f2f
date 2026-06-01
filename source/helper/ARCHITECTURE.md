@@ -2446,9 +2446,17 @@ WG session state'а (`H1..H4` magic); pair_req — это control-envelope
 | Color | Status | Условие | Что значит |
 |---|---|---|---|
 | 🟢 paired | bidirectional crypto-attested | `LastValidReqMs < 30s` **И** `LastValidResMs < 30s` | Их pair_req приходит И наш pair_req получает ответ — связь подтверждена в обе стороны, RTT измеряется |
-| 🟡 half-paired | one-way | `LastValidReqMs < 30s`, `LastValidResMs >= 30s` (или наоборот) | Только одно из двух свежее. Наш send-path до них работает, но они не отвечают — или наоборот. NAT-rebind / асимметричный путь |
-| 🔴 unreachable | в roster, crypto silent | `InCamp=true`, оба `LastValid*Ms` стухли | Старая версия без pair, либо NAT совсем не пробит. **С точки зрения нового кода — оба случая эквивалентны: связи как партнёра нет** |
+| 🟡 half-paired | one-way | `LastValidReqMs < 30s` **И** `LastValidResMs >= 30s` | Они активно пингуют нас (их pair_req свежий), но наш pair_req не получает свежий pair_res. Либо наш send-path до них сломан, либо их ответ теряется по дороге |
+| 🔴 unreachable | в roster, их pair_req стух | `InCamp=true`, `LastValidReqMs >= 30s` (стало неважно что с res) | Их keepalive прекратился — они либо ушли, либо на старой версии без pair. Состояние "наш res свежий, их req стух" тоже сюда — это значит они перестали пинговать, остатки данных стухнут сами |
 | ⚪ offline | не в roster | `InCamp=false` | — |
+
+> **Почему half-paired асимметричен.** Если их `pair_req` перестал
+> приходить — peer фактически "исчез" с нашей стороны, остатки
+> `LastValidResMs` от прошлых раундов уже бессмысленны. А если их
+> `pair_req` идёт, но `pair_res` на наш `pair_req` не возвращается —
+> peer **активно живёт и пытается общаться**, просто связь
+> однонаправленная. Это качественно разные ситуации, поэтому только
+> вторую помечаем оранжевым; первая попадает в красный.
 
 Заметь: **legacy/старая версия НЕ имеет своего цвета**. После полного
 раската hardening'а (см. шаг #10) старые ноды без pair не появятся в
