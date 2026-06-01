@@ -114,6 +114,12 @@ func newTunnel(dev wgtun.Device, name string, afLen int) *Tunnel {
 // "f2f0" on Linux.
 func (t *Tunnel) Name() string { return t.name }
 
+// Device returns the underlying wgtun.Device. Used by engine/awg to hand
+// the same TUN fd to amneziawg-go's Device — that one will then own
+// reads/writes on it, so engine must stop using Read/Write on this
+// Tunnel from the moment it's passed off.
+func (t *Tunnel) Device() wgtun.Device { return t.dev }
+
 // Read blocks until one IP packet arrives, then returns a slice
 // pointing into an internal buffer. The slice is valid only until
 // the next Read call. A zero-length slice with nil error means

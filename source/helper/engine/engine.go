@@ -413,11 +413,14 @@ type Engine struct {
 	// Built once at Start in camp mode; nil in static --peer mode.
 	obfenv *obfenv.Camp
 	// awgBind is the conn.Bind implementation that amneziawg-go's Device
-	// will use to send/receive its packets over our shared UDP socket.
-	// Created at Start once e.udp is up; peerToTunLoop forwards
-	// H1..H4-magic packets into it via Deliver. Device itself is wired
-	// in a later step — for now Bind just buffers.
+	// uses to send/receive its packets over our shared UDP socket.
+	// peerToTunLoop forwards H1..H4-magic packets into it via Deliver.
 	awgBind *awg.Bind
+	// awgDevice is the amneziawg-go device. When non-nil it OWNS utun:
+	// engine must not Read/Write the underlying TUN fd directly while
+	// awgDevice is active. Peers are pushed into it via SyncPeers,
+	// triggered by pair-handshake success and camp polls.
+	awgDevice *awg.Device
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
 	// can dispatch announce replies before they hit IP-version parsing.
@@ -813,6 +816,22 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("UDP listening on %s", e.udp.LocalAddr())
 	}
 
+	// AWG device: takes exclusive ownership of utun + our Bind. After
+	// this returns, engine MUST NOT call tun.Read / tun.Write directly
+	// — Device reads outgoing IP packets from utun, encrypts them,
+	// hands them to Bind.Send; the reverse path is Bind.Deliver →
+	// Device decrypts → utun.Write. No peers yet; awgSyncPeers below
+	// pushes them in once pair-handshake verifies them.
+	if cfg.Camp != nil && e.awgBind != nil && e.identity != nil && e.obfenv != nil {
+		awgDev, err := awg.Start(tun.Device(), e.awgBind, e.identity, e.obfenv)
+		if err != nil {
+			e.rollbackPartial()
+			return fmt.Errorf("awg device: %w", err)
+		}
+		e.awgDevice = awgDev
+		log.Printf("awg: device up — encrypted transport ready for paired peers")
+	}
+
 	// Firewall: default-deny inbound on the utun interface for
 	// packets directed at OUR tunnel_ip (other peers' addresses and
 	// egress-forwarded packets are unaffected). Allow only f2f-
@@ -870,8 +889,14 @@ func (e *Engine) Start(cfg Config) error {
 		e.upsertKnownCamp(e.camp.CampID, e.camp.Identity.Name)
 	}
 
-	e.workers.Add(1)
-	go e.tunToPeerLoop(ctx)
+	// tunToPeerLoop reads outgoing IP packets from utun and sends
+	// them as plaintext UDP to peers. When AWG device is active, it
+	// owns utun and does this job (with encryption) — running our
+	// loop in parallel would race on the same fd.
+	if e.awgDevice == nil {
+		e.workers.Add(1)
+		go e.tunToPeerLoop(ctx)
+	}
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.peerToTunLoop(ctx)
@@ -2049,6 +2074,12 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 		e.mergePeerSnapshotLocked(peers)
 		e.persistCampLocked()
 	}
+	// Camp poll may have refreshed peer endpoints (NAT rebind) or
+	// added/removed peers entirely. Refresh the AWG peer list so
+	// routing and allowed_ips stay current. Async to keep poller fast.
+	if e.awgDevice != nil {
+		go e.awgSyncPeers()
+	}
 }
 
 // CampPeers returns the most recent peer-list snapshot from the camp
@@ -2406,6 +2437,40 @@ func (e *Engine) SetDefaultListen(addr string) {
 	e.defaultListen = addr
 }
 
+// awgSyncPeers snapshots the current verified-peer set and pushes it
+// into the AWG device via IpcSet. No-op when AWG isn't active (static
+// mode or pre-Start). Called whenever the peer set or any peer's
+// endpoint changes — typically after a successful pair-handshake or
+// a camp poll. Runs the IpcSet outside e.mu to avoid blocking other
+// engine paths.
+func (e *Engine) awgSyncPeers() {
+	e.mu.Lock()
+	if e.awgDevice == nil {
+		e.mu.Unlock()
+		return
+	}
+	peers := make([]awg.PeerSyncInfo, 0, len(e.peers))
+	for _, p := range e.peers {
+		if p.WGPub == "" || p.UDPAddr == nil {
+			continue
+		}
+		overlayAddr, err := overlay.PubToV4Addr(p.Pub)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, awg.PeerSyncInfo{
+			WGPub:       p.WGPub,
+			Endpoint:    p.UDPAddr.String(),
+			OverlayCIDR: overlayAddr.String() + "/32",
+		})
+	}
+	dev := e.awgDevice
+	e.mu.Unlock()
+	if err := dev.SyncPeers(peers); err != nil {
+		log.Printf("awg sync peers: %v", err)
+	}
+}
+
 // pairReqPacket builds a fresh pair_req sealed in a control-envelope.
 // Unlike hello, the inner JSON is rebuilt and re-signed every call
 // because sent_ms (and therefore the canonical signed bytes) changes.
@@ -2458,10 +2523,18 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	// First-time signal: this is the visible confirmation in logs that
 	// the pair protocol is alive on this peer, independent of whatever
 	// hello already established about WGPub.
-	if p.LastValidReqMs.Load() == 0 {
+	firstReq := p.LastValidReqMs.Load() == 0
+	if firstReq {
 		log.Printf("pair_req: first valid from %s (fp=%s)", req.Name, identity.FingerprintHex(req.Pub))
 	}
 	p.LastValidReqMs.Store(now)
+	// Newly verified peer or first pair_req after restart — refresh
+	// the AWG peer list so this peer becomes routable through the
+	// encrypted tunnel. Runs asynchronously so we don't block the
+	// recv path on IpcSet.
+	if firstReq {
+		go e.awgSyncPeers()
+	}
 
 	// Build and send the response. Our own sent_ms is the response's
 	// sent_ms; echo_ms carries the requester's sent_ms verbatim so they
@@ -2535,6 +2608,10 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 			log.Printf("pair_res: first valid from %s (fp=%s) — echo didn't match LastSentReqMs (stale)",
 				res.Name, identity.FingerprintHex(res.Pub))
 		}
+		// Same trigger as handlePairReq: first valid res confirms the
+		// full round-trip; push the peer into the AWG device's routing
+		// so traffic to its overlay IP gets encrypted.
+		go e.awgSyncPeers()
 	}
 }
 
@@ -2721,6 +2798,7 @@ func (e *Engine) Stop() error {
 	egr := e.egr
 	fw := e.fw
 	dnsSrv := e.dnsSrv
+	awgDev := e.awgDevice
 	var dnsZone string
 	if e.cfg.Camp != nil {
 		dnsZone = identity.CampLabel(e.cfg.Camp.ID)
@@ -2759,8 +2837,13 @@ func (e *Engine) Stop() error {
 		}
 	}
 
-	// Now tear utun down. The tunToPeer worker will see Read fail and exit.
-	if tun != nil {
+	// Now tear utun down. When AWG was active, Device owns the TUN fd —
+	// Device.Close shuts down its goroutines and closes the fd. When
+	// AWG wasn't active (static mode), engine's tunToPeerLoop is the
+	// owner — close tun directly so the loop sees Read fail and exits.
+	if awgDev != nil {
+		_ = awgDev.Close()
+	} else if tun != nil {
 		_ = tun.Close()
 	}
 	e.workers.Wait()
@@ -2780,6 +2863,11 @@ func (e *Engine) Stop() error {
 	if e.torrent != nil {
 		_ = e.torrent.Close()
 	}
+	if e.awgDevice != nil {
+		// Device.Close stops its goroutines AND closes the underlying
+		// TUN fd (since we passed tun.Device() to it, ownership transferred).
+		_ = e.awgDevice.Close()
+	}
 	if e.awgBind != nil {
 		_ = e.awgBind.Close()
 	}
@@ -2787,6 +2875,7 @@ func (e *Engine) Stop() error {
 	e.tun = nil
 	e.udp = nil
 	e.awgBind = nil
+	e.awgDevice = nil
 	e.obfenv = nil
 	e.routes = nil
 	e.egr = nil
@@ -3665,6 +3754,17 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		}
 		summary := packet.Summary(pkt)
 
+		// When AWG owns utun, engine must not write to the same fd
+		// concurrently — Device's write goroutine and ours would race.
+		// Plaintext IP arriving on the UDP socket here is either:
+		//   - a packet from an old peer (no pair → no AWG session) →
+		//     legitimate to drop because we can't authenticate it anyway
+		//   - junk from the network → drop
+		// Either way: drop silently when Device is active.
+		if e.awgDevice != nil {
+			packetLog("[udp %s] %s [drop-no-awg-session]", from, summary)
+			continue
+		}
 		if werr := e.tun.Write(pkt); werr != nil {
 			if ctx.Err() == nil {
 				log.Printf("WARN: utun write from %s: %v", from, werr)
@@ -3690,12 +3790,22 @@ func ipv4Src(pkt []byte) (string, bool) {
 // rollbackPartial cleans up whatever Start managed to bring up before
 // failing. Called with e.mu held.
 func (e *Engine) rollbackPartial() {
+	// awgDevice.Close also closes the underlying TUN fd (since we
+	// passed tun.Device() to it). So if device was active, do NOT
+	// call e.tun.Close — that would be a double-close.
+	devActive := e.awgDevice != nil
+	if e.awgDevice != nil {
+		_ = e.awgDevice.Close()
+		e.awgDevice = nil
+	}
 	if e.awgBind != nil {
 		_ = e.awgBind.Close()
 		e.awgBind = nil
 	}
 	if e.tun != nil {
-		_ = e.tun.Close()
+		if !devActive {
+			_ = e.tun.Close()
+		}
 		e.tun = nil
 	}
 	if e.udp != nil {
