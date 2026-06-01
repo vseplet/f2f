@@ -65,6 +65,17 @@ func packetLog(format string, args ...any) {
 	}
 }
 
+// awgDebugEnabled gates AWG-integration diagnostics: every multiplex
+// decision in peerToTunLoop, UAPI blobs sent to Device on SyncPeers,
+// slot ranges at startup. Enable with F2F_AWG_DEBUG=1.
+var awgDebugEnabled = os.Getenv("F2F_AWG_DEBUG") == "1"
+
+func awgDebug(format string, args ...any) {
+	if awgDebugEnabled {
+		log.Printf(format, args...)
+	}
+}
+
 // CampConfig points the engine at a rendezvous (camp) server: instead of
 // the user supplying the peer's UDP endpoint via --peer, we discover our
 // own external endpoint via STUN, register with camp under (Name, ID),
@@ -830,6 +841,17 @@ func (e *Engine) Start(cfg Config) error {
 		}
 		e.awgDevice = awgDev
 		log.Printf("awg: device up — encrypted transport ready for paired peers")
+		// Diagnostic snapshot of derived parameters — both peers must see
+		// the SAME values for AWG packets to be classifiable on receive.
+		// Camp_id derives all of these; if two ends see different camp_id
+		// strings their slot ranges and magic headers diverge and traffic
+		// silently drops at our discriminator. Enable with F2F_AWG_DEBUG=1
+		// — and even without the flag we always log the snapshot once at
+		// startup since it's a single line and useful for verification.
+		for slot, name := range []string{"h1", "h2", "h3", "h4"} {
+			start, end := e.obfenv.SlotRange(obfenv.Slot(slot))
+			log.Printf("awg: %s slot [0x%08x..0x%08x) configured magic=%d", name, start, end, start)
+		}
 	}
 
 	// Firewall: default-deny inbound on the utun interface for
@@ -2466,6 +2488,11 @@ func (e *Engine) awgSyncPeers() {
 	}
 	dev := e.awgDevice
 	e.mu.Unlock()
+	awgDebug("awg sync peers: %d peers", len(peers))
+	for _, p := range peers {
+		awgDebug("  peer wg_pub=%s endpoint=%s allowed=%s",
+			p.WGPub[:16], p.Endpoint, p.OverlayCIDR)
+	}
 	if err := dev.SyncPeers(peers); err != nil {
 		log.Printf("awg sync peers: %v", err)
 	}
@@ -3673,7 +3700,9 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		// Anything else falls through to the legacy plaintext path.
 		if e.obfenv != nil && n >= 4 {
 			firstU32 := binary.LittleEndian.Uint32(pkt[:4])
-			switch e.obfenv.SlotFor(firstU32) {
+			slot := e.obfenv.SlotFor(firstU32)
+			awgDebug("rx udp %d bytes from %s magic=0x%08x slot=%d", n, from, firstU32, slot)
+			switch slot {
 			case obfenv.SlotHello:
 				if plain, _, ok := e.obfenv.Open(pkt); ok {
 					// Slot is shared by hello and pair during transition.
