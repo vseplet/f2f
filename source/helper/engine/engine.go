@@ -819,19 +819,21 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.callPollLoop(ctx)
 	}
-	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:5354
-	// — 5353 is contended on macOS by mDNSResponder and any running
-	// Bonjour/mDNS client (notably Chrome). Drops /etc/resolver pointing
-	// macOS at us for the zone. Failures here are non-fatal — the rest
-	// of the engine works without DNS.
+	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:0 so
+	// the kernel picks a free port — 5353 is contended on macOS by
+	// mDNSResponder, 5354 by OrbStack, and any hard-coded value
+	// eventually collides with something. The actual address is
+	// written into /etc/resolver/<zone>.f2f so macOS knows where to
+	// forward queries. Failures here are non-fatal — the rest of the
+	// engine works without DNS.
 	if e.cfg.Camp != nil {
-		const dnsAddr = "127.0.0.1:5354"
 		zone := identity.CampLabel(e.cfg.Camp.ID)
-		srv, err := internaldns.Open(dnsAddr, zone, e)
+		srv, err := internaldns.Open("127.0.0.1:0", zone, e)
 		if err != nil {
 			log.Printf("dns: %v (resolver disabled)", err)
 		} else {
 			e.dnsSrv = srv
+			dnsAddr := srv.Addr()
 			if rerr := platform.InstallZoneResolver(zone, dnsAddr); rerr != nil {
 				log.Printf("dns: install zone resolver: %v", rerr)
 			} else {

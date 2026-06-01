@@ -556,15 +556,17 @@ $(function () {
   // current selection if still valid.
   function refreshInterceptPeerSelect() {
     const $sel = $('#intercept-peer');
+    const sel = $sel[0];
+    if (document.activeElement === sel) return;
     const current = $sel.val();
-    $sel.empty();
-    $sel.append($('<option>').val('').text('— peer —'));
-    livePeers
-      .filter((p) => !p.self)
-      .forEach((p) => $sel.append($('<option>').val(p.name).text(peerOptionLabel(p))));
-    if (current && livePeers.some((p) => p.name === current && !p.self)) {
-      $sel.val(current);
-    }
+    const others = livePeers.filter((p) => !p.self);
+    let html = '<option value="">— peer —</option>';
+    others.forEach((p) => {
+      html += '<option value="' + p.name + '">' + peerOptionLabel(p) + '</option>';
+    });
+    if (sel.innerHTML === html) return;
+    sel.innerHTML = html;
+    if (current && others.some((p) => p.name === current)) $sel.val(current);
   }
 
   function triggerStart() {
@@ -876,15 +878,18 @@ $(function () {
   // dropdown, preserving the currently-active selection.
   function refreshCallPeerSelect(activePub) {
     const $sel = $('#ax-call-peer');
+    const sel = $sel[0];
+    if (document.activeElement === sel) return;
     const others = livePeers.filter((p) => !p.self);
-    $sel.empty();
-    $sel.append($('<option>').val('').text('— peer —'));
+    let html = '<option value="">— peer —</option>';
     others.forEach((p) => {
       let label = p.name;
       if (p.online === false) label += ' (offline)';
       else if (!p.reachable) label += ' (unreachable)';
-      $sel.append($('<option>').val(p.name).text(label));
+      html += '<option value="' + p.name + '">' + label + '</option>';
     });
+    if (sel.innerHTML === html) return;
+    sel.innerHTML = html;
     const activePeer = others.find((p) => p.pub && p.pub === activePub);
     $sel.val(activePeer ? activePeer.name : '');
   }

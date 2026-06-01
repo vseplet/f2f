@@ -5,6 +5,12 @@
 # doesn't make `wails` "not found" while it's actually installed.
 WAILS ?= $(shell go env GOPATH)/bin/wails
 
+# SUDO is empty when we're already root, otherwise "sudo". Prevents
+# nested sudo when a user types `sudo make dev` — that nesting
+# overwrites SUDO_USER with "root" and the helper writes config under
+# /var/root/.f2f/ instead of the real user's home.
+SUDO := $(if $(filter 0,$(shell id -u)),,sudo)
+
 help:
 	@echo "f2f targets:"
 	@echo "  make run                  run mac client (sudo, web UI on 127.0.0.1:2202)"
@@ -20,10 +26,10 @@ help:
 	@echo "  make desktop-install-wails  go install wails CLI (one-time)"
 
 run:
-	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/mac/internal/web/assets go run ./source/mac
+	-$(SUDO) F2F_DEV_ASSETS=$(CURDIR)/source/mac/internal/web/assets go run ./source/mac
 
 dev:
-	-sudo F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper $(ARGS)
+	-$(SUDO) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper $(ARGS)
 
 build:
 	go build -o f2f-mac ./source/mac

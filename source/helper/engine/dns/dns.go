@@ -39,6 +39,7 @@ type Host struct {
 // Server is the live DNS listener. Created by Open, stopped via Close.
 type Server struct {
 	srv    *dns.Server
+	addr   string // actual bound "ip:port" — useful when Open was given :0
 	suffix string // ".<camp_id>.f2f." — lowercase, trailing dot
 	res    Resolver
 
@@ -74,13 +75,25 @@ func (s *Server) Stats() Stats {
 	}
 }
 
-// Open binds to bindAddr (typically "127.0.0.1:5353") and starts
-// answering. zone is the second-level label under .f2f — typically
-// identity.CampLabel(camp_id), kept short enough to fit a DNS label.
+// Open binds to bindAddr and starts answering. zone is the second-
+// level label under .f2f — typically identity.CampLabel(camp_id),
+// kept short enough to fit a DNS label.
+//
+// Pass "127.0.0.1:0" to let the kernel pick a free port; the actual
+// bound address is then available via Server.Addr.
 func Open(bindAddr, zone string, res Resolver) (*Server, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dns: resolve %s: %w", bindAddr, err)
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dns: listen %s: %w", bindAddr, err)
+	}
 	suffix := "." + strings.ToLower(zone) + ".f2f."
 	s := &Server{
-		srv:    &dns.Server{Net: "udp", Addr: bindAddr},
+		srv:    &dns.Server{PacketConn: conn},
+		addr:   conn.LocalAddr().String(),
 		suffix: suffix,
 		res:    res,
 	}
@@ -91,7 +104,7 @@ func Open(bindAddr, zone string, res Resolver) (*Server, error) {
 	started := make(chan error, 1)
 	s.srv.NotifyStartedFunc = func() { started <- nil }
 	go func() {
-		if err := s.srv.ListenAndServe(); err != nil {
+		if err := s.srv.ActivateAndServe(); err != nil {
 			// Quietly ignore the "use of closed network connection" we
 			// get on graceful shutdown.
 			if !strings.Contains(err.Error(), "use of closed") {
@@ -106,9 +119,13 @@ func Open(bindAddr, zone string, res Resolver) (*Server, error) {
 		return s, nil
 	case <-time.After(2 * time.Second):
 		_ = s.srv.Shutdown()
-		return nil, fmt.Errorf("dns: bind %s timed out", bindAddr)
+		return nil, fmt.Errorf("dns: activate %s timed out", s.addr)
 	}
 }
+
+// Addr returns the actual bound address, including the
+// kernel-assigned port when Open was called with ":0".
+func (s *Server) Addr() string { return s.addr }
 
 // Close shuts down the listener.
 func (s *Server) Close() error {

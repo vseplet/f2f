@@ -215,7 +215,9 @@
     }
 
     function updateCallListUI(calls) {
-      // Update dropdown with available groups.
+      // Update dropdown with available groups. Skip rewrite if the select
+      // is currently open (focused) or options didn't change — rewriting
+      // innerHTML closes an open dropdown.
       var selectedVal = $groupSel.value;
       var opts = '<option value="">— group —</option>';
       for (var i = 0; i < calls.length; i++) {
@@ -225,11 +227,13 @@
         if (parts) label += ' (' + parts + ')';
         opts += '<option value="' + c.sfu_host + '">' + label + '</option>';
       }
-      $groupSel.innerHTML = opts;
-      if (inCall && sfuHost) {
-        $groupSel.value = sfuHost;
-      } else if (selectedVal) {
-        $groupSel.value = selectedVal;
+      if (document.activeElement !== $groupSel && $groupSel.innerHTML !== opts) {
+        $groupSel.innerHTML = opts;
+        if (inCall && sfuHost) {
+          $groupSel.value = sfuHost;
+        } else if (selectedVal) {
+          $groupSel.value = selectedVal;
+        }
       }
 
       // If in a call, sync tiles and check if call still exists.
