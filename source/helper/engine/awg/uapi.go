@@ -18,10 +18,17 @@ const keepaliveDefaultSec = 25
 // PeerSyncInfo describes one peer to push into Device via UAPI. Built
 // from a *peerState in the engine — only peers with a verified WGPub
 // and a known UDP endpoint should be included.
+//
+// AllowedCIDRs is the FULL list of prefixes that route through this
+// peer: starts with the peer's own overlay /32, plus every intercept
+// prefix the user bound to this peer in the UI. AWG's allowedips trie
+// matches outbound packets by dst against these; inbound packets must
+// have inner src inside these prefixes (the reverse-validation half of
+// allowed_ip's role).
 type PeerSyncInfo struct {
-	WGPub       string // X25519 pub hex (64 chars), from verified pair handshake
-	Endpoint    string // "host:port" — peer's reachable UDP endpoint
-	OverlayCIDR string // "100.64.X.Y/32" — overlay address that routes to this peer
+	WGPub        string   // X25519 pub hex (64 chars), from verified pair handshake
+	Endpoint     string   // "host:port" — peer's reachable UDP endpoint
+	AllowedCIDRs []string // CIDRs (overlay + intercepts) — each becomes an allowed_ip line
 }
 
 // BuildSelfConfig returns the UAPI text that initialises the device's
@@ -65,14 +72,21 @@ func BuildSelfConfig(id *identity.Identity, env *obfenv.Camp) string {
 // BuildPeerBlock returns the UAPI fragment for one peer. Multiple of
 // these get concatenated under a single "replace_peers=true" header
 // to atomically rewrite the device's peer list.
+//
+// allowed_ip lines are emitted in the order given — keep the peer's
+// overlay /32 first by convention (helps when reading IpcGet output
+// for diagnostics), then any intercept prefixes.
 func BuildPeerBlock(p PeerSyncInfo, keepaliveSec int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "public_key=%s\n", p.WGPub)
 	if p.Endpoint != "" {
 		fmt.Fprintf(&b, "endpoint=%s\n", p.Endpoint)
 	}
-	if p.OverlayCIDR != "" {
-		fmt.Fprintf(&b, "allowed_ip=%s\n", p.OverlayCIDR)
+	for _, cidr := range p.AllowedCIDRs {
+		if cidr == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "allowed_ip=%s\n", cidr)
 	}
 	if keepaliveSec > 0 {
 		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepaliveSec)

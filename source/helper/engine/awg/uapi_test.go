@@ -68,9 +68,9 @@ func TestBuildSelfConfigRangesMatchObfenv(t *testing.T) {
 // so public_key MUST come first or the rest gets attached to nothing).
 func TestBuildPeerBlockShape(t *testing.T) {
 	p := PeerSyncInfo{
-		WGPub:       strings.Repeat("a", 64),
-		Endpoint:    "1.2.3.4:5678",
-		OverlayCIDR: "100.64.7.42/32",
+		WGPub:        strings.Repeat("a", 64),
+		Endpoint:     "1.2.3.4:5678",
+		AllowedCIDRs: []string{"100.64.7.42/32"},
 	}
 	got := BuildPeerBlock(p, 25)
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
@@ -83,7 +83,7 @@ func TestBuildPeerBlockShape(t *testing.T) {
 	for _, want := range []string{
 		"public_key=" + p.WGPub,
 		"endpoint=" + p.Endpoint,
-		"allowed_ip=" + p.OverlayCIDR,
+		"allowed_ip=" + p.AllowedCIDRs[0],
 		"persistent_keepalive_interval=25",
 	} {
 		if !strings.Contains(got, want) {
@@ -92,11 +92,39 @@ func TestBuildPeerBlockShape(t *testing.T) {
 	}
 }
 
+// Multiple allowed_ip lines for intercepts — every CIDR in
+// AllowedCIDRs becomes its own allowed_ip line so AWG's trie covers
+// all destinations that route via this peer.
+func TestBuildPeerBlockMultipleAllowedIPs(t *testing.T) {
+	p := PeerSyncInfo{
+		WGPub:    strings.Repeat("a", 64),
+		Endpoint: "1.2.3.4:5678",
+		AllowedCIDRs: []string{
+			"100.64.7.42/32",
+			"10.0.0.0/8",
+			"8.8.8.8/32",
+		},
+	}
+	got := BuildPeerBlock(p, 25)
+	for _, want := range p.AllowedCIDRs {
+		if !strings.Contains(got, "allowed_ip="+want+"\n") {
+			t.Errorf("missing allowed_ip=%s in:\n%s", want, got)
+		}
+	}
+	// Order matters — first should be the overlay (callers depend on it
+	// for IpcGet diagnostics readability).
+	idx := strings.Index(got, "allowed_ip=")
+	first := got[idx+len("allowed_ip=") : strings.Index(got[idx:], "\n")+idx]
+	if first != "100.64.7.42/32" {
+		t.Errorf("first allowed_ip should be overlay, got %q", first)
+	}
+}
+
 // Empty endpoint / CIDR / keepalive are skipped — useful when we know
 // the peer's pub but haven't observed its UDP address yet, or when we
 // don't want to set a keepalive.
 func TestBuildPeerBlockOptionalFields(t *testing.T) {
-	p := PeerSyncInfo{WGPub: strings.Repeat("b", 64)}
+	p := PeerSyncInfo{WGPub: strings.Repeat("b", 64), AllowedCIDRs: []string{"", ""}}
 	got := BuildPeerBlock(p, 0)
 	if strings.Contains(got, "endpoint=") {
 		t.Error("empty endpoint must be omitted")
@@ -114,7 +142,7 @@ func TestBuildPeerBlockOptionalFields(t *testing.T) {
 // onto the existing peer set — peers that left the camp would linger.
 func TestBuildPeersBlockReplaceFlag(t *testing.T) {
 	got := BuildPeersBlock([]PeerSyncInfo{
-		{WGPub: strings.Repeat("c", 64), Endpoint: "1.1.1.1:1", OverlayCIDR: "100.64.0.1/32"},
+		{WGPub: strings.Repeat("c", 64), Endpoint: "1.1.1.1:1", AllowedCIDRs: []string{"100.64.0.1/32"}},
 	}, 25)
 	if !strings.HasPrefix(got, "replace_peers=true\n") {
 		t.Fatalf("must start with replace_peers=true, got:\n%s", got)

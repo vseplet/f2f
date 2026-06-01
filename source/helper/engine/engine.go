@@ -2480,18 +2480,39 @@ func (e *Engine) awgSyncPeers() {
 		if err != nil {
 			continue
 		}
+		// AllowedIPs = peer's overlay /32 + every intercept prefix bound to
+		// this peer in e.intercepts. Without the intercepts here AWG drops
+		// outgoing traffic to those destinations because no peer's trie
+		// entry matches the dst, and we lose the egress-via-peer feature
+		// that worked in the old plaintext routeFor() path.
+		cidrs := make([]string, 0, 1+8)
+		cidrs = append(cidrs, overlayAddr.String()+"/32")
+		for _, info := range e.intercepts {
+			if info.Peer != p.Name {
+				continue
+			}
+			for _, pref := range info.Prefixes {
+				// IPv6 entries get a " (reject)" annotation in the
+				// engine's bookkeeping — strip it for UAPI.
+				pref = strings.TrimSuffix(pref, " (reject)")
+				if pref == "" {
+					continue
+				}
+				cidrs = append(cidrs, pref)
+			}
+		}
 		peers = append(peers, awg.PeerSyncInfo{
-			WGPub:       p.WGPub,
-			Endpoint:    p.UDPAddr.String(),
-			OverlayCIDR: overlayAddr.String() + "/32",
+			WGPub:        p.WGPub,
+			Endpoint:     p.UDPAddr.String(),
+			AllowedCIDRs: cidrs,
 		})
 	}
 	dev := e.awgDevice
 	e.mu.Unlock()
 	awgDebug("awg sync peers: %d peers", len(peers))
 	for _, p := range peers {
-		awgDebug("  peer wg_pub=%s endpoint=%s allowed=%s",
-			p.WGPub[:16], p.Endpoint, p.OverlayCIDR)
+		awgDebug("  peer wg_pub=%s endpoint=%s allowed=%v",
+			p.WGPub[:16], p.Endpoint, p.AllowedCIDRs)
 	}
 	if err := dev.SyncPeers(peers); err != nil {
 		log.Printf("awg sync peers: %v", err)
@@ -3333,6 +3354,11 @@ func (e *Engine) AddIntercept(spec, peer string) (InterceptInfo, error) {
 			e.persistCampLocked()
 		}
 	}
+	// Push the new prefixes into AWG's allowed_ips trie so outbound
+	// packets to intercept destinations route through this peer.
+	if e.awgDevice != nil {
+		go e.awgSyncPeers()
+	}
 	return info, nil
 }
 
@@ -3383,6 +3409,11 @@ func (e *Engine) RemoveIntercept(id string) error {
 		}
 		e.camp.Intercepts = kept
 		e.persistCampLocked()
+	}
+	// Drop the removed prefixes from AWG's allowed_ips trie so outbound
+	// packets to those destinations no longer route through this peer.
+	if e.awgDevice != nil {
+		go e.awgSyncPeers()
 	}
 	return nil
 }
