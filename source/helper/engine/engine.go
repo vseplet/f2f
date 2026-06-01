@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -33,6 +34,8 @@ import (
 	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/firewall"
+	"github.com/vseplet/f2f/source/helper/engine/hello"
+	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/identity"
 	internaltorrent "github.com/vseplet/f2f/source/helper/torrent"
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
@@ -288,6 +291,12 @@ type peerState struct {
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
 	LastPingMs   atomic.Int64 // epoch ms of last punch/keepalive we sent
+
+	// WGPub is the peer's X25519 transport pubkey, learned from a verified
+	// hello-handshake (engine/hello). Empty until first valid hello arrives
+	// — engine treats empty as "no AWG handshake possible yet, peer hasn't
+	// announced its WG identity". Mutated under e.mu.
+	WGPub string
 }
 
 // peerOnlineWindowMs is how long we consider a peer "online" after the
@@ -329,6 +338,16 @@ type Engine struct {
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
 	poller   *rendezvous.PeerListPoller // periodic HTTP peer-list poll
 	pinger   *peerping.Pinger           // round-trip ping/pong per peer
+	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
+	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
+	// Built once at Start in camp mode; nil in static --peer mode.
+	obfenv *obfenv.Camp
+	// helloJSON is the pre-signed inner payload that gets sealed afresh
+	// each time holePunchLoop sends a punch. Inner content is constant
+	// per Engine lifecycle (identity + camp name don't change without
+	// restart), so we build it once and just re-seal (with a fresh nonce)
+	// on every send. nil in static --peer mode.
+	helloJSON []byte
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
 	// can dispatch announce replies before they hit IP-version parsing.
@@ -584,6 +603,23 @@ func (e *Engine) Start(cfg Config) error {
 				log.Printf("identity: persist into camp config: %v", err)
 			}
 		}
+
+		// Camp-wide obfuscation: camp_key + magic-header ranges (H1..H8),
+		// derived deterministically from camp_id. Every member of this
+		// camp computes the same values; camp_id never leaves the invite
+		// chain so an outside observer can't derive them.
+		e.obfenv = obfenv.NewCamp(cfg.Camp.ID)
+
+		// Pre-signed hello payload — the inner JSON that goes into every
+		// envelope-wrapped punch. Identity and camp name don't change
+		// without an Engine restart, so building it once is enough; each
+		// Seal still gets a fresh nonce.
+		payload, err := hello.Build(e.identity, cfg.Camp.Name)
+		if err != nil {
+			return fmt.Errorf("hello build: %w", err)
+		}
+		e.helloJSON = payload
+		log.Printf("hello: built %d-byte payload, envelope ready", len(payload))
 	}
 
 	// Egress goes first so its rollback runs last on the way down.
@@ -2310,6 +2346,64 @@ func (e *Engine) SetDefaultListen(addr string) {
 	e.defaultListen = addr
 }
 
+// punchPacket builds the next NAT-keepalive packet for the peer-loop.
+// In camp mode this is a freshly-sealed control-envelope containing the
+// signed hello (new nonce per call, same inner payload). In static
+// --peer mode (no obfenv), falls back to the legacy 1-byte 0x00 punch.
+//
+// The signed inner content is precomputed at Engine.Start and stored in
+// e.helloJSON — Seal still does ChaCha20-Poly1305 work per call to
+// generate a fresh nonce, but no signature is computed per send.
+func (e *Engine) punchPacket() ([]byte, error) {
+	if e.obfenv == nil || e.helloJSON == nil {
+		return []byte{0}, nil
+	}
+	return e.obfenv.Seal(obfenv.SlotHello, e.helloJSON)
+}
+
+// handleHello applies a verified hello-handshake to engine state:
+// updates the peer's WGPub, refreshes LastSeen, and reconciles UDPAddr
+// in case NAT rebound the peer between camp polls.
+//
+// Caller is in peerToTunLoop and has already cryptographically verified
+// pkt via hello.Parse — the signature check is the source of truth that
+// pkt was authored by the holder of pkt.Pub's Ed25519 priv key. What's
+// left here is authorization: is pkt.Pub a member of THIS camp's roster?
+func (e *Engine) handleHello(pkt hello.Packet, from *net.UDPAddr) {
+	now := time.Now().UnixMilli()
+	e.mu.Lock()
+	p, ok := e.peers[pkt.Pub]
+	if !ok {
+		e.mu.Unlock()
+		// Not in roster — either a peer that hasn't been seen via camp
+		// poll yet (race, will recover on next poll), or a stranger.
+		// Drop and log fingerprint only — pub itself goes to debug.
+		log.Printf("hello: from non-member pub=%s name=%q at %s — drop",
+			identity.FingerprintHex(pkt.Pub), pkt.Name, from)
+		return
+	}
+	// First WGPub or a rotation? Either way, accept and log.
+	switch {
+	case p.WGPub == "":
+		log.Printf("hello: peer %s (fp=%s) wg_pub=%s established",
+			pkt.Name, identity.FingerprintHex(pkt.Pub),
+			pkt.WGPub[:16])
+	case p.WGPub != pkt.WGPub:
+		log.Printf("hello: peer %s rotated wg_pub: %s → %s",
+			pkt.Name, p.WGPub[:16], pkt.WGPub[:16])
+	}
+	p.WGPub = pkt.WGPub
+	// NAT rebind detection: hello arrived from a different (ip,port) than
+	// camp last told us. Trust the live observation over the cached camp
+	// value — the peer is talking to us right now from `from`.
+	if !sameUDPAddr(p.UDPAddr, from) {
+		log.Printf("hello: peer %s UDP %s → %s (NAT rebind?)", pkt.Name, p.UDPAddr, from)
+		p.UDPAddr = from
+	}
+	e.mu.Unlock()
+	p.LastSeenMs.Store(now)
+}
+
 func (e *Engine) holePunchLoop(ctx context.Context) {
 	defer e.workers.Done()
 	ticker := time.NewTicker(1 * time.Second)
@@ -2382,7 +2476,14 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				if now-lastSent < cadence {
 					continue
 				}
-				if _, err := e.udp.WriteToUDP([]byte{0}, p.UDPAddr); err != nil {
+				punch, perr := e.punchPacket()
+				if perr != nil {
+					if ctx.Err() == nil {
+						log.Printf("WARN: build punch for %s: %v", p.Name, perr)
+					}
+					continue
+				}
+				if _, err := e.udp.WriteToUDP(punch, p.UDPAddr); err != nil {
 					if ctx.Err() == nil {
 						log.Printf("WARN: punch %s: %v", p.Name, err)
 					}
@@ -2392,6 +2493,8 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			}
 			// Static --peer mode (legacy): single keepalive every 25s
 			// to the configured static endpoint, no peer-state tracking.
+			// No obfenv in static mode — fall back to the legacy 1-byte
+			// punch packet.
 			if sp := e.staticPeer.Load(); sp != nil && len(targets) == 0 {
 				lastSent := e.lastStaticPingMs.Load()
 				if now-lastSent >= keepaliveMs {
@@ -3350,6 +3453,36 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			if e.announce != nil && e.announce.HandlePacket(pkt) {
 				continue
 			}
+		}
+		// Control-envelope multiplex (hello + future control types + AWG).
+		// First uint32 of every packet is the magic header — if it lands
+		// in one of our slot ranges this is either:
+		//   - a hello (decrypt + verify + store WGPub)
+		//   - an AWG packet (currently dropped; will dispatch to AWG bind once wired)
+		//   - a reserved control type (dropped)
+		// Anything else falls through to the legacy plaintext path.
+		if e.obfenv != nil && n >= 4 {
+			firstU32 := binary.LittleEndian.Uint32(pkt[:4])
+			switch e.obfenv.SlotFor(firstU32) {
+			case obfenv.SlotHello:
+				if plain, _, ok := e.obfenv.Open(pkt); ok {
+					if h, hok := hello.Parse(plain); hok {
+						e.handleHello(h, from)
+					} else {
+						log.Printf("hello: parse/verify failed from %s", from)
+					}
+				}
+				continue
+			case obfenv.SlotAWGInit, obfenv.SlotAWGResponse,
+				obfenv.SlotAWGCookie, obfenv.SlotAWGTransport:
+				// AWG slots — device-side decrypt not wired yet, will
+				// land on awgBind once the AWG integration step happens.
+				continue
+			case obfenv.SlotReserved6, obfenv.SlotReserved7, obfenv.SlotReserved8:
+				// Reserved control slots — no handler yet.
+				continue
+			}
+			// SlotFor == -1: not our envelope, fall through.
 		}
 		// Identify which peer sent this and refresh LastSeen *before*
 		// any IP-shape filter — that way 1-byte hole-punch and
