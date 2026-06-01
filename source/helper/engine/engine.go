@@ -34,13 +34,12 @@ import (
 	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/firewall"
-	"github.com/vseplet/f2f/source/helper/engine/hello"
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
+	"github.com/vseplet/f2f/source/helper/engine/pair"
 	"github.com/vseplet/f2f/source/helper/identity"
 	internaltorrent "github.com/vseplet/f2f/source/helper/torrent"
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
 	"github.com/vseplet/f2f/source/helper/engine/packet"
-	"github.com/vseplet/f2f/source/helper/engine/peerping"
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
 	"github.com/vseplet/f2f/source/helper/engine/route"
 	"github.com/vseplet/f2f/source/helper/engine/tunnel"
@@ -297,6 +296,28 @@ type peerState struct {
 	// — engine treats empty as "no AWG handshake possible yet, peer hasn't
 	// announced its WG identity". Mutated under e.mu.
 	WGPub string
+
+	// Pair-handshake state (engine/pair). All atomic — read by status
+	// builders without holding e.mu.
+	//
+	//   LastValidReqMs — last valid pair_req received from this peer.
+	//                    Bumped after signature verification in handlePairReq.
+	//   LastValidResMs — last valid pair_res received from this peer that
+	//                    echoed one of our own sent_ms.
+	//   LastSentReqMs  — sent_ms of the most recent pair_req WE sent to
+	//                    this peer. Used to match incoming pair_res echoes;
+	//                    a res with EchoMs != LastSentReqMs is treated as
+	//                    stale (e.g. crossed with NAT rebind) and ignored
+	//                    for RTT purposes (still bumps LastValidResMs).
+	//   LastRTTMs      — last round-trip time in ms, computed from a
+	//                    pair_res whose echo_ms matched LastSentReqMs.
+	//
+	// "Paired" = both LastValidReqMs and LastValidResMs are fresh — see
+	// PeerStatusInfo for the actual threshold.
+	LastValidReqMs atomic.Int64
+	LastValidResMs atomic.Int64
+	LastSentReqMs  atomic.Int64
+	LastRTTMs      atomic.Int64
 }
 
 // peerOnlineWindowMs is how long we consider a peer "online" after the
@@ -337,17 +358,10 @@ type Engine struct {
 	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
 	poller   *rendezvous.PeerListPoller // periodic HTTP peer-list poll
-	pinger   *peerping.Pinger           // round-trip ping/pong per peer
 	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
 	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
 	// Built once at Start in camp mode; nil in static --peer mode.
 	obfenv *obfenv.Camp
-	// helloJSON is the pre-signed inner payload that gets sealed afresh
-	// each time holePunchLoop sends a punch. Inner content is constant
-	// per Engine lifecycle (identity + camp name don't change without
-	// restart), so we build it once and just re-seal (with a fresh nonce)
-	// on every send. nil in static --peer mode.
-	helloJSON []byte
 	// campAddr is the resolved UDP endpoint of the camp server. The main
 	// read loop checks each incoming packet's source against this so we
 	// can dispatch announce replies before they hit IP-version parsing.
@@ -609,17 +623,7 @@ func (e *Engine) Start(cfg Config) error {
 		// camp computes the same values; camp_id never leaves the invite
 		// chain so an outside observer can't derive them.
 		e.obfenv = obfenv.NewCamp(cfg.Camp.ID)
-
-		// Pre-signed hello payload — the inner JSON that goes into every
-		// envelope-wrapped punch. Identity and camp name don't change
-		// without an Engine restart, so building it once is enough; each
-		// Seal still gets a fresh nonce.
-		payload, err := hello.Build(e.identity, cfg.Camp.Name)
-		if err != nil {
-			return fmt.Errorf("hello build: %w", err)
-		}
-		e.helloJSON = payload
-		log.Printf("hello: built %d-byte payload, envelope ready", len(payload))
+		log.Printf("pair: control envelope ready for camp %s", cfg.Camp.ID)
 	}
 
 	// Egress goes first so its rollback runs last on the way down.
@@ -834,14 +838,6 @@ func (e *Engine) Start(cfg Config) error {
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
-	}
-	if e.udp != nil {
-		e.pinger = peerping.New(e.udp, e.pingerTargets)
-		e.workers.Add(1)
-		go func() {
-			defer e.workers.Done()
-			e.pinger.Run(ctx)
-		}()
 	}
 	if e.cfg.Camp != nil {
 		e.workers.Add(1)
@@ -2346,62 +2342,136 @@ func (e *Engine) SetDefaultListen(addr string) {
 	e.defaultListen = addr
 }
 
-// punchPacket builds the next NAT-keepalive packet for the peer-loop.
-// In camp mode this is a freshly-sealed control-envelope containing the
-// signed hello (new nonce per call, same inner payload). In static
-// --peer mode (no obfenv), falls back to the legacy 1-byte 0x00 punch.
+// pairReqPacket builds a fresh pair_req sealed in a control-envelope.
+// Unlike hello, the inner JSON is rebuilt and re-signed every call
+// because sent_ms (and therefore the canonical signed bytes) changes.
+// Cost: ~80μs Ed25519 sign per call — negligible at burst (1Hz/peer)
+// and keepalive (25s/peer) cadences.
 //
-// The signed inner content is precomputed at Engine.Start and stored in
-// e.helloJSON — Seal still does ChaCha20-Poly1305 work per call to
-// generate a fresh nonce, but no signature is computed per send.
-func (e *Engine) punchPacket() ([]byte, error) {
-	if e.obfenv == nil || e.helloJSON == nil {
-		return []byte{0}, nil
+// Returns nil + error when we're not in camp mode (no obfenv, no
+// identity) — caller falls back to skipping pair_req.
+func (e *Engine) pairReqPacket(sentMs int64) ([]byte, error) {
+	if e.cfg.Camp == nil || e.identity == nil || e.obfenv == nil {
+		return nil, errors.New("pair_req: not in camp mode")
 	}
-	return e.obfenv.Seal(obfenv.SlotHello, e.helloJSON)
+	reqJSON, err := pair.BuildReq(e.identity, e.cfg.Camp.Name, sentMs)
+	if err != nil {
+		return nil, fmt.Errorf("pair_req build: %w", err)
+	}
+	return e.obfenv.Seal(obfenv.SlotHello, reqJSON)
 }
 
-// handleHello applies a verified hello-handshake to engine state:
-// updates the peer's WGPub, refreshes LastSeen, and reconciles UDPAddr
-// in case NAT rebound the peer between camp polls.
-//
-// Caller is in peerToTunLoop and has already cryptographically verified
-// pkt via hello.Parse — the signature check is the source of truth that
-// pkt was authored by the holder of pkt.Pub's Ed25519 priv key. What's
-// left here is authorization: is pkt.Pub a member of THIS camp's roster?
-func (e *Engine) handleHello(pkt hello.Packet, from *net.UDPAddr) {
+// handlePairReq applies a verified pair_req to engine state, then
+// immediately sends a pair_res back. The response is fire-on-receive,
+// not scheduled — that's what gives the requester a clean RTT
+// measurement (echo of their sent_ms with our process time as the only
+// delay).
+func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	now := time.Now().UnixMilli()
 	e.mu.Lock()
-	p, ok := e.peers[pkt.Pub]
+	p, ok := e.peers[req.Pub]
 	if !ok {
 		e.mu.Unlock()
-		// Not in roster — either a peer that hasn't been seen via camp
-		// poll yet (race, will recover on next poll), or a stranger.
-		// Drop and log fingerprint only — pub itself goes to debug.
-		log.Printf("hello: from non-member pub=%s name=%q at %s — drop",
-			identity.FingerprintHex(pkt.Pub), pkt.Name, from)
+		log.Printf("pair_req: from non-member pub=%s name=%q at %s — drop",
+			identity.FingerprintHex(req.Pub), req.Name, from)
 		return
 	}
-	// First WGPub or a rotation? Either way, accept and log.
 	switch {
 	case p.WGPub == "":
-		log.Printf("hello: peer %s (fp=%s) wg_pub=%s established",
-			pkt.Name, identity.FingerprintHex(pkt.Pub),
-			pkt.WGPub[:16])
-	case p.WGPub != pkt.WGPub:
-		log.Printf("hello: peer %s rotated wg_pub: %s → %s",
-			pkt.Name, p.WGPub[:16], pkt.WGPub[:16])
+		log.Printf("pair_req: peer %s (fp=%s) wg_pub=%s established",
+			req.Name, identity.FingerprintHex(req.Pub), req.WGPub[:16])
+	case p.WGPub != req.WGPub:
+		log.Printf("pair_req: peer %s rotated wg_pub: %s → %s",
+			req.Name, p.WGPub[:16], req.WGPub[:16])
 	}
-	p.WGPub = pkt.WGPub
-	// NAT rebind detection: hello arrived from a different (ip,port) than
-	// camp last told us. Trust the live observation over the cached camp
-	// value — the peer is talking to us right now from `from`.
+	p.WGPub = req.WGPub
 	if !sameUDPAddr(p.UDPAddr, from) {
-		log.Printf("hello: peer %s UDP %s → %s (NAT rebind?)", pkt.Name, p.UDPAddr, from)
+		log.Printf("pair_req: peer %s UDP %s → %s (NAT rebind?)", req.Name, p.UDPAddr, from)
 		p.UDPAddr = from
 	}
 	e.mu.Unlock()
 	p.LastSeenMs.Store(now)
+	// First-time signal: this is the visible confirmation in logs that
+	// the pair protocol is alive on this peer, independent of whatever
+	// hello already established about WGPub.
+	if p.LastValidReqMs.Load() == 0 {
+		log.Printf("pair_req: first valid from %s (fp=%s)", req.Name, identity.FingerprintHex(req.Pub))
+	}
+	p.LastValidReqMs.Store(now)
+
+	// Build and send the response. Our own sent_ms is the response's
+	// sent_ms; echo_ms carries the requester's sent_ms verbatim so they
+	// can compute RTT on receipt.
+	if e.cfg.Camp == nil || e.identity == nil || e.obfenv == nil {
+		return
+	}
+	resJSON, err := pair.BuildRes(e.identity, e.cfg.Camp.Name, now, req.SentMs)
+	if err != nil {
+		log.Printf("pair_res build: %v", err)
+		return
+	}
+	sealed, err := e.obfenv.Seal(obfenv.SlotHello, resJSON)
+	if err != nil {
+		log.Printf("pair_res seal: %v", err)
+		return
+	}
+	if _, err := e.udp.WriteToUDP(sealed, from); err != nil {
+		log.Printf("pair_res send to %s: %v", from, err)
+	}
+}
+
+// handlePairRes applies a verified pair_res to engine state. RTT is
+// computed only when the response's echo_ms matches our LastSentReqMs
+// — that guards against stale/duplicated responses (NAT rebinds,
+// retransmits) inflating or deflating our timing.
+func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
+	now := time.Now().UnixMilli()
+	e.mu.Lock()
+	p, ok := e.peers[res.Pub]
+	if !ok {
+		e.mu.Unlock()
+		log.Printf("pair_res: from non-member pub=%s name=%q at %s — drop",
+			identity.FingerprintHex(res.Pub), res.Name, from)
+		return
+	}
+	switch {
+	case p.WGPub == "":
+		log.Printf("pair_res: peer %s (fp=%s) wg_pub=%s established",
+			res.Name, identity.FingerprintHex(res.Pub), res.WGPub[:16])
+	case p.WGPub != res.WGPub:
+		log.Printf("pair_res: peer %s rotated wg_pub: %s → %s",
+			res.Name, p.WGPub[:16], res.WGPub[:16])
+	}
+	p.WGPub = res.WGPub
+	if !sameUDPAddr(p.UDPAddr, from) {
+		log.Printf("pair_res: peer %s UDP %s → %s (NAT rebind?)", res.Name, p.UDPAddr, from)
+		p.UDPAddr = from
+	}
+	e.mu.Unlock()
+	p.LastSeenMs.Store(now)
+	firstRes := p.LastValidResMs.Load() == 0
+	p.LastValidResMs.Store(now)
+
+	// RTT only when this response echoes our most recent request. A
+	// stale echo (e.g. our LastSentReqMs has already moved past) would
+	// give a meaningless number — skip it.
+	var rtt int64 = -1
+	if res.EchoMs != 0 && res.EchoMs == p.LastSentReqMs.Load() {
+		r := now - res.EchoMs
+		if r >= 0 && r < 60_000 {
+			p.LastRTTMs.Store(r)
+			rtt = r
+		}
+	}
+	if firstRes {
+		if rtt >= 0 {
+			log.Printf("pair_res: first valid from %s (fp=%s) rtt=%dms",
+				res.Name, identity.FingerprintHex(res.Pub), rtt)
+		} else {
+			log.Printf("pair_res: first valid from %s (fp=%s) — echo didn't match LastSentReqMs (stale)",
+				res.Name, identity.FingerprintHex(res.Pub))
+		}
+	}
 }
 
 func (e *Engine) holePunchLoop(ctx context.Context) {
@@ -2441,8 +2511,7 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			prevTickMs = now
 			e.mu.Lock()
 			targets := make([]*peerState, 0, len(e.peers))
-			pubs := make([]string, 0, len(e.peers))
-			for pub, p := range e.peers {
+			for _, p := range e.peers {
 				// Skip peers without a known UDP target: camp marked them
 				// offline, or we've never observed their endpoint. Punch
 				// resumes the moment they reappear in applyPeerList.
@@ -2450,10 +2519,9 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					continue
 				}
 				targets = append(targets, p)
-				pubs = append(pubs, pub)
 			}
 			e.mu.Unlock()
-			for i, p := range targets {
+			for _, p := range targets {
 				seen := p.LastSeenMs.Load()
 				lastSent := p.LastPingMs.Load()
 				cadence := int64(burstMs)
@@ -2463,33 +2531,37 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				// fine but our pings get lost (NAT binding lapsed our
 				// way), so receive-only freshness isn't enough.
 				if seen != 0 && now-seen < freshMs {
-					pongFresh := false
-					if e.pinger != nil {
-						if r, ok := e.pinger.Result(pubs[i]); ok && r.LastPongMs != 0 && now-r.LastPongMs < freshMs {
-							pongFresh = true
-						}
-					}
-					if pongFresh {
+					// pair_res from our own pair_req confirms the path is
+					// alive in BOTH directions (our send reaches them, their
+					// reply reaches us). Without that, "seen" alone could
+					// be a one-way path — keep punching at burst cadence.
+					if rs := p.LastValidResMs.Load(); rs != 0 && now-rs < freshMs {
 						cadence = keepaliveMs
 					}
 				}
 				if now-lastSent < cadence {
 					continue
 				}
-				punch, perr := e.punchPacket()
+				// Camp peers get a signed pair_req (sealed in control-envelope).
+				// Static --peer mode (no obfenv) is handled below.
+				if e.obfenv == nil {
+					continue
+				}
+				reqPkt, perr := e.pairReqPacket(now)
 				if perr != nil {
 					if ctx.Err() == nil {
-						log.Printf("WARN: build punch for %s: %v", p.Name, perr)
+						log.Printf("WARN: build pair_req for %s: %v", p.Name, perr)
 					}
 					continue
 				}
-				if _, err := e.udp.WriteToUDP(punch, p.UDPAddr); err != nil {
+				if _, err := e.udp.WriteToUDP(reqPkt, p.UDPAddr); err != nil {
 					if ctx.Err() == nil {
-						log.Printf("WARN: punch %s: %v", p.Name, err)
+						log.Printf("WARN: pair_req %s: %v", p.Name, err)
 					}
 					continue
 				}
 				p.LastPingMs.Store(now)
+				p.LastSentReqMs.Store(now)
 			}
 			// Static --peer mode (legacy): single keepalive every 25s
 			// to the configured static endpoint, no peer-state tracking.
@@ -2569,23 +2641,6 @@ func (e *Engine) campHealthLocked() *CampHealth {
 		h.HTTPPeersCount = s.PeersCount
 	}
 	return h
-}
-
-// pingerTargets snapshots the current peers with a known UDP endpoint.
-// Called from the Pinger goroutine on every tick. Target.Key is the
-// peer's pub — same as the peers map key — so other call sites can
-// look up the ping result by pub.
-func (e *Engine) pingerTargets() []peerping.Target {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]peerping.Target, 0, len(e.peers))
-	for pub, p := range e.peers {
-		if p.UDPAddr == nil {
-			continue
-		}
-		out = append(out, peerping.Target{Key: pub, Addr: p.UDPAddr})
-	}
-	return out
 }
 
 // Stop tears everything down in reverse order. Idempotent.
@@ -2672,7 +2727,6 @@ func (e *Engine) Stop() error {
 	e.torrent = nil
 	e.announce = nil
 	e.poller = nil
-	e.pinger = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
 	e.campReflex.Store(nil)
@@ -2771,10 +2825,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	if a := e.activePub.Load(); a != nil {
 		active = *a
 	}
-	var pingResults map[string]peerping.Result
-	if e.pinger != nil {
-		pingResults = e.pinger.All()
-	}
 	now := time.Now().UnixMilli()
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
@@ -2811,15 +2861,13 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
 		online := p.IsOnline()
-		var lastPong, rtt int64
-		var verified bool
-		if r, ok := pingResults[p.Pub]; ok {
-			lastPong = r.LastPongMs
-			rtt = r.LastRTTMs
-			// Verified = round-trip confirmed within the online window
-			// (same 30s threshold so the two signals line up).
-			verified = lastPong > 0 && now-lastPong < peerOnlineWindowMs
-		}
+		// Verified = a pair_res from this peer within the online window —
+		// i.e. our pair_req was answered, so the path is bidirectionally
+		// alive. LastPongMs is the same signal under the old field name,
+		// preserved so the UI doesn't need to be updated in this change.
+		lastPong := p.LastValidResMs.Load()
+		rtt := p.LastRTTMs.Load()
+		verified := lastPong > 0 && now-lastPong < peerOnlineWindowMs
 		out = append(out, PeerStatusInfo{
 			Name:        p.Name,
 			Pub:         p.Pub,
@@ -3466,10 +3514,23 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			switch e.obfenv.SlotFor(firstU32) {
 			case obfenv.SlotHello:
 				if plain, _, ok := e.obfenv.Open(pkt); ok {
-					if h, hok := hello.Parse(plain); hok {
-						e.handleHello(h, from)
-					} else {
-						log.Printf("hello: parse/verify failed from %s", from)
+					// Slot is shared by hello and pair during transition.
+					// Discriminate by the JSON "t" field.
+					switch pair.Type(plain) {
+					case pair.TypeReq:
+						if req, rok := pair.ParseReq(plain); rok {
+							e.handlePairReq(req, from)
+						} else {
+							log.Printf("pair: req parse/verify failed from %s", from)
+						}
+					case pair.TypeRes:
+						if res, rok := pair.ParseRes(plain); rok {
+							e.handlePairRes(res, from)
+						} else {
+							log.Printf("pair: res parse/verify failed from %s", from)
+						}
+					default:
+						log.Printf("pair: unknown control packet type %q from %s", pair.Type(plain), from)
 					}
 				}
 				continue
@@ -3510,14 +3571,6 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 				log.Printf("peer address updated: %s → %s", cur, from)
 				e.staticPeer.Store(from)
 			}
-		}
-
-		// Round-trip ping/pong with peers. Handled before the IP-shape
-		// filter so its JSON payload (first byte '{', "version"=0x7)
-		// doesn't trip the drop log below. Counts as a LastSeen signal
-		// because we ran the identification above first.
-		if e.pinger != nil && e.pinger.HandlePacket(pkt, from) {
-			continue
 		}
 
 		// Anything not shaped like an IPv4/IPv6 packet — hole-punch
@@ -3580,7 +3633,6 @@ func (e *Engine) rollbackPartial() {
 	}
 	e.announce = nil
 	e.poller = nil
-	e.pinger = nil
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {

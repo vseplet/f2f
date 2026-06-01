@@ -54,7 +54,7 @@ const (
 
 // ErrInvalidName is returned by Build* when name fails validation. We
 // fail loudly rather than ship an unverifiable packet — caller bug.
-var ErrInvalidName = errors.New("pair: invalid name (must satisfy identity.ValidHelloName)")
+var ErrInvalidName = errors.New("pair: invalid name (must satisfy identity.ValidPeerName)")
 
 // Req is the parsed pair_req JSON payload. All fields are guaranteed
 // well-formed after a successful ParseReq.
@@ -98,7 +98,7 @@ func Type(plaintext []byte) string {
 // time.Now().UnixMilli() at the moment of build. The signed canonical
 // form is `f2f-pair-req-v1|name|pub|wg_pub|sent_ms`.
 func BuildReq(id *identity.Identity, name string, sentMs int64) ([]byte, error) {
-	if !identity.ValidHelloName(name) {
+	if !identity.ValidPeerName(name) {
 		return nil, ErrInvalidName
 	}
 	sig := id.Sign(canonReq(name, id.PubHex(), id.X25519PubHex(), sentMs))
@@ -117,7 +117,7 @@ func BuildReq(id *identity.Identity, name string, sentMs int64) ([]byte, error) 
 // requester compute RTT. The signed canonical form is
 // `f2f-pair-res-v1|name|pub|wg_pub|sent_ms|echo_ms`.
 func BuildRes(id *identity.Identity, name string, sentMs, echoMs int64) ([]byte, error) {
-	if !identity.ValidHelloName(name) {
+	if !identity.ValidPeerName(name) {
 		return nil, ErrInvalidName
 	}
 	sig := id.Sign(canonRes(name, id.PubHex(), id.X25519PubHex(), sentMs, echoMs))
@@ -135,7 +135,7 @@ func BuildRes(id *identity.Identity, name string, sentMs, echoMs int64) ([]byte,
 // ParseReq decodes and verifies a pair_req. Returns ok=true only when:
 //   - JSON parses cleanly
 //   - "t" field equals "pair_req"
-//   - name passes identity.ValidHelloName
+//   - name passes identity.ValidPeerName
 //   - pub/wg_pub are 64-char hex
 //   - sig is 64-byte (128-char hex) Ed25519 signature
 //   - signature verifies against canonReq(name, pub, wg_pub, sent_ms)
@@ -150,7 +150,7 @@ func ParseReq(plaintext []byte) (Req, bool) {
 	if p.T != TypeReq {
 		return Req{}, false
 	}
-	if !identity.ValidHelloName(p.Name) {
+	if !identity.ValidPeerName(p.Name) {
 		return Req{}, false
 	}
 	if len(p.Pub) != 64 || len(p.WGPub) != 64 {
@@ -181,7 +181,7 @@ func ParseRes(plaintext []byte) (Res, bool) {
 	if p.T != TypeRes {
 		return Res{}, false
 	}
-	if !identity.ValidHelloName(p.Name) {
+	if !identity.ValidPeerName(p.Name) {
 		return Res{}, false
 	}
 	if len(p.Pub) != 64 || len(p.WGPub) != 64 {
