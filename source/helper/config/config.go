@@ -23,12 +23,16 @@ import (
 
 const dirName = ".f2f"
 
-// Store is a singleton handle to the on-disk config directory.
-// All file I/O serialises through mu so concurrent saves don't race
-// each other's tmp-file rename.
+// Store is a singleton handle to the on-disk config directory and
+// the single source of truth for camp config state. All in-memory
+// state goes through mu — readers get deep copies, writers go through
+// UpdateCamp which serialises read-modify-write atomically. Disk I/O
+// is interleaved with the same mu so the in-memory copy and the file
+// never diverge.
 type Store struct {
-	mu  sync.Mutex
-	dir string
+	mu    sync.Mutex
+	dir   string
+	camps map[string]*Camp // canonical in-memory copy, keyed by camp_id
 }
 
 // State is the global file ($HOME/.f2f/state.json). Holds the most
@@ -140,7 +144,97 @@ func NewStore() (*Store, error) {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	chownToUser(dir)
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, camps: make(map[string]*Camp)}, nil
+}
+
+// SnapshotCamp returns a deep copy of the in-memory camp config for id,
+// loading from disk on first access (subsequent calls hit the cache).
+// Returns (nil, nil) when no on-disk camp exists yet — caller decides
+// how to handle (typically: prompt for name on first start).
+func (s *Store) SnapshotCamp(id string) (*Camp, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, err := s.ensureLoadedLocked(id)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, nil
+	}
+	return deepCopyCamp(c), nil
+}
+
+// UpdateCamp atomically loads the camp config (from cache or disk),
+// applies fn to it, persists the result to disk, and updates the
+// cache. fn sees the canonical state and mutates it in place. The
+// whole RMW happens under s.mu so concurrent updates from engine
+// and services don't lose each other.
+//
+// Returns an error if no on-disk camp exists for id yet — callers
+// must SaveCamp first to create the file (typically engine.Start
+// after a successful camp announce).
+func (s *Store) UpdateCamp(id string, fn func(*Camp)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, err := s.ensureLoadedLocked(id)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return fmt.Errorf("camp %s not initialised yet", id)
+	}
+	fn(c)
+	normaliseCamp(c, id)
+	return s.writeJSON(s.campPath(id), c)
+}
+
+// ensureLoadedLocked returns the cached *Camp for id, lazily loading
+// from disk on first request. Caller holds s.mu. (nil, nil) means no
+// file exists yet — the caller must SaveCamp / NewCamp to bring the
+// camp into existence.
+func (s *Store) ensureLoadedLocked(id string) (*Camp, error) {
+	if !validCampID(id) {
+		return nil, fmt.Errorf("invalid camp_id %q", id)
+	}
+	if c, ok := s.camps[id]; ok {
+		return c, nil
+	}
+	data, err := os.ReadFile(s.campPath(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var c Camp
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("parse %s.config.json: %w", id, err)
+	}
+	normaliseCamp(&c, id)
+	s.camps[id] = &c
+	return &c, nil
+}
+
+// deepCopyCamp returns a fresh *Camp with no aliasing to src. Cheap
+// (slices/strings copied by value), but exhaustive — readers can
+// mutate the result without affecting cache state.
+func deepCopyCamp(src *Camp) *Camp {
+	if src == nil {
+		return nil
+	}
+	d := *src
+	d.Intercepts = append([]Intercept(nil), src.Intercepts...)
+	d.MyDomains = append([]Domain(nil), src.MyDomains...)
+	d.PeerCatalog = make([]Peer, len(src.PeerCatalog))
+	for i, p := range src.PeerCatalog {
+		pp := p
+		pp.Domains = append([]Domain(nil), p.Domains...)
+		pp.Firewall = append([]Firewall(nil), p.Firewall...)
+		d.PeerCatalog[i] = pp
+	}
+	d.TrustedPeers = append([]TrustedPeer(nil), src.TrustedPeers...)
+	d.Firewall = append([]Firewall(nil), src.Firewall...)
+	return &d
 }
 
 // Dir is the on-disk directory backing this store.
@@ -180,30 +274,16 @@ func (s *Store) SaveState(st *State) error {
 
 // LoadCamp reads a per-camp config. Missing file returns (nil, nil)
 // so callers can distinguish "never configured" from a read error.
+// Equivalent to SnapshotCamp — kept for back-compat.
 func (s *Store) LoadCamp(id string) (*Camp, error) {
-	if !validCampID(id) {
-		return nil, fmt.Errorf("invalid camp_id %q", id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := os.ReadFile(s.campPath(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var c Camp
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("parse %s.config.json: %w", id, err)
-	}
-	normaliseCamp(&c, id)
-	return &c, nil
+	return s.SnapshotCamp(id)
 }
 
-// SaveCamp writes a per-camp config atomically. CampID on the input
-// is overwritten with id (defensive — single source of truth is the
-// filename).
+// SaveCamp writes a per-camp config atomically and updates the cache.
+// CampID on the input is overwritten with id (defensive — single
+// source of truth is the filename). Primarily used at engine.Start
+// to bring a fresh camp into existence; subsequent mutations should
+// go through UpdateCamp so concurrent updates serialise properly.
 func (s *Store) SaveCamp(id string, c *Camp) error {
 	if !validCampID(id) {
 		return fmt.Errorf("invalid camp_id %q", id)
@@ -215,6 +295,7 @@ func (s *Store) SaveCamp(id string, c *Camp) error {
 	normaliseCamp(c, id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.camps[id] = deepCopyCamp(c)
 	return s.writeJSON(s.campPath(id), c)
 }
 

@@ -8,17 +8,14 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
 )
 
-// ensureStore lazily opens $HOME/.f2f/. Called from Start so test code
-// that just constructs an Engine doesn't touch the filesystem.
+// ensureStore returns nil when the engine was constructed with a
+// Store via engine.New, or an error otherwise — every code path that
+// touches persisted state goes through this so the engine never
+// silently no-ops a save.
 func (e *Engine) ensureStore() error {
-	if e.store != nil {
-		return nil
+	if e.store == nil {
+		return errors.New("engine: no config store (use engine.New(store))")
 	}
-	s, err := config.NewStore()
-	if err != nil {
-		return err
-	}
-	e.store = s
 	return nil
 }
 
@@ -211,13 +208,6 @@ func (e *Engine) hydratePeersFromCatalog() {
 			// confirms the peer is back online (and we resolve a fresh
 			// UDPAddr) or leaves them dormant.
 		}
-		if len(p.Domains) > 0 {
-			dup := make([]DomainEntry, len(p.Domains))
-			for i, d := range p.Domains {
-				dup[i] = DomainEntry{Name: d.Name, Host: d.Host, Port: d.Port, Proto: d.Proto}
-			}
-			st.Domains = dup
-		}
 		if len(p.Firewall) > 0 {
 			st.Firewall = append([]config.Firewall(nil), p.Firewall...)
 		}
@@ -293,55 +283,6 @@ func (e *Engine) StartLastCamp() error {
 	}
 	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Identity.Name)
 	return e.Start(cfg)
-}
-
-// RemovePeerDomain drops one (peer, domain) entry from the persisted
-// catalog AND from the live peer's Domains slice. If the peer is
-// currently online and still publishing that name, the next successful
-// poll will re-add it — that's intentional: removal is for stale
-// entries where the peer is offline or no longer publishes.
-func (e *Engine) RemovePeerDomain(peerName, domainName string) error {
-	if peerName == "" || domainName == "" {
-		return errors.New("peer_name and domain_name required")
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// In-memory: peers are keyed by tunnel_ip; find by name.
-	for _, p := range e.peers {
-		if p.Name != peerName {
-			continue
-		}
-		kept := p.Domains[:0]
-		for _, d := range p.Domains {
-			if d.Name == domainName {
-				continue
-			}
-			kept = append(kept, d)
-		}
-		p.Domains = kept
-	}
-	if e.camp == nil {
-		return nil
-	}
-	changed := false
-	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].Name != peerName {
-			continue
-		}
-		kept := e.camp.PeerCatalog[i].Domains[:0]
-		for _, d := range e.camp.PeerCatalog[i].Domains {
-			if d.Name == domainName {
-				changed = true
-				continue
-			}
-			kept = append(kept, d)
-		}
-		e.camp.PeerCatalog[i].Domains = kept
-	}
-	if changed {
-		e.persistCampLocked()
-	}
-	return nil
 }
 
 // RemoveTrustedPeerFromCamp drops the metadata for one trusted peer

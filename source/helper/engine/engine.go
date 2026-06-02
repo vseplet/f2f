@@ -27,7 +27,6 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/ca"
 	"github.com/vseplet/f2f/source/helper/config"
-	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/awg"
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
@@ -193,7 +192,6 @@ type PeerStatusInfo struct {
 	Reachable   bool          `json:"reachable"`              // local: receiving UDP from this peer
 	Active      bool          `json:"active"`
 	Self        bool          `json:"self,omitempty"`
-	Domains     []DomainEntry `json:"domains,omitempty"`
 	Files       []PeerFile    `json:"files,omitempty"`
 	// Firewall lists the peer's user-published open ports (without
 	// built-ins). Polled from their tunnel-side /api/firewall.
@@ -236,40 +234,6 @@ type InterceptInfo struct {
 	Prefixes []string `json:"prefixes"`
 }
 
-// DomainEntry is one (name, port, proto) record this engine — or another
-// peer — publishes inside the camp's <camp_id>.f2f zone. Port and proto
-// are advisory: DNS only carries the IP, the user types the port in
-// their URLs. Name is the short label (e.g. "gitlab") and gets the
-// camp-wide TLD appended at resolution time.
-//
-// Health / HealthCheckedAt are populated by the engine's own health
-// loop — never read from incoming PUTs. When this entry appears on
-// another peer's machine (via /api/domains poll) the health is the
-// owning peer's self-reported view of its own service.
-type DomainEntry struct {
-	Name string `json:"name"`
-	// Host is the upstream the reverse-proxy dials. Blank means
-	// 127.0.0.1 (the common case). Use this when the upstream binds
-	// to localhost-IPv6-only (Node 17+ defaults), a non-default
-	// loopback address, or a LAN host you want to publish through
-	// this peer's camp domain.
-	Host            string `json:"host,omitempty"`
-	Port            int    `json:"port,omitempty"`
-	Proto           string `json:"proto,omitempty"`
-	Health          string `json:"health,omitempty"`            // "ok" | "fail" | "" (unknown)
-	HealthCheckedAt int64  `json:"health_checked_at,omitempty"` // unix seconds
-}
-
-// upstreamHost returns the effective host the reverse-proxy and
-// health-check should dial. Empty Host → 127.0.0.1 fallback so old
-// records (created before this field existed) keep working.
-func (d DomainEntry) upstreamHost() string {
-	if d.Host == "" {
-		return "127.0.0.1"
-	}
-	return d.Host
-}
-
 // peerState is our per-peer view: identity from camp + when we last
 // received UDP from this peer. LastSeenMs starts at 0 and gets updated
 // every time peerToTunLoop sees a packet whose source matches us.
@@ -298,8 +262,7 @@ type peerState struct {
 	// "online" semantic for that lives in IsOnline() below.
 	InCamp     bool
 	LastSeenAt int64
-	Domains    []DomainEntry
-	Files      []PeerFile     // populated by filesPollLoop
+	Files      []PeerFile        // populated by filesPollLoop
 	Firewall   []config.Firewall // populated by peerFirewallPollLoop
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
@@ -408,7 +371,6 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	egr      *egress.Egress
-	dnsSrv   *internaldns.Server     // local DNS for <camp_id>.f2f
 	ca       *ca.CA                  // local CA for the current camp_id
 	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
@@ -455,14 +417,6 @@ type Engine struct {
 	intercepts map[string]*InterceptInfo
 	nextItemID uint64
 
-	// myDomains is the list this peer publishes to others. Read by
-	// /api/domains on the tunnel listener; written by the UI via
-	// SetMyDomains. Atomic pointer keeps the read path lock-free.
-	myDomains atomic.Pointer[[]DomainEntry]
-	// myDomainHealth is the latest TCP-dial result per published name.
-	// healthCheckLoop writes it, MyDomains() merges it into output.
-	myDomainHealth   map[string]domainHealth
-	myDomainHealthMu sync.Mutex
 	// tunnelHTTPPort is the port other peers expose their /api/domains
 	// on (= our UI bind port, since both sides run f2f-mac). Wired by
 	// main via SetTunnelHTTPPort.
@@ -520,12 +474,6 @@ type Engine struct {
 	identity *identity.Identity
 }
 
-// domainHealth is the latest health-check result for one local service.
-type domainHealth struct {
-	Status    string // "ok" | "fail"
-	CheckedAt int64  // unix seconds
-}
-
 // PeerFile is one file entry from a peer's /api/files response,
 // rehydrated into our shape (Path stripped — peer-facing data only).
 type PeerFile struct {
@@ -535,13 +483,17 @@ type PeerFile struct {
 	Magnet   string `json:"magnet"`
 }
 
-// New returns a fresh Engine. Start it to bring it up.
-func New() *Engine {
+// New returns a fresh Engine with the given config Store. The Store
+// is shared with services that need to persist their own slices of
+// camp config (firewall rules, trusted peers, MyDomains, ...).
+// Passing the Store explicitly lets main.go own the lifecycle and
+// keeps the engine from being the sole gatekeeper of disk state.
+func New(store *config.Store) *Engine {
 	return &Engine{
-		intercepts:     map[string]*InterceptInfo{},
-		peers:          map[string]*peerState{},
-		myDomainHealth: map[string]domainHealth{},
-		tap:            newLogTap(),
+		store:      store,
+		intercepts: map[string]*InterceptInfo{},
+		peers:      map[string]*peerState{},
+		tap:        newLogTap(),
 	}
 }
 
@@ -829,16 +781,6 @@ func (e *Engine) Start(cfg Config) error {
 	if e.camp != nil {
 		e.pruneSelfFromCatalogLocked()
 		e.hydratePeersFromCatalog()
-		domains := make([]DomainEntry, 0, len(e.camp.MyDomains))
-		for _, d := range e.camp.MyDomains {
-			domains = append(domains, DomainEntry{
-				Name:  d.Name,
-				Host:  d.Host,
-				Port:  d.Port,
-				Proto: d.Proto,
-			})
-		}
-		e.myDomains.Store(&domains)
 	}
 
 	// Workers.
@@ -894,10 +836,7 @@ func (e *Engine) Start(cfg Config) error {
 		go e.holePunchLoop(ctx)
 	}
 	if e.cfg.Camp != nil {
-		e.workers.Add(1)
-		go e.domainPollLoop(ctx)
-		e.workers.Add(1)
-		go e.domainHealthLoop(ctx)
+		// Domain catalog poll + service health-check live in services/dns now.
 		e.workers.Add(1)
 		go e.filesPollLoop(ctx)
 		e.workers.Add(1)
@@ -905,32 +844,9 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.callPollLoop(ctx)
 	}
-	// Local DNS resolver for <camp_id>.f2f. We bind to 127.0.0.1:0 so
-	// the kernel picks a free port — 5353 is contended on macOS by
-	// mDNSResponder, 5354 by OrbStack, and any hard-coded value
-	// eventually collides with something. The actual address is
-	// written into /etc/resolver/<zone>.f2f so macOS knows where to
-	// forward queries. Failures here are non-fatal — the rest of the
-	// engine works without DNS.
-	if e.cfg.Camp != nil {
-		zone := identity.CampLabel(e.cfg.Camp.ID)
-		srv, err := internaldns.Open("127.0.0.1:0", zone, e)
-		if err != nil {
-			log.Printf("dns: %v (resolver disabled)", err)
-		} else {
-			e.dnsSrv = srv
-			dnsAddr := srv.Addr()
-			if rerr := platform.InstallZoneResolver(zone, dnsAddr); rerr != nil {
-				log.Printf("dns: install zone resolver: %v", rerr)
-			} else {
-				log.Printf("dns: serving %s.f2f on %s", zone, dnsAddr)
-				// Flush the system's resolver cache so any stale
-				// NXDOMAIN pinned before our DNS was up gets dropped
-				// immediately.
-				_ = platform.FlushDNSCache()
-			}
-		}
-	}
+	// Local DNS resolver, MyDomains catalog, peer-domain poll, and
+	// service-health check are owned by services/dns now — main.go
+	// drives the lifecycle off eng.OnStarted/OnStopped.
 	// Local CA for HTTPS termination. Persisted under /var/lib/f2f/ca
 	// so it survives restarts. Regenerated whenever camp_id changes
 	// (NameConstraints in the cert pin it to one zone). Failures here
@@ -1551,10 +1467,11 @@ func (e *Engine) TunnelHTTPPort() string {
 }
 
 // OnlinePeerHTTPInfo is one peer reachable over utun for any
-// service-level poll loop (CA poll, future domain poll, etc.). The
-// shape is intentionally minimal — just what a poller needs to dial
-// the peer and label log lines.
+// service-level poll loop (CA poll, domain poll, etc.). The shape is
+// intentionally minimal — just what a poller needs to dial the peer
+// and key things back to the camp catalog.
 type OnlinePeerHTTPInfo struct {
+	Pub  string // Ed25519 hex pubkey, stable identity (used as map key)
 	Name string
 	Host string // overlay v4 string
 }
@@ -1574,7 +1491,7 @@ func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
 		if host == "" {
 			continue
 		}
-		out = append(out, OnlinePeerHTTPInfo{Name: p.Name, Host: host})
+		out = append(out, OnlinePeerHTTPInfo{Pub: p.Pub, Name: p.Name, Host: host})
 	}
 	return out
 }
@@ -1905,160 +1822,7 @@ func (e *Engine) persistPeerFirewallLocked(pub string, fw []config.Firewall) {
 	}
 }
 
-// domainHealthLoop TCP-dials each published domain on 127.0.0.1:<port>
-// every few seconds and stamps the result onto myDomainHealth. The
-// status flows out through MyDomains() — into /api/my-domains for the
-// UI, and into /api/domains so OTHER peers see whether our services
-// are actually up.
-func (e *Engine) domainHealthLoop(ctx context.Context) {
-	defer e.workers.Done()
-	const interval = 8 * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		e.checkMyDomainsHealth(ctx)
-	}
-}
-
-func (e *Engine) checkMyDomainsHealth(ctx context.Context) {
-	domains := e.MyDomains()
-	now := time.Now().Unix()
-	for _, d := range domains {
-		if d.Port == 0 {
-			continue
-		}
-		// Wildcard entries don't have a concrete backend to probe.
-		if IsWildcardLabel(d.Name) {
-			continue
-		}
-		status := "fail"
-		addr := net.JoinHostPort(d.upstreamHost(), strconv.Itoa(d.Port))
-		dialer := net.Dialer{Timeout: 2 * time.Second}
-		if conn, err := dialer.DialContext(ctx, "tcp", addr); err == nil {
-			_ = conn.Close()
-			status = "ok"
-		}
-		e.myDomainHealthMu.Lock()
-		e.myDomainHealth[d.Name] = domainHealth{Status: status, CheckedAt: now}
-		e.myDomainHealthMu.Unlock()
-	}
-}
-
-// domainPollLoop walks every online peer once per tick and pulls their
-// /api/domains list over HTTP-through-tunnel. The result is stashed on
-// each peerState so the local DNS server can answer queries. We poll
-// even peers we haven't seen "fresh" via punch — the tunnel listener
-// is independent of the punch path and may still be reachable.
-func (e *Engine) domainPollLoop(ctx context.Context) {
-	defer e.workers.Done()
-	const interval = 10 * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	// Wait one tick before the first poll so peers have time to register.
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		e.pollAllPeerDomains(ctx)
-	}
-}
-
-func (e *Engine) pollAllPeerDomains(ctx context.Context) {
-	type target struct {
-		host string
-		pub  string
-		name string
-	}
-	var targets []target
-	e.mu.Lock()
-	for pub, p := range e.peers {
-		if !p.IsOnline() {
-			continue
-		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
-	}
-	port := domainPollPort(e)
-	e.mu.Unlock()
-	if port == "" {
-		return
-	}
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.host, port) + "/api/domains"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			// Transient network failure (handshake didn't complete,
-			// peer momentarily unreachable, etc.) — keep the previously
-			// seen list as-is so the UI doesn't flicker. The peer-online
-			// flag from /api/status already tells the user the peer is
-			// having trouble; we surface "service down vs peer down" via
-			// the gray (offline) / red (online + health=fail) / green
-			// (online + health=ok) tri-state on the UI side.
-			continue
-		}
-		var list []DomainEntry
-		err = json.NewDecoder(resp.Body).Decode(&list)
-		resp.Body.Close()
-		if err != nil {
-			continue
-		}
-		e.mu.Lock()
-		if p, ok := e.peers[t.pub]; ok {
-			p.Domains = list
-		}
-		e.persistPeerDomainsLocked(t.pub, list)
-		e.mu.Unlock()
-	}
-}
-
-// persistPeerDomainsLocked mirrors a peer's published domain list into
-// camp config so we keep it across engine restarts. Called with e.mu
-// held. Upserts by peer pub; catalog entry should already exist from
-// applyPeerList — silently no-ops if it doesn't.
-func (e *Engine) persistPeerDomainsLocked(pub string, domains []DomainEntry) {
-	if e.camp == nil || pub == "" {
-		return
-	}
-	out := make([]config.Domain, 0, len(domains))
-	for _, d := range domains {
-		out = append(out, config.Domain{
-			Name:  d.Name,
-			Host:  d.Host,
-			Port:  d.Port,
-			Proto: d.Proto,
-		})
-	}
-	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].Pub == pub {
-			e.camp.PeerCatalog[i].Domains = out
-			e.persistCampLocked()
-			return
-		}
-	}
-}
-
-// domainPollPort returns the port our peers' tunnel-side HTTP listener
-// is on. Same port we host UI on — currently engine doesn't know that
-// directly (the UI cmd holds it), so we expose it via a hook field set
-// by main. Empty disables polling.
-func domainPollPort(e *Engine) string {
-	if e.tunnelHTTPPort != "" {
-		return e.tunnelHTTPPort
-	}
-	return ""
-}
+// Domain catalog poll + service health-check moved to services/dns.
 
 func (e *Engine) SetTunnelHTTPPort(port string) {
 	e.tunnelHTTPPort = port
@@ -2411,14 +2175,8 @@ func (e *Engine) diagnosticsLocked() *Diagnostics {
 	if e.udp != nil {
 		d.UDPLocalAddr = e.udp.LocalAddr().String()
 	}
-	if e.dnsSrv != nil {
-		s := e.dnsSrv.Stats()
-		d.DNSTotal = s.Total
-		d.DNSNoError = s.NoError
-		d.DNSNXDomain = s.NXDomain
-		d.DNSRefused = s.Refused
-		d.DNSLastQueryMs = s.LastQueryMs
-	}
+	// DNS server stats now live in services/dns; UI reads them via
+	// a separate endpoint backed by dns.Service.Stats().
 	if e.cfg.Camp != nil {
 		d.DNSResolverOK = platform.ZoneResolverInstalled(identity.CampLabel(e.cfg.Camp.ID))
 	}
@@ -2457,25 +2215,11 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
-	dnsSrv := e.dnsSrv
 	awgDev := e.awgDevice
-	var dnsZone string
-	if e.cfg.Camp != nil {
-		dnsZone = identity.CampLabel(e.cfg.Camp.ID)
-	}
 	e.mu.Unlock()
 
-	// Local DNS first — remove the zone resolver hint so the OS
-	// stops routing queries our way as soon as Stop begins, then
-	// shut the listener down. Failures here are advisory.
-	if dnsZone != "" {
-		if err := platform.RemoveZoneResolver(dnsZone); err != nil {
-			log.Printf("dns: remove zone resolver: %v", err)
-		}
-	}
-	if dnsSrv != nil {
-		_ = dnsSrv.Close()
-	}
+	// DNS server + zone-resolver teardown lives in services/dns now;
+	// main.go drives it from eng.OnStopped.
 
 	cancel()
 	// Close UDP first; this aborts the peerToTun worker. It is independent
@@ -2534,7 +2278,6 @@ func (e *Engine) Stop() error {
 	e.obfenv = nil
 	e.routes = nil
 	e.egr = nil
-	e.dnsSrv = nil
 	e.ca = nil
 	e.torrent = nil
 	e.announce = nil
@@ -2657,7 +2400,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Verified:    true,
 			Paired:      true,
 			Self:        true,
-			Domains:     e.MyDomains(),
 			OverlayV4:   e.cfg.LocalIP,
 		})
 	}
@@ -2695,7 +2437,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Reachable:   online, // kept as alias for backward compat; same semantic now
 			InCamp:      p.InCamp,
 			Active:      p.Pub == active,
-			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
 			Firewall:    append([]config.Firewall(nil), p.Firewall...),
 			LastPongMs:  lastPong,
@@ -2751,26 +2492,6 @@ func overlayV4OrEmpty(pubHex string) string {
 
 
 
-func sortedDomains(in []DomainEntry) []DomainEntry {
-	out := append([]DomainEntry(nil), in...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
-
-// IsWildcardLabel returns true for entries of the form "*.X" — a
-// catch-all claim over the subdomain X.
-func IsWildcardLabel(name string) bool {
-	return strings.HasPrefix(name, "*.") && len(name) > 2
-}
-
-// MatchesWildcard reports whether label is covered by pattern of the
-// form "*.X" — i.e. label ends with ".X". Pattern must already be
-// known wildcard.
-func MatchesWildcard(pattern, label string) bool {
-	suffix := pattern[1:] // drop the "*", keep ".X"
-	return len(label) > len(suffix) && strings.HasSuffix(strings.ToLower(label), strings.ToLower(suffix))
-}
-
 func sortedFiles(in []PeerFile) []PeerFile {
 	out := append([]PeerFile(nil), in...)
 	sort.Slice(out, func(i, j int) bool {
@@ -2800,128 +2521,6 @@ func (e *Engine) SetActivePeer(pub string) error {
 	e.activePub.Store(&pub)
 	log.Printf("camp: active peer = %s (pub=%s)", p.Name, pub)
 	return nil
-}
-
-// MyDomains returns a copy of the local-published domain list, never nil.
-// Each entry has its current health stamped on (own snapshot from
-// healthCheckLoop).
-func (e *Engine) MyDomains() []DomainEntry {
-	p := e.myDomains.Load()
-	if p == nil {
-		return []DomainEntry{}
-	}
-	out := make([]DomainEntry, len(*p))
-	copy(out, *p)
-	e.myDomainHealthMu.Lock()
-	defer e.myDomainHealthMu.Unlock()
-	for i := range out {
-		if h, ok := e.myDomainHealth[out[i].Name]; ok {
-			out[i].Health = h.Status
-			out[i].HealthCheckedAt = h.CheckedAt
-		}
-	}
-	return out
-}
-
-// SetMyDomains replaces the local-published list atomically. Health
-// state for removed names is dropped so the UI doesn't show stale
-// "ok" indicators. Other peers pick up the change on their next
-// /api/domains poll (~10s). Persists into camp config so the list
-// survives engine restart.
-func (e *Engine) SetMyDomains(list []DomainEntry) {
-	dup := make([]DomainEntry, len(list))
-	copy(dup, list)
-	e.myDomains.Store(&dup)
-	keep := make(map[string]struct{}, len(dup))
-	for _, d := range dup {
-		keep[d.Name] = struct{}{}
-	}
-	e.myDomainHealthMu.Lock()
-	for name := range e.myDomainHealth {
-		if _, ok := keep[name]; !ok {
-			delete(e.myDomainHealth, name)
-		}
-	}
-	e.myDomainHealthMu.Unlock()
-	e.mu.Lock()
-	if e.camp != nil {
-		e.camp.MyDomains = make([]config.Domain, 0, len(dup))
-		for _, d := range dup {
-			e.camp.MyDomains = append(e.camp.MyDomains, config.Domain{
-				Name:  d.Name,
-				Host:  d.Host,
-				Port:  d.Port,
-				Proto: d.Proto,
-			})
-		}
-		e.persistCampLocked()
-	}
-	e.mu.Unlock()
-}
-
-// LookupHost implements internaldns.Resolver. Resolves a label under
-// our camp's f2f zone to a v4 address:
-//
-//   - Our own published names → V4=127.0.0.1 (loopback; we host the
-//     actual service on localhost).
-//   - Peer-published names → V4=peer's overlay v4 (100.64.X.Y derived
-//     from pub, routes through utun).
-//   - Anything else → ok=false.
-//
-// Names are skipped for offline peers — handing out an address for a
-// peer we can't currently UDP-reach would just make apps stall.
-func (e *Engine) LookupHost(label string) (internaldns.Host, bool) {
-	// Self first — MyDomains doesn't need the engine lock.
-	// Two-pass: exact match wins over wildcard.
-	mine := e.MyDomains()
-	for _, d := range mine {
-		if !IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
-			return internaldns.Host{V4: "127.0.0.1"}, true
-		}
-	}
-	for _, d := range mine {
-		if IsWildcardLabel(d.Name) && MatchesWildcard(d.Name, label) {
-			return internaldns.Host{V4: "127.0.0.1"}, true
-		}
-	}
-	if e.cfg.Camp == nil {
-		return internaldns.Host{}, false
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Pass 1: exact match across peers.
-	for _, p := range e.peers {
-		if !p.IsOnline() || p.UDPAddr == nil || p.Pub == "" {
-			continue
-		}
-		for _, d := range p.Domains {
-			if IsWildcardLabel(d.Name) || !strings.EqualFold(d.Name, label) {
-				continue
-			}
-			v4addr, err := overlay.PubToV4Addr(p.Pub)
-			if err != nil {
-				return internaldns.Host{}, false
-			}
-			return internaldns.Host{V4: v4addr.String()}, true
-		}
-	}
-	// Pass 2: wildcard match across peers.
-	for _, p := range e.peers {
-		if !p.IsOnline() || p.UDPAddr == nil || p.Pub == "" {
-			continue
-		}
-		for _, d := range p.Domains {
-			if !IsWildcardLabel(d.Name) || !MatchesWildcard(d.Name, label) {
-				continue
-			}
-			v4addr, err := overlay.PubToV4Addr(p.Pub)
-			if err != nil {
-				return internaldns.Host{}, false
-			}
-			return internaldns.Host{V4: v4addr.String()}, true
-		}
-	}
-	return internaldns.Host{}, false
 }
 
 // AddIntercept resolves spec, installs its host routes via utun, and binds

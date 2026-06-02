@@ -30,6 +30,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
+	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/services/trust"
 )
@@ -47,6 +48,7 @@ type Server struct {
 	engine   *engine.Engine
 	firewall *firewall.Service
 	trust    *trust.Service
+	dns      *dns.Service
 	addr     string
 	srv      *http.Server
 
@@ -59,11 +61,12 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, fwSvc *firewall.Service, trustSvc *trust.Service, addr string) *Server {
+func New(eng *engine.Engine, fwSvc *firewall.Service, trustSvc *trust.Service, dnsSvc *dns.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		firewall:    fwSvc,
 		trust:       trustSvc,
+		dns:         dnsSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -285,9 +288,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		port   int
 		upHost string
 	)
-	mine := s.engine.MyDomains()
+	mine := s.dns.MyDomains()
 	for _, d := range mine {
-		if !engine.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
+		if !dns.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
 			port = d.Port
 			upHost = d.Host
 			break
@@ -295,7 +298,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if port == 0 {
 		for _, d := range mine {
-			if engine.IsWildcardLabel(d.Name) && engine.MatchesWildcard(d.Name, label) {
+			if dns.IsWildcardLabel(d.Name) && dns.MatchesWildcard(d.Name, label) {
 				port = d.Port
 				upHost = d.Host
 				break
@@ -702,18 +705,18 @@ func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 // handleListMyDomains returns this peer's own published domain list.
 // UI-facing — served only on the loopback listener.
 func (s *Server) handleListMyDomains(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+	writeJSON(w, http.StatusOK, s.dns.MyDomains())
 }
 
 // handleSetMyDomains replaces the entire list. PUT semantics — the
 // body is the new full list; missing entries are removed.
 func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
-	var list []engine.DomainEntry
+	var list []dns.Entry
 	if err := json.NewDecoder(r.Body).Decode(&list); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	cleaned := make([]engine.DomainEntry, 0, len(list))
+	cleaned := make([]dns.Entry, 0, len(list))
 	seen := make(map[string]struct{}, len(list))
 	for _, e := range list {
 		name := strings.ToLower(strings.TrimSpace(e.Name))
@@ -724,7 +727,7 @@ func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[name] = struct{}{}
-		entry := engine.DomainEntry{Name: name}
+		entry := dns.Entry{Name: name}
 		if e.Port > 0 && e.Port < 65536 {
 			entry.Port = e.Port
 		}
@@ -736,7 +739,10 @@ func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
 		}
 		cleaned = append(cleaned, entry)
 	}
-	s.engine.SetMyDomains(cleaned)
+	if err := s.dns.SetMyDomains(cleaned); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, cleaned)
 }
 
@@ -784,7 +790,7 @@ func isValidDNSPart(s string) bool {
 // handleListMyDomains but mounted on the tunnel listener so cross-peer
 // polling works. Mounted on the loopback listener too as a debug aid.
 func (s *Server) handleListDomains(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.MyDomains())
+	writeJSON(w, http.StatusOK, s.dns.MyDomains())
 }
 
 // handleCACert serves the local CA's public cert in PEM form. Polled
@@ -843,7 +849,7 @@ func (s *Server) handleRemovePeerDomain(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, fmt.Errorf("peer and name required"))
 		return
 	}
-	if err := s.engine.RemovePeerDomain(peer, name); err != nil {
+	if err := s.dns.RemovePeerDomain(peer, name); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

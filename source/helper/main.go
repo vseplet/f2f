@@ -20,7 +20,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
+	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/services/trust"
 	"github.com/vseplet/f2f/source/helper/ui/web"
@@ -102,7 +105,11 @@ func runCmd(args []string) error {
 		return err
 	}
 
-	eng := engine.New()
+	store, err := config.NewStore()
+	if err != nil {
+		return fmt.Errorf("config store: %w", err)
+	}
+	eng := engine.New(store)
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	cfg := engine.Config{
@@ -142,17 +149,23 @@ func uiCmd(args []string) error {
 		return err
 	}
 
-	eng := engine.New()
+	store, err := config.NewStore()
+	if err != nil {
+		return fmt.Errorf("config store: %w", err)
+	}
+
+	eng := engine.New(store)
 	eng.SetDefaultListen(*listen)
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
-	// Services that ride on top of the engine. Construction is cheap
-	// and stateless — the actual lifecycle hooks (firewall first-apply
-	// at engine-ready, trust poll loop) are wired below.
+	// Services riding on top of the engine. Construction is cheap and
+	// stateless — actual lifecycle (firewall pf-anchor, dns server,
+	// trust poll loop) is wired off eng.OnStarted/OnStopped below.
 	fwSvc := firewall.New(eng)
 	trustSvc := trust.New(eng)
+	dnsSvc := dns.New(store, eng)
 
-	srv := web.New(eng, fwSvc, trustSvc, *bind)
+	srv := web.New(eng, fwSvc, trustSvc, dnsSvc, *bind)
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.
@@ -172,6 +185,12 @@ func uiCmd(args []string) error {
 		} else {
 			log.Printf("firewall: installed on %s scoped to %s/32", st.UtunName, localIP)
 		}
+		// Local DNS server + MyDomains catalog + peer-poll. Failure here
+		// is non-fatal (HTTPS just resolves manually instead of via the
+		// camp's .f2f zone).
+		if err := dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)); err != nil {
+			log.Printf("dns: %v (resolver disabled)", err)
+		}
 		// Pick up this camp's on-disk peer-CA cache. Additive — entries
 		// from earlier camps stay in memory; that matches pre-extract
 		// behaviour and lets the UI show peers from any camp the user
@@ -184,6 +203,9 @@ func uiCmd(args []string) error {
 		if err := fwSvc.Stop(); err != nil {
 			log.Printf("WARN: firewall stop: %v", err)
 		}
+		if err := dnsSvc.Stop(); err != nil {
+			log.Printf("WARN: dns stop: %v", err)
+		}
 	}
 	// Tell the engine which TCP port to use when polling peers'
 	// /api/domains over the tunnel — same one we host the UI on.
@@ -194,14 +216,24 @@ func uiCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Trust service poll loop runs for the lifetime of the process and
-	// is resilient to the engine going up/down — TunnelHTTPPort/peers
-	// getters return empty when the engine isn't running, the loop
-	// just skips that tick.
+	// Long-lived service workers. They survive engine restarts —
+	// every poll consults engine.TunnelHTTPPort()/OnlinePeers() and
+	// no-ops when the engine is down. ctx is the process root, so
+	// they exit on ^C / SIGTERM together with the rest of main.
 	trustDone := make(chan struct{})
 	go func() {
 		defer close(trustDone)
 		trustSvc.Run(ctx)
+	}()
+	dnsPollDone := make(chan struct{})
+	go func() {
+		defer close(dnsPollDone)
+		dnsSvc.PollPeers(ctx)
+	}()
+	dnsHealthDone := make(chan struct{})
+	go func() {
+		defer close(dnsHealthDone)
+		dnsSvc.HealthCheck(ctx)
 	}()
 
 	go func() {
@@ -238,12 +270,14 @@ func uiCmd(args []string) error {
 	if err := eng.Stop(); err != nil {
 		log.Printf("WARN: engine stop: %v", err)
 	}
-	// Wait for trust poll loop to drain its current tick before exit.
-	// ctx is already done, so the loop's select sees it on next pass.
-	select {
-	case <-trustDone:
-	case <-time.After(2 * time.Second):
-		log.Printf("WARN: trust poll loop did not exit in 2s")
+	// Wait for service workers to drain before exit. ctx is already
+	// done, so each select sees it on next pass.
+	for _, done := range []chan struct{}{trustDone, dnsPollDone, dnsHealthDone} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			log.Printf("WARN: service worker did not exit in 2s")
+		}
 	}
 	return nil
 }

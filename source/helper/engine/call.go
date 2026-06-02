@@ -247,7 +247,7 @@ func (e *Engine) pollRemoteCalls(ctx context.Context) {
 			targets = append(targets, target{host: h, name: p.Name})
 		}
 	}
-	port := domainPollPort(e)
+	port := e.tunnelHTTPPort
 	e.mu.Unlock()
 	if port == "" {
 		return
