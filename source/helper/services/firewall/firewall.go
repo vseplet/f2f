@@ -1,25 +1,31 @@
-// Package firewall is the user-facing service layer for the inbound
-// utun firewall — it owns the user-configured allow list, persistence
-// to the camp config, and re-applying the pf anchor on change.
+// Package firewall installs an inbound filter on the tunnel
+// interface that default-denies traffic to our tunnel_ip and
+// explicitly allows a small set of ports — f2f's own engine ports
+// (HTTP API, proxies, BitTorrent) plus user-defined ones from the
+// Tunnel tab UI.
 //
-// The low-level pf wrapper lives in helper/engine/firewall (imported
-// here as enginefw) and is owned by Engine — this service borrows the
-// handle through engine.FirewallHandle() and uses it to push fresh
-// rule sets.
+// Without this, any service the user has listening on 0.0.0.0
+// (sshd, postgres, dev servers) becomes reachable from every camp
+// peer at <tunnel_ip>:<port>. The firewall makes the tunnel as
+// restrictive as any incoming-from-internet interface by default.
 //
-// The service is created once at process start (from main.go) and
-// outlives camp transitions. It is safe to call its methods even when
-// the engine is stopped — UserPorts returns the on-disk state, and
-// SetUserPorts returns an error indicating the engine isn't running.
+// Layering:
+//
+//   - helper/platform/firewall_*.go: OS primitives (pfctl on Darwin,
+//     nft on Linux). Pure system commands.
+//   - this package's anchor.go: pf-anchor lifecycle (open/apply/close)
+//     plus state-file recovery for crashed prior processes.
+//   - this package's Service: user-facing CRUD on the allow list,
+//     persistence into the camp config, and re-applying the anchor.
 package firewall
 
 import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	enginefw "github.com/vseplet/f2f/source/helper/engine/firewall"
 )
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
@@ -27,40 +33,117 @@ import (
 // to persist to). UI shows this as "start the tunnel first".
 var ErrEngineNotRunning = errors.New("firewall: engine not running")
 
-// Engine is the small subset of the real *engine.Engine surface the
-// service depends on. Declaring it as an interface keeps services/
-// from importing engine (no import cycle risk) and makes the service
-// trivially testable with a fake.
+// BuiltinRules are the ports f2f's own engine listens on over the
+// tunnel. They are always allowed by the inbound filter regardless
+// of user settings, because the engine itself is the consumer:
+//
+//   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer
+//     signal polling over utun.
+//   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
+//     locally-registered domains.
+//   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the
+//     drop subsystem.
+//
+// Keep in sync with web.Server and the torrent client.
+var BuiltinRules = []PortRule{
+	{Port: 2202, Protocol: "tcp"},
+	{Port: 80, Protocol: "tcp"},
+	{Port: 443, Protocol: "tcp"},
+	{Port: 6881, Protocol: "tcp"},
+	{Port: 6881, Protocol: "udp"},
+}
+
+// BuiltinLabel returns a human-readable description for a builtin
+// (port, proto) pair, intended for the UI's "always-on" rule list.
+// Returns "" for non-builtin combinations.
+func BuiltinLabel(port int, proto string) string {
+	switch {
+	case port == 2202 && proto == "tcp":
+		return "f2f HTTP API"
+	case port == 80 && proto == "tcp":
+		return "f2f HTTP proxy"
+	case port == 443 && proto == "tcp":
+		return "f2f HTTPS proxy"
+	case port == 6881:
+		return "f2f BitTorrent"
+	}
+	return ""
+}
+
+// Engine is the small slice of *engine.Engine the firewall service
+// composes against — kept as an interface so this package doesn't
+// import engine (avoids an import cycle since main.go wires both).
 type Engine interface {
-	FirewallHandle() *enginefw.Firewall
 	CampFirewall() []config.Firewall
 	SetCampFirewall(list []config.Firewall) error
 }
 
-// Service is the per-process firewall manager. Construct once in
-// main.go and pass to anything that needs to read or mutate the user
-// rule list (currently just the web API handlers).
+// Service is the per-process firewall manager. Construct in main.go
+// with New, then call Start(iface, tunnelIP) once the engine reports
+// the tunnel is up (eng.OnStarted). Stop closes the pf anchor and
+// removes the state file; safe to call when never started.
 type Service struct {
 	eng Engine
+
+	mu     sync.Mutex
+	anchor *anchor
 }
 
 // New constructs a Service. The engine must outlive the service but
-// need not be Start'ed yet — accessors degrade gracefully when the
-// engine is down.
+// need not be Start'ed yet.
 func New(eng Engine) *Service {
 	return &Service{eng: eng}
 }
 
+// Start installs the pf anchor on iface scoped to tunnelIP with the
+// builtin + currently-enabled user rules. Idempotent enough — calling
+// twice without Stop in between will fail because the prior pid is
+// still alive; that's fine, callers don't do that.
+func (s *Service) Start(iface, tunnelIP string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.anchor != nil {
+		return errors.New("firewall: already started")
+	}
+	a, err := openAnchor(iface, tunnelIP, mergeRules(s.eng.CampFirewall()))
+	if err != nil {
+		return err
+	}
+	s.anchor = a
+	return nil
+}
+
+// Stop tears down the pf anchor and removes the state file.
+// Idempotent — no-op when Start was never called or already stopped.
+func (s *Service) Stop() error {
+	s.mu.Lock()
+	a := s.anchor
+	s.anchor = nil
+	s.mu.Unlock()
+	if a == nil {
+		return nil
+	}
+	return a.close()
+}
+
+// Active reports whether the pf anchor is currently installed.
+// false means Start was never called, Start failed (e.g. pfctl
+// permission denied), or the service has been Stop'd.
+func (s *Service) Active() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.anchor != nil
+}
+
 // BuiltinPorts returns the always-on f2f-internal allow list as the
-// shape the UI expects. Read-only from the UI's perspective; the
-// underlying rules live in enginefw.BuiltinRules.
+// shape the UI expects.
 func (s *Service) BuiltinPorts() []config.Firewall {
-	out := make([]config.Firewall, len(enginefw.BuiltinRules))
-	for i, r := range enginefw.BuiltinRules {
+	out := make([]config.Firewall, len(BuiltinRules))
+	for i, r := range BuiltinRules {
 		out[i] = config.Firewall{
 			Port:        r.Port,
 			Protocol:    r.Protocol,
-			Description: enginefw.BuiltinLabel(r.Port, r.Protocol),
+			Description: BuiltinLabel(r.Port, r.Protocol),
 			Enabled:     true,
 		}
 	}
@@ -76,53 +159,42 @@ func (s *Service) UserPorts() []config.Firewall {
 
 // SetUserPorts replaces the user allow list, persists it into the
 // per-camp config on disk, and re-applies the pf anchor with builtin
-// + enabled user rules. Idempotent — safe to call on every UI save.
-// Returns ErrEngineNotRunning if the engine isn't up.
+// + enabled user rules. Returns ErrEngineNotRunning if the engine
+// isn't up. Re-applying the anchor while it isn't open is a no-op —
+// rules will be picked up on the next Start.
 func (s *Service) SetUserPorts(list []config.Firewall) error {
 	cleaned := CleanList(list)
 	if err := s.eng.SetCampFirewall(cleaned); err != nil {
 		return err
 	}
-	fw := s.eng.FirewallHandle()
-	if fw == nil {
-		// pf-load failed at engine.Start; rules are persisted but not
-		// enforced. Next engine restart will retry.
+	s.mu.Lock()
+	a := s.anchor
+	s.mu.Unlock()
+	if a == nil {
 		return nil
 	}
-	if err := fw.Apply(MergeRules(cleaned)); err != nil {
+	if err := a.apply(mergeRules(cleaned)); err != nil {
 		return fmt.Errorf("firewall: apply: %w", err)
 	}
 	return nil
 }
 
-// Active reports whether the pf anchor for the inbound utun filter is
-// currently loaded — true means user-toggled rules are actually
-// enforced by the kernel, false means the engine isn't running (or
-// pf-load failed at startup and we fell back to no filtering).
-func (s *Service) Active() bool {
-	return s.eng.FirewallHandle() != nil
-}
-
-// MergeRules combines the always-on builtins with the enabled user
-// entries into the kernel-level rule list passed to pf. Exported so
-// engine.Start can use the same merge logic for its initial apply
-// (avoiding two divergent code paths for "builtin + user-enabled").
-func MergeRules(user []config.Firewall) []enginefw.PortRule {
-	out := make([]enginefw.PortRule, 0, len(enginefw.BuiltinRules)+len(user))
-	out = append(out, enginefw.BuiltinRules...)
+// mergeRules combines builtins with the enabled user entries.
+func mergeRules(user []config.Firewall) []PortRule {
+	out := make([]PortRule, 0, len(BuiltinRules)+len(user))
+	out = append(out, BuiltinRules...)
 	for _, p := range user {
 		if !p.Enabled {
 			continue
 		}
-		out = append(out, enginefw.PortRule{Port: p.Port, Protocol: p.Protocol})
+		out = append(out, PortRule{Port: p.Port, Protocol: p.Protocol})
 	}
 	return out
 }
 
 // CleanList validates and deduplicates a user-supplied allow list.
 // Drops entries with unknown protocols, out-of-range ports, and
-// duplicate (port, protocol) pairs. Exported so engine.Start can
-// sanitise camp-loaded rules through the same code path.
+// duplicate (port, protocol) pairs.
 func CleanList(in []config.Firewall) []config.Firewall {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]config.Firewall, 0, len(in))

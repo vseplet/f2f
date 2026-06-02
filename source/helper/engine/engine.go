@@ -30,7 +30,6 @@ import (
 	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/awg"
-	"github.com/vseplet/f2f/source/helper/engine/firewall"
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/engine/pair"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -409,7 +408,6 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	egr      *egress.Egress
-	fw       *firewall.Firewall      // default-deny on utun + user-allowed ports
 	dnsSrv   *internaldns.Server     // local DNS for <camp_id>.f2f
 	ca       *ca.CA                  // local CA for the current camp_id
 	torrent  *internaltorrent.Client // BT client for camp file sharing
@@ -809,23 +807,10 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
-	// Firewall: default-deny inbound on the utun interface for
-	// packets directed at OUR tunnel_ip (other peers' addresses and
-	// egress-forwarded packets are unaffected). Allow only f2f-
-	// internal ports + enabled user-configured ones (sourced from the
-	// camp config, which the services/firewall service owns at the
-	// API surface). Failure here is non-fatal — tunnel still works,
-	// just without input filtering.
-	initialRules := append([]firewall.PortRule(nil), firewall.BuiltinRules...)
-	initialRules = append(initialRules, enabledUserFirewallRules(e.camp)...)
-	fw, err := firewall.Open(tun.Name(), localIP, initialRules)
-	if err != nil {
-		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
-	} else {
-		e.fw = fw
-		log.Printf("firewall: installed on %s scoped to %s/32, %d built-in + %d user rule(s)",
-			tun.Name(), localIP, len(firewall.BuiltinRules), len(initialRules)-len(firewall.BuiltinRules))
-	}
+	// Inbound utun firewall is now owned by services/firewall and
+	// installed by main.go after eng.OnStarted — keeps OS-touching
+	// lifecycle (utun, UDP, AWG) inside engine, and userland services
+	// (CRUD, persist, pf wiring) outside.
 
 	// Route table is empty at start; intercepts are added via UI / API
 	// once peers are visible (peer assignment is mandatory).
@@ -1515,16 +1500,6 @@ func (e *Engine) TrustedPeersDir() string {
 	return filepath.Join(trustedPeersRootDir, e.cfg.Camp.ID)
 }
 
-// FirewallHandle returns the live pf anchor handle (nil if pf-load
-// failed at Start or the engine isn't running). Borrowed by the
-// services/firewall service to push fresh rule sets without
-// reopening the anchor; lifecycle is owned by Engine.
-func (e *Engine) FirewallHandle() *firewall.Firewall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.fw
-}
-
 // CampFirewall returns a copy of the camp config's user-configured
 // firewall allow list. Returns nil when the engine isn't running
 // (no camp loaded → no list to surface).
@@ -1554,38 +1529,6 @@ func (e *Engine) SetCampFirewall(list []config.Firewall) error {
 	e.persistCampLocked()
 	e.mu.Unlock()
 	return nil
-}
-
-// enabledUserFirewallRules extracts the enabled user-configured
-// allow rules from the camp config in the shape pf wants. Used only
-// at Engine.Start to seed the initial pf-anchor rule set; subsequent
-// updates flow through services/firewall.Service.SetUserPorts which
-// owns its own merge logic.
-func enabledUserFirewallRules(c *config.Camp) []firewall.PortRule {
-	if c == nil {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(c.Firewall))
-	out := make([]firewall.PortRule, 0, len(c.Firewall))
-	for _, p := range c.Firewall {
-		if !p.Enabled {
-			continue
-		}
-		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
-		if proto != "tcp" && proto != "udp" {
-			continue
-		}
-		if p.Port <= 0 || p.Port > 65535 {
-			continue
-		}
-		key := fmt.Sprintf("%d/%s", p.Port, proto)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, firewall.PortRule{Port: p.Port, Protocol: proto})
-	}
-	return out
 }
 
 // TunnelHTTPPort is the port other peers expose their /api/* on over
@@ -2505,7 +2448,6 @@ func (e *Engine) Stop() error {
 	udp := e.udp
 	routes := e.routes
 	egr := e.egr
-	fw := e.fw
 	dnsSrv := e.dnsSrv
 	awgDev := e.awgDevice
 	var dnsZone string
@@ -2557,11 +2499,6 @@ func (e *Engine) Stop() error {
 	}
 	e.workers.Wait()
 
-	if fw != nil {
-		if err := fw.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("firewall: %w", err))
-		}
-	}
 	if egr != nil {
 		if err := egr.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("egress: %w", err))
@@ -2588,7 +2525,6 @@ func (e *Engine) Stop() error {
 	e.obfenv = nil
 	e.routes = nil
 	e.egr = nil
-	e.fw = nil
 	e.dnsSrv = nil
 	e.ca = nil
 	e.torrent = nil
@@ -3536,10 +3472,6 @@ func (e *Engine) rollbackPartial() {
 	if e.routes != nil {
 		_ = e.routes.Cleanup()
 		e.routes = nil
-	}
-	if e.fw != nil {
-		_ = e.fw.Close()
-		e.fw = nil
 	}
 	if e.egr != nil {
 		_ = e.egr.Close()

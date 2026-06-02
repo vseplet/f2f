@@ -163,6 +163,13 @@ func uiCmd(args []string) error {
 		if err := srv.BindProxies(localIP); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
+		// Install the inbound utun firewall. Failure here is non-fatal
+		// — the tunnel still works, just without input filtering, and
+		// the UI flags it via fwSvc.Active() returning false.
+		st := eng.Status()
+		if err := fwSvc.Start(st.UtunName, localIP); err != nil {
+			log.Printf("firewall: %v (input not filtered)", err)
+		}
 		// Pick up this camp's on-disk peer-CA cache. Additive — entries
 		// from earlier camps stay in memory; that matches pre-extract
 		// behaviour and lets the UI show peers from any camp the user
@@ -172,6 +179,9 @@ func uiCmd(args []string) error {
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
 		_ = srv.UnbindProxies()
+		if err := fwSvc.Stop(); err != nil {
+			log.Printf("WARN: firewall stop: %v", err)
+		}
 	}
 	// Tell the engine which TCP port to use when polling peers'
 	// /api/domains over the tunnel — same one we host the UI on.
