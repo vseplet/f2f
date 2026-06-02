@@ -3,6 +3,7 @@ package awg
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
@@ -95,10 +96,10 @@ func BuildPeerBlock(p PeerSyncInfo, keepaliveSec int) string {
 }
 
 // BuildPeersBlock returns "replace_peers=true\n" followed by all peer
-// blocks concatenated. Used as the body of IpcSet to atomically swap
-// the device's peer list — fewer round trips than per-peer updates,
-// at the cost of resetting any in-flight handshakes (acceptable: WG
-// handshake re-completes in tens of ms, and SyncPeers is rare).
+// blocks concatenated. Atomically swaps the device's peer list — kills
+// every active WG session. Used for emergency full-reset; routine
+// updates should go through BuildIncrementalBlock + Device.SyncPeers
+// to preserve sessions across changes.
 func BuildPeersBlock(peers []PeerSyncInfo, keepaliveSec int) string {
 	var b strings.Builder
 	b.WriteString("replace_peers=true\n")
@@ -106,4 +107,125 @@ func BuildPeersBlock(peers []PeerSyncInfo, keepaliveSec int) string {
 		b.WriteString(BuildPeerBlock(p, keepaliveSec))
 	}
 	return b.String()
+}
+
+// NormalizePeers returns a copy of `peers` with deterministic ordering:
+// peers sorted by WGPub, each peer's AllowedCIDRs sorted lexically.
+// Required for stable diff'ing between snapshots.
+func NormalizePeers(peers []PeerSyncInfo) []PeerSyncInfo {
+	out := make([]PeerSyncInfo, len(peers))
+	for i, p := range peers {
+		cidrs := append([]string(nil), p.AllowedCIDRs...)
+		sort.Strings(cidrs)
+		out[i] = PeerSyncInfo{
+			WGPub:        p.WGPub,
+			Endpoint:     p.Endpoint,
+			AllowedCIDRs: cidrs,
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].WGPub < out[j].WGPub })
+	return out
+}
+
+// BuildIncrementalBlock returns the UAPI blob that transforms the
+// device's peer set from `prev` to `curr` using per-peer add/update/
+// remove commands (no `replace_peers=true`). Returns "" when nothing
+// changed — caller should skip IpcSet entirely in that case.
+//
+// Per-peer semantics:
+//   - Peer in curr, not in prev → emit full peer block (creates peer).
+//   - Peer in prev, not in curr → emit `public_key=X \n remove=true`.
+//   - Peer in both, no field changes → nothing emitted (session preserved).
+//   - Peer in both, endpoint changed → emit `update_only=true \n endpoint=NEW`.
+//   - Peer in both, AllowedCIDRs changed → emit `update_only=true \n
+//     replace_allowed_ips=true \n allowed_ip=...` lines.
+//   - Peer in both, both changed → emit both updates in one peer block.
+//
+// `update_only=true` is defensive — if the peer was somehow already
+// removed by another caller / restart, this update is a no-op rather
+// than re-creating it.
+//
+// Both `prev` and `curr` MUST be pre-normalized (NormalizePeers) so
+// AllowedCIDRs are sortable for equality comparison.
+func BuildIncrementalBlock(prev, curr []PeerSyncInfo, keepaliveSec int) string {
+	var b strings.Builder
+
+	prevByPub := make(map[string]PeerSyncInfo, len(prev))
+	for _, p := range prev {
+		prevByPub[p.WGPub] = p
+	}
+	currByPub := make(map[string]PeerSyncInfo, len(curr))
+	for _, p := range curr {
+		currByPub[p.WGPub] = p
+	}
+
+	// Stage 1: removals. Sorted iteration of prev peers so blob is
+	// deterministic (useful for testing + diagnostics).
+	for _, p := range prev {
+		if _, stillPresent := currByPub[p.WGPub]; !stillPresent {
+			fmt.Fprintf(&b, "public_key=%s\nremove=true\n", p.WGPub)
+		}
+	}
+
+	// Stage 2: additions and updates. Iterate curr in sorted order.
+	for _, c := range curr {
+		previous, existed := prevByPub[c.WGPub]
+		if !existed {
+			// New peer — full create block, no update_only.
+			fmt.Fprintf(&b, "public_key=%s\n", c.WGPub)
+			if c.Endpoint != "" {
+				fmt.Fprintf(&b, "endpoint=%s\n", c.Endpoint)
+			}
+			if len(c.AllowedCIDRs) > 0 {
+				b.WriteString("replace_allowed_ips=true\n")
+				for _, cidr := range c.AllowedCIDRs {
+					if cidr == "" {
+						continue
+					}
+					fmt.Fprintf(&b, "allowed_ip=%s\n", cidr)
+				}
+			}
+			if keepaliveSec > 0 {
+				fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepaliveSec)
+			}
+			continue
+		}
+
+		endpointChanged := previous.Endpoint != c.Endpoint
+		cidrsChanged := !equalSortedStrings(previous.AllowedCIDRs, c.AllowedCIDRs)
+		if !endpointChanged && !cidrsChanged {
+			continue // unchanged — preserve the live session
+		}
+		// Existing peer with diff'd fields — minimal update preserving session.
+		fmt.Fprintf(&b, "public_key=%s\nupdate_only=true\n", c.WGPub)
+		if endpointChanged && c.Endpoint != "" {
+			fmt.Fprintf(&b, "endpoint=%s\n", c.Endpoint)
+		}
+		if cidrsChanged {
+			b.WriteString("replace_allowed_ips=true\n")
+			for _, cidr := range c.AllowedCIDRs {
+				if cidr == "" {
+					continue
+				}
+				fmt.Fprintf(&b, "allowed_ip=%s\n", cidr)
+			}
+		}
+	}
+
+	return b.String()
+}
+
+// equalSortedStrings compares two pre-sorted slices for equality.
+// Faster and simpler than a generic set-equality check; safe because
+// NormalizePeers always sorts AllowedCIDRs.
+func equalSortedStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
