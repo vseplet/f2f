@@ -23,9 +23,12 @@ import (
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/services/calls"
 	"github.com/vseplet/f2f/source/helper/services/dns"
+	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/trust"
+	"github.com/vseplet/f2f/source/helper/services/pki"
+	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
 
@@ -113,12 +116,12 @@ func runCmd(args []string) error {
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	cfg := engine.Config{
-		LocalIP:     *localIP,
-		PeerIP:      *peerIP,
-		Listen:      *listen,
-		Peer:        *peerAddr,
-		EgressIface: *egressIface,
+		LocalIP: *localIP,
+		PeerIP:  *peerIP,
+		Listen:  *listen,
+		Peer:    *peerAddr,
 	}
+	_ = *egressIface // egress is now auto-detected inside services/tunnel
 	if *campName != "" && *campID != "" {
 		cfg.Camp = &engine.CampConfig{
 			URL:      *campURL,
@@ -161,11 +164,14 @@ func uiCmd(args []string) error {
 	// Services riding on top of the engine. Construction is cheap and
 	// stateless — actual lifecycle (firewall pf-anchor, dns server,
 	// trust poll loop) is wired off eng.OnStarted/OnStopped below.
-	fwSvc := firewall.New(store)
-	trustSvc := trust.New(store, eng)
+	fwSvc := firewall.New(store, eng)
+	pkiSvc := pki.New(store, eng)
 	dnsSvc := dns.New(store, eng)
+	dropSvc := drop.New(eng)
+	callsSvc := calls.New(eng)
+	tunnelSvc := tunnel.New(store, eng)
 
-	srv := web.New(eng, fwSvc, trustSvc, dnsSvc, *bind)
+	srv := web.New(eng, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, *bind)
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.
@@ -191,11 +197,27 @@ func uiCmd(args []string) error {
 		if err := dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)); err != nil {
 			log.Printf("dns: %v (resolver disabled)", err)
 		}
-		// Pick up this camp's on-disk peer-CA cache. Additive — entries
-		// from earlier camps stay in memory; that matches pre-extract
-		// behaviour and lets the UI show peers from any camp the user
-		// has ever joined.
-		trustSvc.Load(st.CampID)
+		// PKI: ensure local CA + load on-disk peer-CA cache.
+		if err := pkiSvc.Start(st.CampID); err != nil {
+			log.Printf("pki: %v", err)
+		}
+		// Tunnel: restore intercepts from camp config + install AWG
+		// allowed-ips hook. Must run AFTER engine ready so peers map
+		// is populated for HasPeerName checks.
+		tunnelSvc.Start(st.CampID)
+		// BitTorrent client + rescan/restore. Non-fatal: file sharing
+		// just becomes unavailable until next Start if this fails.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("drop: PANIC during startup: %v (file sharing disabled)", r)
+				}
+			}()
+			log.Printf("drop: initialising torrent client …")
+			if err := dropSvc.Start(st.CampID, localIP); err != nil {
+				log.Printf("drop: %v (file sharing disabled)", err)
+			}
+		}()
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
@@ -206,6 +228,14 @@ func uiCmd(args []string) error {
 		if err := dnsSvc.Stop(); err != nil {
 			log.Printf("WARN: dns stop: %v", err)
 		}
+		if err := pkiSvc.Stop(); err != nil {
+			log.Printf("WARN: pki stop: %v", err)
+		}
+		if err := dropSvc.Stop(); err != nil {
+			log.Printf("WARN: drop stop: %v", err)
+		}
+		callsSvc.Reset()
+		tunnelSvc.Stop()
 	}
 	// Tell the engine which TCP port to use when polling peers'
 	// /api/domains over the tunnel — same one we host the UI on.
@@ -220,10 +250,10 @@ func uiCmd(args []string) error {
 	// every poll consults engine.TunnelHTTPPort()/OnlinePeers() and
 	// no-ops when the engine is down. ctx is the process root, so
 	// they exit on ^C / SIGTERM together with the rest of main.
-	trustDone := make(chan struct{})
+	pkiDone := make(chan struct{})
 	go func() {
-		defer close(trustDone)
-		trustSvc.Run(ctx)
+		defer close(pkiDone)
+		pkiSvc.PollPeers(ctx)
 	}()
 	dnsPollDone := make(chan struct{})
 	go func() {
@@ -234,6 +264,26 @@ func uiCmd(args []string) error {
 	go func() {
 		defer close(dnsHealthDone)
 		dnsSvc.HealthCheck(ctx)
+	}()
+	dropPollDone := make(chan struct{})
+	go func() {
+		defer close(dropPollDone)
+		dropSvc.PollPeers(ctx)
+	}()
+	fwPollDone := make(chan struct{})
+	go func() {
+		defer close(fwPollDone)
+		fwSvc.PollPeers(ctx)
+	}()
+	tunnelRefreshDone := make(chan struct{})
+	go func() {
+		defer close(tunnelRefreshDone)
+		tunnelSvc.RefreshDomainRoutes(ctx)
+	}()
+	callsPollDone := make(chan struct{})
+	go func() {
+		defer close(callsPollDone)
+		callsSvc.PollPeers(ctx)
 	}()
 
 	go func() {
@@ -272,7 +322,7 @@ func uiCmd(args []string) error {
 	}
 	// Wait for service workers to drain before exit. ctx is already
 	// done, so each select sees it on next pass.
-	for _, done := range []chan struct{}{trustDone, dnsPollDone, dnsHealthDone} {
+	for _, done := range []chan struct{}{pkiDone, dnsPollDone, dnsHealthDone, dropPollDone, callsPollDone, fwPollDone, tunnelRefreshDone} {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):

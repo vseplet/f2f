@@ -1,4 +1,4 @@
-package packet
+package engine
 
 import (
 	"encoding/binary"
@@ -67,7 +67,7 @@ func TestSummary_IPv4(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Summary(c.build())
+			got := packetSummary(c.build())
 			for _, sub := range c.contains {
 				if !strings.Contains(got, sub) {
 					t.Errorf("missing %q in %q", sub, got)
@@ -85,7 +85,7 @@ func TestSummary_IPv6(t *testing.T) {
 	copy(p[8:24], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1})
 	copy(p[24:40], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2})
 
-	got := Summary(p)
+	got := packetSummary(p)
 	for _, sub := range []string{"IPv6", "2001:db8::1", "2001:db8::2", "ICMPv6"} {
 		if !strings.Contains(got, sub) {
 			t.Errorf("missing %q in %q", sub, got)
@@ -100,7 +100,7 @@ func TestExtractDst(t *testing.T) {
 	v4[9] = 6
 	copy(v4[12:16], []byte{10, 0, 0, 1})
 	copy(v4[16:20], []byte{8, 8, 8, 8})
-	if got := ExtractDst(v4).String(); got != "8.8.8.8" {
+	if got := extractDst(v4).String(); got != "8.8.8.8" {
 		t.Errorf("v4 dst = %q, want 8.8.8.8", got)
 	}
 
@@ -109,15 +109,15 @@ func TestExtractDst(t *testing.T) {
 	v6[6] = 58
 	copy(v6[8:24], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1})
 	copy(v6[24:40], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2})
-	if got := ExtractDst(v6).String(); got != "2001:db8::2" {
+	if got := extractDst(v6).String(); got != "2001:db8::2" {
 		t.Errorf("v6 dst = %q, want 2001:db8::2", got)
 	}
 
-	if ExtractDst(nil).IsValid() {
-		t.Error("ExtractDst(nil) should be invalid")
+	if extractDst(nil).IsValid() {
+		t.Error("extractDst(nil) should be invalid")
 	}
-	if ExtractDst([]byte{0x45}).IsValid() {
-		t.Error("ExtractDst(truncated v4) should be invalid")
+	if extractDst([]byte{0x45}).IsValid() {
+		t.Error("extractDst(truncated v4) should be invalid")
 	}
 }
 
@@ -134,9 +134,9 @@ func TestSummary_EdgeCases(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Summary(c.buf)
+			got := packetSummary(c.buf)
 			if !strings.Contains(got, c.want) {
-				t.Errorf("Summary(%v) = %q, want substring %q", c.buf, got, c.want)
+				t.Errorf("packetSummary(%v) = %q, want substring %q", c.buf, got, c.want)
 			}
 		})
 	}

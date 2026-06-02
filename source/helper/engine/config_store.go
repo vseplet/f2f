@@ -208,9 +208,6 @@ func (e *Engine) hydratePeersFromCatalog() {
 			// confirms the peer is back online (and we resolve a fresh
 			// UDPAddr) or leaves them dormant.
 		}
-		if len(p.Firewall) > 0 {
-			st.Firewall = append([]config.Firewall(nil), p.Firewall...)
-		}
 		e.peers[p.Pub] = st
 	}
 }
@@ -285,26 +282,4 @@ func (e *Engine) StartLastCamp() error {
 	return e.Start(cfg)
 }
 
-// restoreInterceptsFromCamp re-installs every (spec, peer) pair from
-// camp config. Called near the end of Start, after utun + routes are
-// up and e.peers is hydrated. Entries whose peer is no longer in the
-// camp catalog are logged and skipped; they'll be retried by the
-// next reconcile (currently driven by the frontend — that goes away
-// once the UI reads intercepts straight from camp config).
-func (e *Engine) restoreInterceptsFromCamp() {
-	if e.camp == nil {
-		return
-	}
-	for _, it := range e.camp.Intercepts {
-		if it.Spec == "" || it.Peer == "" {
-			continue
-		}
-		if !e.hasPeerNameLocked(it.Peer) {
-			log.Printf("config: intercept %q via %s skipped (peer not in catalog)", it.Spec, it.Peer)
-			continue
-		}
-		if _, err := e.addInterceptLocked(it.Spec, it.Peer); err != nil {
-			log.Printf("config: restore intercept %q via %s: %v", it.Spec, it.Peer, err)
-		}
-	}
-}
+// Intercept restoration moved to services/tunnel.

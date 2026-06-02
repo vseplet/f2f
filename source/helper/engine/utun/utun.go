@@ -1,7 +1,7 @@
 // Package tunnel owns the lifecycle of one virtual TUN interface.
 // Closing a Tunnel removes the interface; the kernel then drops every
 // route that pointed at it, so cleanup of stray state is automatic.
-package tunnel
+package utun
 
 import (
 	"fmt"

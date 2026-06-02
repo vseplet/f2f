@@ -3,14 +3,14 @@
 // the poll loop that mirrors peer catalogs, and the TCP health check
 // that flags our own services up/down.
 //
-// Layering:
+// Layering (all in this package):
 //
-//   - helper/engine/dns: the DNS protocol server (Open/Close, Resolver
-//     interface, UDP listener). OS-agnostic; pure protocol.
+//   - server.go: the DNS protocol server (Open/Close, Resolver
+//     interface, UDP listener). Pure protocol, no app state.
 //   - helper/platform: InstallZoneResolver, RemoveZoneResolver,
-//     FlushDNSCache — the macOS / Linux specifics for routing system
+//     FlushDNSCache — macOS / Linux specifics for routing system
 //     queries to our DNS port.
-//   - this package: lifecycle (Start/Stop), Resolver implementation
+//   - this file: lifecycle (Start/Stop), Resolver implementation
 //     (LookupHost over our and peers' published names), CRUD on
 //     MyDomains, peer-domain poll, TCP health check.
 //
@@ -36,7 +36,6 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
-	internaldns "github.com/vseplet/f2f/source/helper/engine/dns"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -74,8 +73,8 @@ type healthSnapshot struct {
 // (populated by PollPeers, persisted via store on every change).
 //
 // Constructed once in main.go; Start/Stop are driven by engine
-// lifecycle hooks. Implements internaldns.Resolver — passed to
-// internaldns.Open at Start.
+// lifecycle hooks. Implements Resolver — passed to
+// Open at Start.
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine
@@ -93,7 +92,7 @@ type Service struct {
 	peerDoms   map[string][]Entry // pub → entries
 
 	srvMu  sync.Mutex
-	srv    *internaldns.Server
+	srv    *Server
 	zone   string
 	campID string
 }
@@ -126,7 +125,7 @@ func (s *Service) Start(campID, zone string) error {
 	if err := s.seedFromStore(); err != nil {
 		return err
 	}
-	srv, err := internaldns.Open("127.0.0.1:0", zone, s)
+	srv, err := Open("127.0.0.1:0", zone, s)
 	if err != nil {
 		return err
 	}
@@ -212,11 +211,11 @@ func (s *Service) Addr() string {
 
 // Stats returns a snapshot of the DNS server's request counters.
 // Zero value when not running.
-func (s *Service) Stats() internaldns.Stats {
+func (s *Service) Stats() Stats {
 	s.srvMu.Lock()
 	defer s.srvMu.Unlock()
 	if s.srv == nil {
-		return internaldns.Stats{}
+		return Stats{}
 	}
 	return s.srv.Stats()
 }
@@ -341,7 +340,7 @@ func (s *Service) RemovePeerDomain(peerName, domainName string) error {
 	return nil
 }
 
-// LookupHost implements internaldns.Resolver. Resolves a label under
+// LookupHost implements Resolver. Resolves a label under
 // our camp's f2f zone to a v4 address:
 //
 //   - Our own published names → V4=127.0.0.1 (loopback; we host the
@@ -353,16 +352,16 @@ func (s *Service) RemovePeerDomain(peerName, domainName string) error {
 // Names are skipped for offline peers — handing out an address for a
 // peer we can't currently reach would just make apps stall. The set
 // of "online" peers comes from the engine via OnlinePeersWithDomains.
-func (s *Service) LookupHost(label string) (internaldns.Host, bool) {
+func (s *Service) LookupHost(label string) (Host, bool) {
 	mine := s.MyDomains()
 	for _, d := range mine {
 		if !IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
-			return internaldns.Host{V4: "127.0.0.1"}, true
+			return Host{V4: "127.0.0.1"}, true
 		}
 	}
 	for _, d := range mine {
 		if IsWildcardLabel(d.Name) && MatchesWildcard(d.Name, label) {
-			return internaldns.Host{V4: "127.0.0.1"}, true
+			return Host{V4: "127.0.0.1"}, true
 		}
 	}
 	online := s.eng.OnlinePeersForCAPoll() // re-used: same shape (Name/Host) + Pub via overlay
@@ -374,14 +373,14 @@ func (s *Service) LookupHost(label string) (internaldns.Host, bool) {
 	if host, ok := s.matchPeers(online, label, true); ok {
 		return host, ok
 	}
-	return internaldns.Host{}, false
+	return Host{}, false
 }
 
 // matchPeers walks the online peer list, looks up each peer's
 // in-memory domain mirror by Pub, and returns the first matching v4.
 // wildcard selects which entries to consider (non-wildcards pass 1,
 // wildcards pass 2 — exact match wins over wildcard).
-func (s *Service) matchPeers(online []engine.OnlinePeerHTTPInfo, label string, wildcard bool) (internaldns.Host, bool) {
+func (s *Service) matchPeers(online []engine.OnlinePeerHTTPInfo, label string, wildcard bool) (Host, bool) {
 	for _, p := range online {
 		if p.Pub == "" {
 			continue
@@ -397,10 +396,10 @@ func (s *Service) matchPeers(online []engine.OnlinePeerHTTPInfo, label string, w
 			if wildcard && !MatchesWildcard(d.Name, label) {
 				continue
 			}
-			return internaldns.Host{V4: p.Host}, true
+			return Host{V4: p.Host}, true
 		}
 	}
-	return internaldns.Host{}, false
+	return Host{}, false
 }
 
 // HealthCheck blocks until ctx is done, TCP-dialing each published

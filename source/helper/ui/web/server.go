@@ -27,12 +27,14 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
-	"github.com/vseplet/f2f/source/helper/engine/overlay"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
+	"github.com/vseplet/f2f/source/helper/services/calls"
 	"github.com/vseplet/f2f/source/helper/services/dns"
+	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/trust"
+	"github.com/vseplet/f2f/source/helper/services/pki"
+	"github.com/vseplet/f2f/source/helper/services/tunnel"
 )
 
 //go:embed assets
@@ -47,7 +49,10 @@ var assetsFS embed.FS
 type Server struct {
 	engine   *engine.Engine
 	firewall *firewall.Service
-	trust    *trust.Service
+	pki      *pki.Service
+	drop     *drop.Service
+	calls    *calls.Service
+	tunnel   *tunnel.Service
 	dns      *dns.Service
 	addr     string
 	srv      *http.Server
@@ -61,12 +66,15 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, fwSvc *firewall.Service, trustSvc *trust.Service, dnsSvc *dns.Service, addr string) *Server {
+func New(eng *engine.Engine, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		firewall:    fwSvc,
-		trust:       trustSvc,
+		pki:         pkiSvc,
 		dns:         dnsSvc,
+		drop:        dropSvc,
+		calls:       callsSvc,
+		tunnel:      tunnelSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -74,7 +82,7 @@ func New(eng *engine.Engine, fwSvc *firewall.Service, trustSvc *trust.Service, d
 			Timeout: 5 * time.Second,
 		},
 	}
-	eng.OnLocalSFUSignal = func(msg []byte) {
+	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
 	}
 	return s
@@ -179,7 +187,7 @@ func (s *Server) BindProxies(tunnelIP string) error {
 	for _, a := range httpAddrs {
 		s.startProxyListener(a, nil)
 	}
-	if ca := s.engine.CA(); ca != nil {
+	if ca := s.pki.MyCA(); ca != nil {
 		tlsCfg := &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -500,9 +508,7 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 	var peerIP string
 	for _, p := range st.Peers {
 		if !p.Self && p.Pub != "" && p.Pub == st.ActivePeerPub {
-			if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
-				peerIP = a.String()
-			}
+			peerIP = p.OverlayV4
 		}
 	}
 	if peerIP == "" {
@@ -556,7 +562,7 @@ func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
 				if p.Self || p.Pub == "" {
 					continue
 				}
-				if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a.String() == host && p.Pub != st.ActivePeerPub {
+				if p.OverlayV4 == host && p.Pub != st.ActivePeerPub {
 					_ = s.engine.SetActivePeer(p.Pub)
 					break
 				}
@@ -664,7 +670,7 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		t.Edges = append(t.Edges, topologyEdge{Source: "self", Target: id})
 	}
 
-	for _, it := range st.Intercepts {
+	for _, it := range s.tunnel.List() {
 		id := "intercept:" + it.ID
 		t.Nodes = append(t.Nodes, topologyNode{
 			ID: id, Label: it.Spec, Kind: "intercept",
@@ -683,13 +689,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.statusWithDomains())
 }
 
-// peerStatusView wraps engine.PeerStatusInfo with the per-peer
-// domains slice that engine no longer carries (services/dns owns
-// that catalog). Marshals as the original PeerStatusInfo shape plus
-// a "domains" field, so the UI doesn't need any client changes.
+// peerStatusView wraps engine.PeerStatusInfo with per-peer fields
+// the engine no longer carries — domains (owned by services/dns)
+// and files (owned by services/drop). Marshals as the original
+// PeerStatusInfo shape plus extra fields, so the UI keeps working
+// without changes.
 type peerStatusView struct {
 	engine.PeerStatusInfo
-	Domains []dns.Entry `json:"domains,omitempty"`
+	Domains  []dns.Entry       `json:"domains,omitempty"`
+	Files    []drop.PeerFile   `json:"files,omitempty"`
+	Firewall []config.Firewall `json:"firewall,omitempty"`
 }
 
 // statusView re-serialises engine.Status with peerStatusView in
@@ -697,7 +706,8 @@ type peerStatusView struct {
 // status shape verbatim.
 type statusView struct {
 	engine.Status
-	Peers []peerStatusView `json:"peers"`
+	Peers      []peerStatusView        `json:"peers"`
+	Intercepts []tunnel.InterceptInfo  `json:"intercepts"`
 }
 
 // statusWithDomains assembles the /api/status response by joining
@@ -714,10 +724,16 @@ func (s *Server) statusWithDomains() statusView {
 			v.Domains = mine
 		} else if p.Pub != "" {
 			v.Domains = s.dns.PeerDomains(p.Pub)
+			v.Files = s.drop.PeerFiles(p.Pub)
+			v.Firewall = s.firewall.PeerPorts(p.Pub)
 		}
 		peers = append(peers, v)
 	}
-	return statusView{Status: st, Peers: peers}
+	return statusView{
+		Status:     st,
+		Peers:      peers,
+		Intercepts: s.tunnel.List(),
+	}
 }
 
 // handleCampPeers serves the engine's view of the camp: peer list with
@@ -833,7 +849,7 @@ func (s *Server) handleListDomains(w http.ResponseWriter, r *http.Request) {
 // handleCACert serves the local CA's public cert in PEM form. Polled
 // by peers to install us as a trusted root for HTTPS.
 func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
-	ca := s.engine.CA()
+	ca := s.pki.MyCA()
 	if ca == nil {
 		http.Error(w, "ca not initialized", http.StatusServiceUnavailable)
 		return
@@ -843,7 +859,7 @@ func (s *Server) handleCACert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
-	ca := s.engine.CA()
+	ca := s.pki.MyCA()
 	if ca == nil {
 		writeJSON(w, http.StatusOK, nil)
 		return
@@ -857,7 +873,7 @@ func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
 // handleTrustedPeers returns the UI's view of discovered peer CAs —
 // fingerprint, common name, install state.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.trust.List())
+	writeJSON(w, http.StatusOK, s.pki.ListPeerCAs())
 }
 
 // handleInstallTrustedPeer adds a discovered peer CA to the system
@@ -869,7 +885,7 @@ func (s *Server) handleInstallTrustedPeer(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
 		return
 	}
-	if err := s.trust.Install(fp); err != nil {
+	if err := s.pki.InstallPeerCA(fp); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -902,7 +918,7 @@ func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
 		return
 	}
-	if err := s.trust.Remove(fp); err != nil {
+	if err := s.pki.RemovePeerCA(fp); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -990,7 +1006,7 @@ type fileEntry struct {
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1029,7 +1045,7 @@ func (s *Server) handleAddMyFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1050,7 +1066,7 @@ func (s *Server) handleAddMyFile(w http.ResponseWriter, r *http.Request) {
 // "file" part. Used by the UI's drag-and-drop area so the user doesn't
 // have to type filesystem paths.
 func (s *Server) handleUploadMyFile(w http.ResponseWriter, r *http.Request) {
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1092,7 +1108,7 @@ func (s *Server) handleUploadMyFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveMyFile(w http.ResponseWriter, r *http.Request) {
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1115,7 +1131,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	d, err := s.engine.AddDownload(req.Magnet, req.Peers)
+	d, err := s.drop.AddDownload(req.Magnet, req.Peers)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1126,7 +1142,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1180,7 +1196,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 // Files on disk are kept — anacrolix marks them as no longer managed
 // but doesn't unlink. The engine's pruneLoop catches up later.
 func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
@@ -1194,7 +1210,7 @@ func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
 	// so it doesn't come back on restart. It returns false for unknown
 	// info_hashes — we still 204 to keep DELETE idempotent.
 	_ = t
-	s.engine.RemoveDownload(hash)
+	s.drop.RemoveDownload(hash)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1215,13 +1231,13 @@ func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	t := s.engine.Torrent()
+	t := s.drop.Client()
 	if t == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
 		return
 	}
 	shared, _ := filepath.Abs(t.SharedDir())
-	downloads, _ := filepath.Abs(s.engine.DownloadsDir())
+	downloads, _ := filepath.Abs(s.drop.DownloadsDir())
 	if !strings.HasPrefix(abs, shared+string(filepath.Separator)) &&
 		!strings.HasPrefix(abs, downloads+string(filepath.Separator)) {
 		writeError(w, http.StatusForbidden, fmt.Errorf("path outside f2f-managed dirs"))
@@ -1336,7 +1352,7 @@ func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	info, err := s.engine.AddIntercept(req.Spec, req.Peer)
+	info, err := s.tunnel.Add(req.Spec, req.Peer)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1346,7 +1362,7 @@ func (s *Server) handleAddIntercept(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemoveIntercept(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.engine.RemoveIntercept(id); err != nil {
+	if err := s.tunnel.Remove(id); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -1427,7 +1443,7 @@ func writeError(w http.ResponseWriter, code int, err error) {
 // --- Group call (SFU) handlers ---
 
 func (s *Server) handleCallState(w http.ResponseWriter, r *http.Request) {
-	st := s.engine.CallState()
+	st := s.calls.LocalCall()
 	if st == nil {
 		writeJSON(w, http.StatusOK, nil)
 		return
@@ -1436,11 +1452,11 @@ func (s *Server) handleCallState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCallList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.AllCalls())
+	writeJSON(w, http.StatusOK, s.calls.AllCalls())
 }
 
 func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.engine.CreateCall()
+	cs, err := s.calls.Create()
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
@@ -1470,17 +1486,17 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 		// Can't host and join simultaneously — end any local call first.
 		// Otherwise our browser receives SFU signals from both our local
 		// SFU and the remote one, corrupting the single PeerConnection.
-		s.engine.EndCall()
-		s.engine.SetJoinedSFUHost(req.SFUHost)
+		s.calls.End()
+		s.calls.SetJoinedSFUHost(req.SFUHost)
 		s.proxyCallJoinToHost(w, req.SFUHost, req.Name)
 		return
 	}
 
-	if err := s.engine.JoinCall(req.TunnelIP, req.Name); err != nil {
+	if err := s.calls.Join(req.TunnelIP, req.Name); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.engine.CallState())
+	writeJSON(w, http.StatusOK, s.calls.LocalCall())
 }
 
 func (s *Server) proxyCallJoinToHost(w http.ResponseWriter, sfuHost, name string) {
@@ -1523,20 +1539,20 @@ func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("cannot determine caller IP"))
 		return
 	}
-	if err := s.engine.JoinCall(host, req.Name); err != nil {
+	if err := s.calls.Join(host, req.Name); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.engine.CallState())
+	writeJSON(w, http.StatusOK, s.calls.LocalCall())
 }
 
 func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
-	sfuHost := s.engine.JoinedSFUHost()
+	sfuHost := s.calls.JoinedSFUHost()
 
 	// If we joined a remote SFU, proxy leave to the host.
 	if sfuHost != "" && sfuHost != st.LocalIP {
-		s.engine.ClearJoinedSFUHost()
+		s.calls.ClearJoinedSFUHost()
 		_, port, _ := net.SplitHostPort(s.addr)
 		if port == "" {
 			port = "2202"
@@ -1551,7 +1567,7 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.engine.LeaveCall(st.LocalIP)
+	s.calls.Leave(st.LocalIP)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1559,7 +1575,7 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCallLeaveRemote(w http.ResponseWriter, r *http.Request) {
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if host != "" {
-		s.engine.LeaveCall(host)
+		s.calls.Leave(host)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1585,7 +1601,7 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 	// proxy the request there.
 	if isLocal {
 		st := s.engine.Status()
-		sfuHost := s.engine.JoinedSFUHost()
+		sfuHost := s.calls.JoinedSFUHost()
 		if sfuHost != "" && sfuHost != st.LocalIP {
 			s.proxyCallSignalToHost(w, sfuHost, body)
 			return
@@ -1593,7 +1609,7 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 		from = st.LocalIP
 	}
 
-	resp, err := s.engine.HandleCallSignal(from, body)
+	resp, err := s.calls.HandleSignal(from, body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1666,8 +1682,8 @@ func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request)
 		from = host
 	}
 
-	if s.engine.CallSFU() != nil {
-		resp, err := s.engine.HandleCallSignal(from, body)
+	if s.calls.SFU() != nil {
+		resp, err := s.calls.HandleSignal(from, body)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return

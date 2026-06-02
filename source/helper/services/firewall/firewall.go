@@ -20,12 +20,18 @@
 package firewall
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/engine"
 )
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
@@ -77,15 +83,112 @@ func BuiltinLabel(port int, proto string) string {
 // tunnelIP, campID) so the service is camp-independent until then.
 type Service struct {
 	store *config.Store
+	eng   *engine.Engine // for OnlinePeersForCAPoll + TunnelHTTPPort
 
 	mu     sync.Mutex
 	anchor *anchor
 	campID string
+
+	// peerPorts is the in-memory mirror of peer-published firewall
+	// allow lists (polled from each peer's /api/firewall). Keyed by
+	// pub. Surfaced in /api/status via web statusView so the UI's
+	// peer row shows their open ports.
+	peerMu    sync.RWMutex
+	peerPorts map[string][]config.Firewall
 }
 
-// New constructs a Service. The store must outlive the service.
-func New(store *config.Store) *Service {
-	return &Service{store: store}
+// New constructs a Service. The store and engine must outlive it.
+func New(store *config.Store, eng *engine.Engine) *Service {
+	return &Service{
+		store:     store,
+		eng:       eng,
+		peerPorts: map[string][]config.Firewall{},
+	}
+}
+
+// PeerPorts returns a copy of one peer's most recently-polled
+// allow list. Empty until the first successful poll.
+func (s *Service) PeerPorts(pub string) []config.Firewall {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	list, ok := s.peerPorts[pub]
+	if !ok {
+		return nil
+	}
+	out := make([]config.Firewall, len(list))
+	copy(out, list)
+	return out
+}
+
+// PollPeers blocks until ctx is done, polling each online peer's
+// /api/firewall every 30s (first run delayed 9s — small jitter
+// against other peer polls). Cached in peerPorts and mirrored into
+// camp config so the catalog survives engine restart.
+func (s *Service) PollPeers(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(9 * time.Second):
+	}
+	s.pollOnce(ctx)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.pollOnce(ctx)
+	}
+}
+
+func (s *Service) pollOnce(ctx context.Context) {
+	port := s.eng.TunnelHTTPPort()
+	if port == "" {
+		return
+	}
+	targets := s.eng.OnlinePeersForCAPoll()
+	if len(targets) == 0 {
+		return
+	}
+	s.mu.Lock()
+	campID := s.campID
+	s.mu.Unlock()
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, t := range targets {
+		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/firewall"
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		var body struct {
+			User []config.Firewall `json:"user"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		s.peerMu.Lock()
+		s.peerPorts[t.Pub] = body.User
+		s.peerMu.Unlock()
+		if campID == "" || t.Pub == "" {
+			continue
+		}
+		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
+			for i := range c.PeerCatalog {
+				if c.PeerCatalog[i].Pub == t.Pub {
+					c.PeerCatalog[i].Firewall = append([]config.Firewall(nil), body.User...)
+					return
+				}
+			}
+		})
+	}
 }
 
 // Start installs the pf anchor on iface scoped to tunnelIP with the

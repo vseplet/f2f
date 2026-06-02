@@ -1,11 +1,15 @@
-// Package ca generates and manages a per-camp local Certificate
-// Authority. The CA is name-constrained to the camp's <camp_id>.f2f
-// zone via the RFC 5280 NameConstraints extension, so even if the CA
-// is added to a peer's trust store it can only sign certs under that
-// zone — never bank.com, never another camp's zone.
+// ca_core.go owns the CA cryptographic primitives — Generate/Load/
+// Save/Sign — and the leaf-cert cache. The CA is name-constrained to
+// the camp's <camp_id>.f2f zone via the RFC 5280 NameConstraints
+// extension, so even if added to a peer's trust store it can only
+// sign certs under that zone — never bank.com, never another camp's
+// zone.
 //
-// Leaf certs are issued on demand for SNI names and cached in memory.
-package ca
+// Lifecycle (load-or-generate-on-Start, install in system trust,
+// peer-CA discovery) lives in pki.go alongside the rest of the
+// service surface.
+
+package pki
 
 import (
 	"crypto/ecdsa"
@@ -54,7 +58,7 @@ type CA struct {
 // human-friendly camp label — pass identity.CampLabel(camp_id) so the
 // full pub-prefixed camp_id doesn't blow past the DNS-label 63-byte
 // limit.
-func Generate(zone string) (*CA, error) {
+func GenerateCA(zone string) (*CA, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("ca: keygen: %w", err)
@@ -175,11 +179,11 @@ func (ca *CA) Save(dir string) error {
 
 // CertPath returns the on-disk path of the cert as written by Save —
 // useful for passing to keychain helpers that take a path argument.
-func CertPath(dir string) string { return filepath.Join(dir, "ca.crt") }
+func CACertPath(dir string) string { return filepath.Join(dir, "ca.crt") }
 
 // Load reads ca.crt/ca.key from dir. Returns (nil, nil) if files
 // don't exist (engine treats that as "generate fresh").
-func Load(dir string) (*CA, error) {
+func LoadCA(dir string) (*CA, error) {
 	certPEM, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
 	if os.IsNotExist(err) {
 		return nil, nil

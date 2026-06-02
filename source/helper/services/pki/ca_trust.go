@@ -1,4 +1,4 @@
-package ca
+package pki
 
 import "github.com/vseplet/f2f/source/helper/platform"
 

@@ -7,46 +7,39 @@ package engine
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/netip"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/ca"
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine/egress"
 	"github.com/vseplet/f2f/source/helper/engine/awg"
 	"github.com/vseplet/f2f/source/helper/engine/obfenv"
+	
+	
 	"github.com/vseplet/f2f/source/helper/engine/pair"
-	"github.com/vseplet/f2f/source/helper/identity"
-	internaltorrent "github.com/vseplet/f2f/source/helper/torrent"
-	"github.com/vseplet/f2f/source/helper/engine/overlay"
-	"github.com/vseplet/f2f/source/helper/engine/packet"
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
 	"github.com/vseplet/f2f/source/helper/engine/route"
-	"github.com/vseplet/f2f/source/helper/engine/tunnel"
+	"github.com/vseplet/f2f/source/helper/engine/utun"
+	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // tunnelSubnetCIDR is the CGNAT /10 the overlay carves per-peer
 // landing pads out of. Each mac picks its own alias in here
-// deterministically from its pub (see overlay.PubToV4Addr). Hardcoded
+// deterministically from its pub (see PubToV4Addr). Hardcoded
 // — camp's
 // hub uses the same prefix when allocating tunnel_ips.
-const tunnelSubnetCIDR = overlay.V4Subnet
+const tunnelSubnetCIDR = V4Subnet
 
 // packetLogEnabled gates per-packet tunnel logging (the [utun]/[udp]
 // per-packet lines). Off by default — these flood the log and bury
@@ -84,12 +77,11 @@ type CampConfig struct {
 
 // Config is the input to Start.
 type Config struct {
-	LocalIP      string      // utun local point-to-point address
-	PeerIP       string      // utun remote point-to-point address (static mode only)
-	Listen       string      // UDP listen address (":9000"), empty = no peer mode
-	Peer         string      // UDP peer address ("host:9000"); ignored when Camp is set
-	EgressIface  string      // physical interface for NAT; empty = auto-detect default route
-	Camp         *CampConfig // optional: use a rendezvous server instead of static Peer
+	LocalIP     string      // utun local point-to-point address
+	PeerIP      string      // utun remote point-to-point address (static mode only)
+	Listen      string      // UDP listen address (":9000"), empty = no peer mode
+	Peer        string      // UDP peer address ("host:9000"); ignored when Camp is set
+	Camp        *CampConfig // optional: use a rendezvous server instead of static Peer
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
@@ -98,11 +90,9 @@ type Status struct {
 	Running      bool   `json:"running"`
 	UtunName     string `json:"utun_name,omitempty"`
 	LocalIP      string `json:"local_ip,omitempty"`
-	PeerIP       string `json:"peer_ip,omitempty"`         // active peer's tunnel_ip (camp mode) or static peer (legacy)
+	PeerIP       string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
 	ListenAddr   string `json:"listen_addr,omitempty"`
-	PeerAddr     string `json:"peer_addr,omitempty"`       // active peer's UDP endpoint
-	EgressActive bool   `json:"egress_active"`
-	EgressIface  string `json:"egress_iface,omitempty"`
+	PeerAddr     string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
 	CampActive   bool   `json:"camp_active"`
 	CampURL      string `json:"camp_url,omitempty"`
 	CampName     string `json:"camp_name,omitempty"`
@@ -121,14 +111,13 @@ type Status struct {
 	IdentityFP  string `json:"identity_fp,omitempty"`
 	// ActivePeerPub is the user-selected peer the tunnel routes
 	// catch-all traffic through. Empty when no one has been selected.
-	ActivePeerPub string `json:"active_peer_pub,omitempty"`
-	Peers              []PeerStatusInfo   `json:"peers"`
-	Intercepts         []InterceptInfo    `json:"intercepts"`
-	StartedAt          time.Time          `json:"started_at,omitempty"`
-	TxBytes            uint64             `json:"tx_bytes"`
-	RxBytes            uint64             `json:"rx_bytes"`
-	TxPackets          uint64             `json:"tx_packets"`
-	RxPackets          uint64             `json:"rx_packets"`
+	ActivePeerPub string           `json:"active_peer_pub,omitempty"`
+	Peers         []PeerStatusInfo `json:"peers"`
+	StartedAt     time.Time        `json:"started_at,omitempty"`
+	TxBytes       uint64           `json:"tx_bytes"`
+	RxBytes       uint64           `json:"rx_bytes"`
+	TxPackets     uint64           `json:"tx_packets"`
+	RxPackets     uint64           `json:"rx_packets"`
 	// CampHealth surfaces UDP + HTTP liveness with the camp server,
 	// used by the UI's camp-health section. Nil when camp mode is off.
 	CampHealth *CampHealth `json:"camp_health,omitempty"`
@@ -178,24 +167,20 @@ type PeerStatusInfo struct {
 	// Pub is the peer's Ed25519 pubkey in hex (64 chars). Empty for
 	// peers that haven't announced one yet. Stable identity across
 	// nickname changes — UI shows a fingerprint derived from it.
-	Pub         string        `json:"pub,omitempty"`
+	Pub string `json:"pub,omitempty"`
 	// Fp is the short SHA-256 fingerprint (16 hex chars) of Pub —
 	// what the UI shows. Computed server-side so the browser doesn't
 	// have to do crypto. Empty when Pub is empty.
-	Fp          string        `json:"fp,omitempty"`
-	PublicIP    string        `json:"public_ip,omitempty"`
-	UDPPort     int           `json:"udp_port,omitempty"`
-	UDPEndpoint string        `json:"udp_endpoint,omitempty"`
-	JoinedAt    int64         `json:"joined_at,omitempty"`
-	LastSeenMs  int64         `json:"last_seen_ms,omitempty"` // ms since last packet; 0 = never
-	Online      bool          `json:"online"`                 // camp-side: announced recently
-	Reachable   bool          `json:"reachable"`              // local: receiving UDP from this peer
-	Active      bool          `json:"active"`
-	Self        bool          `json:"self,omitempty"`
-	Files       []PeerFile    `json:"files,omitempty"`
-	// Firewall lists the peer's user-published open ports (without
-	// built-ins). Polled from their tunnel-side /api/firewall.
-	Firewall []config.Firewall `json:"firewall,omitempty"`
+	Fp          string `json:"fp,omitempty"`
+	PublicIP    string `json:"public_ip,omitempty"`
+	UDPPort     int    `json:"udp_port,omitempty"`
+	UDPEndpoint string `json:"udp_endpoint,omitempty"`
+	JoinedAt    int64  `json:"joined_at,omitempty"`
+	LastSeenMs  int64  `json:"last_seen_ms,omitempty"` // ms since last packet; 0 = never
+	Online      bool   `json:"online"`                 // camp-side: announced recently
+	Reachable   bool   `json:"reachable"`              // local: receiving UDP from this peer
+	Active      bool   `json:"active"`
+	Self        bool   `json:"self,omitempty"`
 	// InCamp = camp server confirms peer is alive in its roster
 	// (sent announce within ~60s). This is independent of whether
 	// we can reach the peer ourselves — the Online flag above is the
@@ -221,17 +206,6 @@ type PeerStatusInfo struct {
 	// Present for any peer whose Pub is known; empty for legacy peers
 	// announced without a pub. Used for BT peer addresses and display.
 	OverlayV4 string `json:"overlay_v4,omitempty"`
-}
-
-// InterceptInfo describes one intercept entry, what host routes it owns,
-// and which peer its traffic is routed through. Peer is the peer's name
-// in the camp; route lookups translate it to the current UDPAddr at
-// send time.
-type InterceptInfo struct {
-	ID       string   `json:"id"`
-	Spec     string   `json:"spec"`
-	Peer     string   `json:"peer"`
-	Prefixes []string `json:"prefixes"`
 }
 
 // peerState is our per-peer view: identity from camp + when we last
@@ -262,12 +236,10 @@ type peerState struct {
 	// "online" semantic for that lives in IsOnline() below.
 	InCamp     bool
 	LastSeenAt int64
-	Files      []PeerFile        // populated by filesPollLoop
-	Firewall   []config.Firewall // populated by peerFirewallPollLoop
 
-	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
-	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
-	LastPingMs   atomic.Int64 // epoch ms of last punch/keepalive we sent
+	UDPAddr    *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
+	LastSeenMs atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
+	LastPingMs atomic.Int64 // epoch ms of last punch/keepalive we sent
 
 	// WGPub is the peer's X25519 transport pubkey, learned from a verified
 	// hello-handshake (engine/hello). Empty until first valid hello arrives
@@ -367,12 +339,9 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun      *tunnel.Tunnel
+	tun      *utun.Tunnel
 	udp      *net.UDPConn
 	routes   *route.Manager
-	egr      *egress.Egress
-	ca       *ca.CA                  // local CA for the current camp_id
-	torrent  *internaltorrent.Client // BT client for camp file sharing
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
 	poller   *rendezvous.PeerListPoller // periodic HTTP peer-list poll
 	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
@@ -414,8 +383,10 @@ type Engine struct {
 	staticPeer       atomic.Pointer[net.UDPAddr]
 	lastStaticPingMs atomic.Int64
 
-	intercepts map[string]*InterceptInfo
-	nextItemID uint64
+	// awgAllowedHook lets services/tunnel inject extra allowed_ips
+	// (intercept prefixes) into AWG peer sync without engine owning
+	// the intercept catalog. nil disables the feature.
+	awgAllowedHook func(peerName string) []string
 
 	// tunnelHTTPPort is the port other peers expose their /api/domains
 	// on (= our UI bind port, since both sides run f2f-mac). Wired by
@@ -436,19 +407,6 @@ type Engine struct {
 	txPackets, rxPackets atomic.Uint64
 
 	tap *logTap
-
-	// call holds the active group call state (SFU + participants).
-	// nil when no call is in progress.
-	call atomic.Value // *callCtx
-	// remoteCalls holds calls discovered on remote peers via polling.
-	remoteCalls atomic.Value // *[]CallState
-	// joinedSFUHost is the tunnel IP of the remote SFU we joined.
-	// Empty when not in a remote call.
-	joinedSFUHost atomic.Value // *string
-
-	// OnLocalSFUSignal, when set, delivers SFU signals destined for the
-	// local browser directly (bypassing HTTP to tunnel IP).
-	OnLocalSFUSignal func(msg []byte)
 
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
@@ -474,15 +432,6 @@ type Engine struct {
 	identity *identity.Identity
 }
 
-// PeerFile is one file entry from a peer's /api/files response,
-// rehydrated into our shape (Path stripped — peer-facing data only).
-type PeerFile struct {
-	Name     string `json:"name"`
-	Size     int64  `json:"size"`
-	InfoHash string `json:"info_hash"`
-	Magnet   string `json:"magnet"`
-}
-
 // New returns a fresh Engine with the given config Store. The Store
 // is shared with services that need to persist their own slices of
 // camp config (firewall rules, trusted peers, MyDomains, ...).
@@ -490,10 +439,9 @@ type PeerFile struct {
 // keeps the engine from being the sole gatekeeper of disk state.
 func New(store *config.Store) *Engine {
 	return &Engine{
-		store:      store,
-		intercepts: map[string]*InterceptInfo{},
-		peers:      map[string]*peerState{},
-		tap:        newLogTap(),
+		store: store,
+		peers: map[string]*peerState{},
+		tap:   newLogTap(),
 	}
 }
 
@@ -601,26 +549,9 @@ func (e *Engine) Start(cfg Config) error {
 		log.Printf("pair: control envelope ready for camp %s", cfg.Camp.ID)
 	}
 
-	// Egress goes first so its rollback runs last on the way down.
-	// Empty EgressIface means: auto-pick the default route's interface.
-	// We always run egress in camp mode — the tunnel is useless without
-	// a path to the internet.
-	if cfg.EgressIface == "" {
-		if iface, err := platform.DefaultEgressInterface(); err != nil {
-			log.Printf("egress: %v; skipping NAT (peers won't reach internet through this node)", err)
-		} else {
-			cfg.EgressIface = iface
-		}
-	}
-	if cfg.EgressIface != "" {
-		subnet := netip.MustParsePrefix(tunnelSubnetCIDR)
-		egr, err := egress.Open(cfg.EgressIface, subnet)
-		if err != nil {
-			return fmt.Errorf("egress setup: %w", err)
-		}
-		e.egr = egr
-		log.Printf("egress: NAT %s → %s, ip-forwarding=1", subnet, cfg.EgressIface)
-	}
+	// Egress NAT (route the overlay subnet out through the host's
+	// default route) lives in services/tunnel now — main.go drives
+	// it off eng.OnStarted.
 
 	// UDP socket.
 	if cfg.Listen != "" {
@@ -691,7 +622,7 @@ func (e *Engine) Start(cfg Config) error {
 		// land on the egress peer's own utun (would happen with a
 		// shared address). Camp-assigned tunnel_ip is ignored.
 		if e.identity != nil {
-			a, derr := overlay.PubToV4Addr(e.identity.PubHex())
+			a, derr := PubToV4Addr(e.identity.PubHex())
 			if derr != nil {
 				e.rollbackPartial()
 				return fmt.Errorf("derive v4 alias: %w", derr)
@@ -703,23 +634,23 @@ func (e *Engine) Start(cfg Config) error {
 
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
 	// overlay; static mode keeps the legacy point-to-point form.
-	var tun *tunnel.Tunnel
+	var tun *utun.Tunnel
 	if cfg.Camp != nil {
-		t, err := tunnel.OpenSubnet(localIP, 10)
+		t, err := utun.OpenSubnet(localIP, 10)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("open tunnel: %w", err)
 		}
 		tun = t
-		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, tunnel.MTU)
+		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, utun.MTU)
 	} else {
-		t, err := tunnel.Open(localIP, peerIP)
+		t, err := utun.Open(localIP, peerIP)
 		if err != nil {
 			e.rollbackPartial()
 			return fmt.Errorf("open tunnel: %w", err)
 		}
 		tun = t
-		log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, tunnel.MTU)
+		log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, utun.MTU)
 	}
 	e.tun = tun
 	// Reflect the actual addresses we ended up using back into the
@@ -789,10 +720,10 @@ func (e *Engine) Start(cfg Config) error {
 	e.started = time.Now()
 	e.running = true
 
-	// Intercepts can be installed now that running=true (addInterceptLocked
-	// guards on it). Failures are logged inside the helper.
+	// Intercepts (routing user-specified prefixes through specific
+	// peers) and their periodic DNS-spec refresh live in
+	// services/tunnel — main.go starts it off eng.OnStarted.
 	if e.camp != nil {
-		e.restoreInterceptsFromCamp()
 		e.upsertKnownCamp(e.camp.CampID, e.camp.Identity.Name)
 	}
 
@@ -808,8 +739,6 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.peerToTunLoop(ctx)
 	}
-	e.workers.Add(1)
-	go e.domainRefreshLoop(ctx)
 	if e.announce != nil {
 		// Periodic announce keeps both camp's last_seen fresh and the
 		// camp-facing NAT mapping alive (matters under symmetric NAT).
@@ -835,49 +764,13 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
 	}
-	if e.cfg.Camp != nil {
-		// Domain catalog poll + service health-check live in services/dns now.
-		e.workers.Add(1)
-		go e.filesPollLoop(ctx)
-		e.workers.Add(1)
-		go e.peerFirewallPollLoop(ctx)
-		e.workers.Add(1)
-		go e.callPollLoop(ctx)
-	}
-	// Local DNS resolver, MyDomains catalog, peer-domain poll, and
-	// service-health check are owned by services/dns now — main.go
-	// drives the lifecycle off eng.OnStarted/OnStopped.
-	// Local CA for HTTPS termination. Persisted under /var/lib/f2f/ca
-	// so it survives restarts. Regenerated whenever camp_id changes
-	// (NameConstraints in the cert pin it to one zone). Failures here
-	// are non-fatal — HTTPS just won't work, HTTP still does.
-	if e.cfg.Camp != nil {
-		if err := e.ensureCA(); err != nil {
-			log.Printf("ca: %v (https disabled)", err)
-		}
-		// Peer-CA discovery + keychain install was moved to
-		// services/trust — main.go owns the lifecycle, hooked off
-		// OnStarted/OnStopped so the per-camp on-disk cache is
-		// reloaded on every Start.
-	}
-	// BitTorrent client for camp file sharing. Binds on <tunnel_ip>:6881
-	// — only reachable through utun, never the public internet.
-	// Start in a goroutine: anacrolix's NewClient can take a non-trivial
-	// moment, and we don't want engine.Start to block on it (would
-	// freeze the UI in "loading…").
-	if e.cfg.Camp != nil {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("torrent: PANIC during startup: %v (file sharing disabled)", r)
-				}
-			}()
-			log.Printf("torrent: initialising client …")
-			if err := e.startTorrent(); err != nil {
-				log.Printf("torrent: %v (file sharing disabled)", err)
-			}
-		}()
-	}
+	// Peer firewall poll lives in services/firewall.
+	// Domain catalog + DNS server live in services/dns.
+	// Local CA + peer-CA discovery / install live in services/pki.
+	// BitTorrent client + peer-file poll live in services/drop.
+	// Group calls + SFU + remote-call poll live in services/calls.
+	// main.go drives their lifecycles off eng.OnStarted/OnStopped.
+
 	// Drop e.mu before invoking the OnStarted callback — handlers
 	// commonly call back into the engine (Status, CampFirewall,
 	// TrustedPeersDir, ...) which all acquire e.mu, and holding it
@@ -891,495 +784,6 @@ func (e *Engine) Start(cfg Config) error {
 		e.mu.Lock()
 	}
 	return nil
-}
-
-// caDir is where ca.crt/ca.key are persisted.
-const caDir = "/var/lib/f2f/ca"
-
-// ensureCA loads the on-disk CA, regenerates it if missing or pinned to
-// a different camp_id, and installs the cert into the system trust store.
-// Idempotent: safe to call repeatedly on Start.
-func (e *Engine) ensureCA() error {
-	loaded, err := ca.Load(caDir)
-	if err != nil {
-		log.Printf("ca: load: %v (will regenerate)", err)
-		loaded = nil
-	}
-	if loaded != nil && !loaded.MatchesZone(identity.CampLabel(e.cfg.Camp.ID)) {
-		log.Printf("ca: existing CA pinned to a different camp_id; rotating")
-		_ = loaded.RemoveSystemTrust()
-		loaded = nil
-	}
-	if loaded == nil {
-		fresh, err := ca.Generate(identity.CampLabel(e.cfg.Camp.ID))
-		if err != nil {
-			return fmt.Errorf("generate: %w", err)
-		}
-		if err := fresh.Save(caDir); err != nil {
-			return fmt.Errorf("save: %w", err)
-		}
-		log.Printf("ca: generated %s (fp %s)", fresh.CommonName(), fresh.Fingerprint())
-		loaded = fresh
-	} else {
-		log.Printf("ca: loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
-	}
-	if loaded.IsSystemTrusted() {
-		log.Printf("ca: already in system trust store (fp %s) — skipping install", loaded.Fingerprint())
-	} else if err := loaded.EnsureSystemTrust(ca.CertPath(caDir)); err != nil {
-		log.Printf("ca: install in system trust store: %v (https will show warnings)", err)
-	} else {
-		log.Printf("ca: installed in system trust store (fp %s)", loaded.Fingerprint())
-	}
-	e.ca = loaded
-	return nil
-}
-
-// CA returns the local certificate authority for issuing leaf certs
-// on demand. nil if engine is not running in camp mode or CA setup
-// failed.
-func (e *Engine) CA() *ca.CA {
-	return e.ca
-}
-
-// torrentSharedDir / torrentDownloadsDir are the on-disk locations the
-// BT client uses. Both are per-camp: a torrent only makes sense in the
-// camp it was added to (peer tunnel_ips are camp-local), and mixing
-// state across camps causes stale-peer dial loops after switching.
-//
-// shared lives under the platform's app-support dir (under camp_id, so
-// new-format ids with a 64-hex prefix get full isolation). downloads
-// goes to a user-visible ~/Downloads/f2f-drops/<short> so people can
-// open it from their file manager without staring at hex.
-func (e *Engine) torrentSharedDir() string {
-	home := userHome()
-	return filepath.Join(platform.AppSupportDir(home), "f2f", e.campStateDirSegment(), "shared")
-}
-
-func (e *Engine) torrentDownloadsDir() string {
-	home := userHome()
-	return filepath.Join(home, "Downloads", "f2f-drops", e.campUserVisibleSegment())
-}
-
-// campStateDirSegment returns the camp_id used as a directory segment
-// for internal state. Empty (legacy --peer mode) falls back to "_root"
-// so we never write to the bare app-support root.
-func (e *Engine) campStateDirSegment() string {
-	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
-		return "_root"
-	}
-	return e.cfg.Camp.ID
-}
-
-// campUserVisibleSegment returns a human-friendly directory segment
-// for user-visible paths (~/Downloads/f2f-drops/...). For new-format
-// camp_ids "<64hex>_<label>" we return "<label>_<8hex>" — readable, but
-// disambiguated when two camps share a label. Legacy ids are used
-// as-is.
-func (e *Engine) campUserVisibleSegment() string {
-	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
-		return "_root"
-	}
-	id := e.cfg.Camp.ID
-	label := identity.CampLabel(id)
-	if label == id {
-		return label // legacy free-form id
-	}
-	return label + "_" + id[:8]
-}
-
-// userHome returns the home of the invoking (non-root) user. Engine
-// runs as root via sudo, but files should be owned/visible to the
-// user. Resolves via SUDO_USER through the OS user database so the
-// real path comes out (/Users/<name> on macOS, /home/<name> on
-// linux).
-func userHome() string {
-	if su := os.Getenv("SUDO_USER"); su != "" {
-		if u, err := user.Lookup(su); err == nil && u.HomeDir != "" {
-			return u.HomeDir
-		}
-	}
-	if h := os.Getenv("HOME"); h != "" {
-		return h
-	}
-	return "/tmp"
-}
-
-// chownToUser switches ownership of the path (recursively if it's a
-// directory) to SUDO_USER. Engine runs as root via sudo, so anything
-// anacrolix or our handlers create lands root-owned and the user
-// can't delete/move it from Finder without re-elevating. Best-effort
-// — failures are logged but not fatal.
-func chownToUser(path string) {
-	su := os.Getenv("SUDO_USER")
-	if su == "" {
-		return // not running under sudo, nothing to do
-	}
-	u, err := user.Lookup(su)
-	if err != nil {
-		log.Printf("chown: lookup %s: %v", su, err)
-		return
-	}
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	// Walk and chown anything we own as root.
-	_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable, continue
-		}
-		if cerr := os.Lchown(p, uid, gid); cerr != nil {
-			log.Printf("chown: %s: %v", p, cerr)
-		}
-		return nil
-	})
-}
-
-func (e *Engine) startTorrent() error {
-	// Bind the BT listener on the v4 overlay alias — that's the address
-	// other peers in the camp reach us at through utun.
-	host := e.cfg.LocalIP
-	t0 := time.Now()
-	opts := internaltorrent.Options{
-		ListenAddr:   net.JoinHostPort(host, fmt.Sprint(internaltorrent.DefaultPort)),
-		SharedDir:    e.torrentSharedDir(),
-		DownloadsDir: e.torrentDownloadsDir(),
-	}
-	log.Printf("torrent: binding on %s …", opts.ListenAddr)
-	c, err := internaltorrent.New(opts)
-	if err != nil {
-		return fmt.Errorf("torrent: bind %s: %w", opts.ListenAddr, err)
-	}
-	e.mu.Lock()
-	e.torrent = c
-	e.mu.Unlock()
-	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
-		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
-	// One-shot chown on the catalogs themselves so the user (not
-	// root) can manage them from Finder. Future files anacrolix
-	// creates are owned root — covered by chownLoop below.
-	chownToUser(opts.SharedDir)
-	chownToUser(opts.DownloadsDir)
-	// Re-seed everything already in the shared dir from a previous
-	// run. Without this, files survive on disk but anacrolix has no
-	// knowledge of them — UI shows an empty "my shared files" list
-	// after restart.
-	go e.rescanSharedDir(c, opts.SharedDir)
-	// Same idea for previously-downloaded files: replay the saved
-	// magnets so anacrolix re-checks them on disk and resumes
-	// seeding; UI's downloads section comes back populated.
-	go e.restoreDownloads(c)
-	// Periodic chown — anacrolix writes pieces to disk as root
-	// because the engine runs under sudo; without this, completed
-	// downloads in ~/Downloads/f2f-drops/ would need admin rights to
-	// delete or move from Finder.
-	go e.chownLoop(opts.SharedDir, opts.DownloadsDir)
-	// Prune torrents whose backing files have been deleted (user
-	// trashed them from Finder). Without this they keep appearing
-	// in UI as "seeding" forever.
-	go e.pruneLoop(c)
-	return nil
-}
-
-// pruneLoop drops Download/Seed entries whose on-disk file is gone,
-// and re-feeds peer addresses to active downloads so anacrolix has a
-// chance to re-dial peers that were unreachable on the first try.
-// Without re-feeding, a download that loses (or never makes) its
-// peer connection stays stuck at 0% forever — DHT/PEX/trackers are
-// disabled, anacrolix has no other way to find that peer again.
-func (e *Engine) pruneLoop(c *internaltorrent.Client) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	e.pruneOnce(c) // immediate pass on start
-	for range ticker.C {
-		e.pruneOnce(c)
-		e.refeedActiveDownloads(c)
-	}
-}
-
-func (e *Engine) refeedActiveDownloads(c *internaltorrent.Client) {
-	const stallAfter = 90 * time.Second
-	now := time.Now()
-	for _, d := range c.ListDownloads() {
-		if d.Torrent == nil || d.Torrent.Info() == nil {
-			// Still waiting for metadata — re-feed too, that's
-			// exactly the stuck-at-0% case.
-			c.FeedPeers(d)
-			continue
-		}
-		total := d.Torrent.Info().TotalLength()
-		done := d.Torrent.BytesCompleted()
-		if total > 0 && done >= total {
-			continue // complete
-		}
-		// Progress tracking: if BytesCompleted advanced since last
-		// check, reset the stall clock. If it hasn't advanced and
-		// enough time has passed, the peer is probably gone — drop
-		// and re-add the magnet so anacrolix starts a fresh dial
-		// cycle. This recovers from the "source peer restarted" case
-		// that just re-feeding doesn't fix (anacrolix backs off
-		// recently-disconnected peers).
-		if done > d.LastBytes {
-			d.LastBytes = done
-			d.LastProgressAt = now
-		}
-		stalled := now.Sub(d.LastProgressAt) > stallAfter
-		if stalled && d.Magnet != "" {
-			log.Printf("downloads: %s stalled (%s with no progress) — drop+re-add",
-				d.InfoHash, now.Sub(d.LastProgressAt).Round(time.Second))
-			peers := append([]string(nil), d.Peers...)
-			magnet := d.Magnet
-			c.RemoveDownload(d.InfoHash)
-			if _, err := c.AddDownload(magnet, peers); err != nil {
-				log.Printf("downloads: stall recovery re-add %s: %v", d.InfoHash, err)
-			}
-			continue
-		}
-		c.FeedPeers(d)
-	}
-}
-
-func (e *Engine) pruneOnce(c *internaltorrent.Client) {
-	// Downloads: only prune entries that WERE complete (file existed
-	// at the final path) and have since disappeared. We do NOT prune
-	// in-progress downloads — anacrolix writes to "<name>.part" until
-	// done and renames on completion, so the final path is absent
-	// mid-flight. Pruning then would kill active transfers.
-	removed := false
-	saved := e.loadSavedDownloads()
-	keep := saved[:0]
-	for _, s := range saved {
-		var d *internaltorrent.Download
-		for _, x := range c.ListDownloads() {
-			if x.InfoHash == s.InfoHash {
-				d = x
-				break
-			}
-		}
-		if d == nil || d.Torrent == nil || d.Torrent.Info() == nil {
-			// No info yet — keep, anacrolix is still bootstrapping.
-			keep = append(keep, s)
-			continue
-		}
-		// Treat "complete" as BytesCompleted >= total length (same
-		// criterion the HTTP layer uses). Only completed torrents
-		// have a stable final-path file to check for deletion.
-		total := d.Torrent.Info().TotalLength()
-		complete := total > 0 && d.Torrent.BytesCompleted() >= total
-		if !complete {
-			keep = append(keep, s)
-			continue
-		}
-		path := c.DownloadPath(d)
-		if path == "" {
-			keep = append(keep, s)
-			continue
-		}
-		if _, err := os.Stat(path); err != nil {
-			log.Printf("downloads: file gone, dropping %s (%s)", s.InfoHash, path)
-			c.RemoveDownload(s.InfoHash)
-			removed = true
-			continue
-		}
-		keep = append(keep, s)
-	}
-	if removed {
-		if err := e.saveDownloads(keep); err != nil {
-			log.Printf("downloads: persist after prune: %v", err)
-		}
-	}
-	// Seeds (my shared files): always complete by construction (we
-	// only AddSeed an existing file). Safe to prune on missing.
-	for _, h := range c.ListSeeds() {
-		if h.Path == "" {
-			continue
-		}
-		if _, err := os.Stat(h.Path); err != nil {
-			log.Printf("seeds: file gone, dropping %s (%s)", h.InfoHash, h.Path)
-			_ = c.RemoveSeed(h.InfoHash)
-		}
-	}
-}
-
-// chownLoop walks shared and downloads dirs every few seconds and
-// re-chowns anything still owned by root to SUDO_USER. Cheap on a
-// small catalog; if it ever becomes expensive, we can move to
-// "chown on torrent-complete" but periodic sweep is bullet-proof
-// against any code path we forget.
-func (e *Engine) chownLoop(dirs ...string) {
-	for _, d := range dirs {
-		chownToUser(d)
-	}
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			for _, d := range dirs {
-				chownToUser(d)
-			}
-		}
-	}
-}
-
-// rescanSharedDir walks SharedDir (one level deep, files only) and
-// AddSeeds each. Errors per-file are logged and skipped — one bad
-// file shouldn't drop the rest. Runs in a goroutine so a large
-// catalog doesn't block engine.Start.
-func (e *Engine) rescanSharedDir(c *internaltorrent.Client, dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("torrent: rescan %s: %v", dir, err)
-		return
-	}
-	added := 0
-	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
-		}
-		name := ent.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		h, err := c.AddSeed(path)
-		if err != nil {
-			log.Printf("torrent: rescan %s: %v", name, err)
-			continue
-		}
-		added++
-		log.Printf("torrent: rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
-	}
-	if added > 0 {
-		log.Printf("torrent: rescan re-seeded %d file(s) from %s", added, dir)
-	}
-}
-
-// Torrent returns the live BT client (nil if not running).
-func (e *Engine) Torrent() *internaltorrent.Client {
-	return e.torrent
-}
-
-// DownloadsDir exposes the on-disk path where incoming BT downloads
-// land. Web layer uses it to scope the reveal-in-Finder endpoint.
-func (e *Engine) DownloadsDir() string {
-	return e.torrentDownloadsDir()
-}
-
-// savedDownload is one entry in downloads.json — enough info to
-// re-register the torrent with anacrolix on next startup. Anacrolix
-// re-hashes on-disk files and immediately seeds whatever is already
-// there, so the user sees the download return.
-type savedDownload struct {
-	Magnet   string   `json:"magnet"`
-	InfoHash string   `json:"info_hash"`
-	Peers    []string `json:"peers,omitempty"`
-}
-
-func (e *Engine) downloadsStatePath() string {
-	return filepath.Join(userHome(), "Library", "Application Support", "f2f", e.campStateDirSegment(), "downloads.json")
-}
-
-func (e *Engine) loadSavedDownloads() []savedDownload {
-	path := e.downloadsStatePath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var out []savedDownload
-	if err := json.Unmarshal(data, &out); err != nil {
-		log.Printf("downloads: parse %s: %v", path, err)
-		return nil
-	}
-	return out
-}
-
-func (e *Engine) saveDownloads(list []savedDownload) error {
-	path := e.downloadsStatePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-// AddDownload wraps Torrent.AddDownload and persists the entry so it
-// survives engine restart. Idempotent — re-adding the same info_hash
-// (e.g. user re-clicks library row after restart) is a no-op from
-// anacrolix's perspective and we dedupe the saved list by info_hash.
-func (e *Engine) AddDownload(magnet string, peers []string) (*internaltorrent.Download, error) {
-	t := e.torrent
-	if t == nil {
-		return nil, fmt.Errorf("torrent client not running")
-	}
-	d, err := t.AddDownload(magnet, peers)
-	if err != nil {
-		return nil, err
-	}
-	saved := e.loadSavedDownloads()
-	for _, s := range saved {
-		if s.InfoHash == d.InfoHash {
-			return d, nil // already remembered
-		}
-	}
-	saved = append(saved, savedDownload{
-		Magnet: magnet, InfoHash: d.InfoHash, Peers: peers,
-	})
-	if err := e.saveDownloads(saved); err != nil {
-		log.Printf("downloads: persist: %v", err)
-	}
-	return d, nil
-}
-
-// RemoveDownload cancels (or unseeds) a download by info_hash and
-// drops it from downloads.json so it doesn't come back on restart.
-// Returns true if anacrolix had an entry; false means we tried to
-// remove something unknown — still drops from the persisted list as
-// a courtesy. Files on disk are NOT deleted; pruneLoop handles that
-// case when the user removes them via Finder.
-func (e *Engine) RemoveDownload(infoHash string) bool {
-	t := e.torrent
-	removed := false
-	if t != nil {
-		removed = t.RemoveDownload(infoHash)
-	}
-	saved := e.loadSavedDownloads()
-	kept := saved[:0]
-	for _, s := range saved {
-		if s.InfoHash == infoHash {
-			continue
-		}
-		kept = append(kept, s)
-	}
-	if len(kept) != len(saved) {
-		if err := e.saveDownloads(kept); err != nil {
-			log.Printf("downloads: persist after remove: %v", err)
-		}
-	}
-	return removed
-}
-
-// restoreDownloads re-registers every persisted download with the
-// torrent client. Anacrolix re-checks on-disk pieces; complete files
-// become available for seeding immediately and appear in /api/files/
-// downloads with `complete=true` so the UI shows them.
-func (e *Engine) restoreDownloads(c *internaltorrent.Client) {
-	saved := e.loadSavedDownloads()
-	if len(saved) == 0 {
-		return
-	}
-	added := 0
-	for _, s := range saved {
-		if _, err := c.AddDownload(s.Magnet, s.Peers); err != nil {
-			log.Printf("downloads: restore %s: %v", s.InfoHash, err)
-			continue
-		}
-		added++
-	}
-	if added > 0 {
-		log.Printf("downloads: restored %d previously-downloaded torrent(s)", added)
-	}
 }
 
 // currentReflex returns our latest camp-observed external endpoint —
@@ -1405,6 +809,62 @@ func (e *Engine) currentReflex() string {
 		return *r
 	}
 	return ""
+}
+
+// Routes returns the live route manager — the OS-level primitive
+// that installs/removes prefixes against the active utun. Exposed
+// for services/tunnel which owns the application-level intercept
+// catalog. Returns nil before Start.
+func (e *Engine) Routes() *route.Manager {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.routes
+}
+
+// UtunName returns the live utun interface name (e.g. "utun6") or
+// "" before Start. Cheap; safe to call from anywhere.
+func (e *Engine) UtunName() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.tun == nil {
+		return ""
+	}
+	return e.tun.Name()
+}
+
+// HasPeerName reports whether a peer with this name is currently in
+// the engine's peer map (camp catalog merged with live state).
+// services/tunnel uses this when validating intercept (spec, peer)
+// pairs at Add time.
+func (e *Engine) HasPeerName(name string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, p := range e.peers {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SyncAWG triggers an async AWG peer-list reconciliation. Services
+// that change inputs visible to allowed_ips (intercept add/remove)
+// call this so AWG re-pushes the updated rule set.
+func (e *Engine) SyncAWG() {
+	if e.awgDevice == nil {
+		return
+	}
+	go e.awgSyncPeers()
+}
+
+// SetAWGAllowedCIDRsHook installs a callback the engine consults
+// inside awgSyncPeers to gather extra allowed_ips for one peer (the
+// peer's overlay /32 is always included automatically). Pass nil to
+// detach. Called by services/tunnel at Start/Stop.
+func (e *Engine) SetAWGAllowedCIDRsHook(fn func(peerName string) []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.awgAllowedHook = fn
 }
 
 // TunnelHTTPPort is the port other peers expose their /api/* on over
@@ -1592,166 +1052,7 @@ func (e *Engine) CampPeers() []rendezvous.PeerInfo {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
-// filesPollLoop walks online peers every minute and pulls /api/files.
-// The returned list is cached on peerState.Files so the UI's "camp
-// library" can show what's available. We don't talk BT yet — that's
-// triggered when the user clicks download.
-func (e *Engine) filesPollLoop(ctx context.Context) {
-	defer e.workers.Done()
-	// Give the camp poll a chance to populate peers first.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(7 * time.Second):
-	}
-	e.pollAllPeerFiles(ctx)
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		e.pollAllPeerFiles(ctx)
-	}
-}
 
-func (e *Engine) pollAllPeerFiles(ctx context.Context) {
-	type target struct {
-		host string
-		pub  string
-		name string
-	}
-	var targets []target
-	e.mu.Lock()
-	for pub, p := range e.peers {
-		if !p.IsOnline() {
-			continue
-		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
-	}
-	port := e.tunnelHTTPPort
-	e.mu.Unlock()
-	if port == "" {
-		return
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.host, port) + "/api/files"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var files []PeerFile
-		err = json.NewDecoder(resp.Body).Decode(&files)
-		resp.Body.Close()
-		if err != nil {
-			continue
-		}
-		e.mu.Lock()
-		if p, ok := e.peers[t.pub]; ok {
-			p.Files = files
-		}
-		e.mu.Unlock()
-	}
-}
-
-// peerFirewallPollLoop walks online peers every 30s and pulls their
-// /api/firewall (we only keep the user-configured allow list — the
-// built-in list is identical for every f2f peer). Cached on
-// peerState.Firewall and mirrored into the catalog so it survives
-// engine restart.
-func (e *Engine) peerFirewallPollLoop(ctx context.Context) {
-	defer e.workers.Done()
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(9 * time.Second): // small jitter vs files/domain loops
-	}
-	e.pollAllPeerFirewall(ctx)
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		e.pollAllPeerFirewall(ctx)
-	}
-}
-
-func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
-	type target struct {
-		host string
-		pub  string
-		name string
-	}
-	var targets []target
-	e.mu.Lock()
-	for pub, p := range e.peers {
-		if !p.IsOnline() {
-			continue
-		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), pub: pub, name: p.Name})
-	}
-	port := e.tunnelHTTPPort
-	e.mu.Unlock()
-	if port == "" {
-		return
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.host, port) + "/api/firewall"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			// Same policy as domain poll: keep stale list on transient
-			// failure, the UI's peer-online flag conveys "we lost touch".
-			continue
-		}
-		var body struct {
-			User []config.Firewall `json:"user"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
-		if err != nil {
-			continue
-		}
-		e.mu.Lock()
-		if p, ok := e.peers[t.pub]; ok {
-			p.Firewall = body.User
-		}
-		e.persistPeerFirewallLocked(t.pub, body.User)
-		e.mu.Unlock()
-	}
-}
-
-// persistPeerFirewallLocked mirrors a peer's published firewall list
-// into the camp catalog. Caller holds e.mu.
-func (e *Engine) persistPeerFirewallLocked(pub string, fw []config.Firewall) {
-	if e.camp == nil || pub == "" {
-		return
-	}
-	out := append([]config.Firewall(nil), fw...)
-	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].Pub == pub {
-			e.camp.PeerCatalog[i].Firewall = out
-			e.persistCampLocked()
-			return
-		}
-	}
-}
-
-// Domain catalog poll + service health-check moved to services/dns.
 
 func (e *Engine) SetTunnelHTTPPort(port string) {
 	e.tunnelHTTPPort = port
@@ -1782,30 +1083,18 @@ func (e *Engine) awgSyncPeers() {
 		if p.WGPub == "" || p.UDPAddr == nil {
 			continue
 		}
-		overlayAddr, err := overlay.PubToV4Addr(p.Pub)
+		overlayAddr, err := PubToV4Addr(p.Pub)
 		if err != nil {
 			continue
 		}
-		// AllowedIPs = peer's overlay /32 + every intercept prefix bound to
-		// this peer in e.intercepts. Without the intercepts here AWG drops
-		// outgoing traffic to those destinations because no peer's trie
-		// entry matches the dst, and we lose the egress-via-peer feature
-		// that worked in the old plaintext routeFor() path.
-		cidrs := make([]string, 0, 1+8)
+		// AllowedIPs = peer's overlay /32 + every intercept prefix the
+		// tunnel service has bound to this peer (via awgAllowedHook).
+		// Without those extra CIDRs AWG drops outgoing packets to
+		// intercept destinations.
+		cidrs := make([]string, 0, 8)
 		cidrs = append(cidrs, overlayAddr.String()+"/32")
-		for _, info := range e.intercepts {
-			if info.Peer != p.Name {
-				continue
-			}
-			for _, pref := range info.Prefixes {
-				// IPv6 entries get a " (reject)" annotation in the
-				// engine's bookkeeping — strip it for UAPI.
-				pref = strings.TrimSuffix(pref, " (reject)")
-				if pref == "" {
-					continue
-				}
-				cidrs = append(cidrs, pref)
-			}
+		if e.awgAllowedHook != nil {
+			cidrs = append(cidrs, e.awgAllowedHook(p.Name)...)
 		}
 		peers = append(peers, awg.PeerSyncInfo{
 			WGPub:        p.WGPub,
@@ -1868,7 +1157,8 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 			req.Name, p.WGPub[:16], req.WGPub[:16])
 	}
 	p.WGPub = req.WGPub
-	if !sameUDPAddr(p.UDPAddr, from) {
+	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
+	if endpointChanged {
 		log.Printf("pair_req: peer %s UDP %s → %s (NAT rebind?)", req.Name, p.UDPAddr, from)
 		p.UDPAddr = from
 	}
@@ -1882,11 +1172,12 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 		log.Printf("pair_req: first valid from %s (fp=%s)", req.Name, identity.FingerprintHex(req.Pub))
 	}
 	p.LastValidReqMs.Store(now)
-	// Newly verified peer or first pair_req after restart — refresh
-	// the AWG peer list so this peer becomes routable through the
-	// encrypted tunnel. Runs asynchronously so we don't block the
-	// recv path on IpcSet.
-	if firstReq {
+	// Refresh the AWG peer list:
+	//   - firstReq → peer just became routable through AWG, register it.
+	//   - endpointChanged → NAT rebind, AWG must push the new endpoint
+	//     or it'll keep handshaking against the stale tuple silently.
+	// Runs asynchronously so the recv path doesn't block on IpcSet.
+	if firstReq || endpointChanged {
 		go e.awgSyncPeers()
 	}
 
@@ -1934,7 +1225,8 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 			res.Name, p.WGPub[:16], res.WGPub[:16])
 	}
 	p.WGPub = res.WGPub
-	if !sameUDPAddr(p.UDPAddr, from) {
+	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
+	if endpointChanged {
 		log.Printf("pair_res: peer %s UDP %s → %s (NAT rebind?)", res.Name, p.UDPAddr, from)
 		p.UDPAddr = from
 	}
@@ -1965,6 +1257,10 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 		// Same trigger as handlePairReq: first valid res confirms the
 		// full round-trip; push the peer into the AWG device's routing
 		// so traffic to its overlay IP gets encrypted.
+		go e.awgSyncPeers()
+	} else if endpointChanged {
+		// NAT rebind after the initial pair — AWG was still gunning at
+		// the stale tuple. Push the new endpoint so handshakes land.
 		go e.awgSyncPeers()
 	}
 }
@@ -2143,7 +1439,6 @@ func (e *Engine) Stop() error {
 	tun := e.tun
 	udp := e.udp
 	routes := e.routes
-	egr := e.egr
 	awgDev := e.awgDevice
 	e.mu.Unlock()
 
@@ -2181,16 +1476,8 @@ func (e *Engine) Stop() error {
 	}
 	e.workers.Wait()
 
-	if egr != nil {
-		if err := egr.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("egress: %w", err))
-		}
-	}
 
 	e.mu.Lock()
-	if e.torrent != nil {
-		_ = e.torrent.Close()
-	}
 	if e.awgDevice != nil {
 		// Device.Close stops its goroutines AND closes the underlying
 		// TUN fd (since we passed tun.Device() to it, ownership transferred).
@@ -2206,9 +1493,6 @@ func (e *Engine) Stop() error {
 	e.awgDevice = nil
 	e.obfenv = nil
 	e.routes = nil
-	e.egr = nil
-	e.ca = nil
-	e.torrent = nil
 	e.announce = nil
 	e.poller = nil
 	e.campAddr.Store(nil)
@@ -2218,15 +1502,8 @@ func (e *Engine) Stop() error {
 	e.activePub.Store(nil)
 	e.staticPeer.Store(nil)
 	e.lastStaticPingMs.Store(0)
-	e.intercepts = map[string]*InterceptInfo{}
 	e.camp = nil
 	e.identity = nil
-	if cc := e.loadCall(); cc != nil {
-		cc.sfu.Close()
-		e.clearCall()
-	}
-	e.ClearJoinedSFUHost()
-	e.storeRemoteCalls(nil)
 	e.txBytes.Store(0)
 	e.rxBytes.Store(0)
 	e.txPackets.Store(0)
@@ -2244,9 +1521,8 @@ func (e *Engine) Status() Status {
 	defer e.mu.Unlock()
 
 	st := Status{
-		Running:      e.running,
-		EgressActive: e.egr != nil,
-		StartedAt:    e.started,
+		Running:   e.running,
+		StartedAt: e.started,
 		TxBytes:      e.txBytes.Load(),
 		RxBytes:      e.rxBytes.Load(),
 		TxPackets:    e.txPackets.Load(),
@@ -2264,9 +1540,6 @@ func (e *Engine) Status() Status {
 			if p := e.staticPeer.Load(); p != nil {
 				st.PeerAddr = p.String()
 			}
-		}
-		if e.egr != nil {
-			st.EgressIface = e.cfg.EgressIface
 		}
 		if e.cfg.Camp != nil {
 			st.CampActive = e.announce != nil
@@ -2292,10 +1565,6 @@ func (e *Engine) Status() Status {
 			st.CampHealth = e.campHealthLocked()
 		}
 		st.Diagnostics = e.diagnosticsLocked()
-	}
-	st.Intercepts = make([]InterceptInfo, 0, len(e.intercepts))
-	for _, info := range e.intercepts {
-		st.Intercepts = append(st.Intercepts, *info)
 	}
 	return st
 }
@@ -2366,8 +1635,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Reachable:   online, // kept as alias for backward compat; same semantic now
 			InCamp:      p.InCamp,
 			Active:      p.Pub == active,
-			Files:       sortedFiles(p.Files),
-			Firewall:    append([]config.Firewall(nil), p.Firewall...),
 			LastPongMs:  lastPong,
 			RTTMs:       rtt,
 			Verified:    paired,
@@ -2401,7 +1668,7 @@ func validCampLabel(label string) bool {
 // used as the host in tunnel-side HTTP URLs.
 func (e *Engine) peerHTTPHostLocked(p *peerState) string {
 	if p != nil && p.Pub != "" {
-		if a, err := overlay.PubToV4Addr(p.Pub); err == nil {
+		if a, err := PubToV4Addr(p.Pub); err == nil {
 			return a.String()
 		}
 	}
@@ -2412,24 +1679,11 @@ func overlayV4OrEmpty(pubHex string) string {
 	if pubHex == "" {
 		return ""
 	}
-	addr, err := overlay.PubToV4Addr(pubHex)
+	addr, err := PubToV4Addr(pubHex)
 	if err != nil {
 		return ""
 	}
 	return addr.String()
-}
-
-
-
-func sortedFiles(in []PeerFile) []PeerFile {
-	out := append([]PeerFile(nil), in...)
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name == out[j].Name {
-			return out[i].InfoHash < out[j].InfoHash
-		}
-		return out[i].Name < out[j].Name
-	})
-	return out
 }
 
 // SetActivePeer is the UI hook for selecting which peer the tunnel's
@@ -2452,279 +1706,6 @@ func (e *Engine) SetActivePeer(pub string) error {
 	return nil
 }
 
-// AddIntercept resolves spec, installs its host routes via utun, and binds
-// the entry to the named peer. peer must be a name currently in the camp
-// peers map; if not, the intercept is rejected. Requires Running.
-// Persists the (spec, peer) pair into camp config on success.
-func (e *Engine) AddIntercept(spec, peer string) (InterceptInfo, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.running {
-		return InterceptInfo{}, errors.New("engine not running")
-	}
-	if peer == "" {
-		return InterceptInfo{}, errors.New("intercept peer is required")
-	}
-	if !e.hasPeerNameLocked(peer) {
-		return InterceptInfo{}, fmt.Errorf("peer %q is not in the camp", peer)
-	}
-	info, err := e.addInterceptLocked(spec, peer)
-	if err != nil {
-		return info, err
-	}
-	if e.camp != nil {
-		dup := false
-		for _, it := range e.camp.Intercepts {
-			if it.Spec == info.Spec && it.Peer == info.Peer {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			e.camp.Intercepts = append(e.camp.Intercepts, config.Intercept{
-				Spec: info.Spec,
-				Peer: info.Peer,
-			})
-			e.persistCampLocked()
-		}
-	}
-	// Push the new prefixes into AWG's allowed_ips trie so outbound
-	// packets to intercept destinations route through this peer.
-	if e.awgDevice != nil {
-		go e.awgSyncPeers()
-	}
-	return info, nil
-}
-
-// hasPeerNameLocked reports whether any peer in the camp currently has
-// this name. Called with e.mu held.
-func (e *Engine) hasPeerNameLocked(name string) bool {
-	for _, p := range e.peers {
-		if p.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// RemoveIntercept deletes all routes installed for the given entry ID
-// and drops the matching (spec, peer) entry from camp config.
-func (e *Engine) RemoveIntercept(id string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.running {
-		return errors.New("engine not running")
-	}
-	info, ok := e.intercepts[id]
-	if !ok {
-		return fmt.Errorf("intercept %q not found", id)
-	}
-	for _, prefStr := range info.Prefixes {
-		// Strip the " (reject)" annotation we add for IPv6 entries — the
-		// route manager picks the right delete syntax automatically.
-		prefStr = strings.TrimSuffix(prefStr, " (reject)")
-		p, err := netip.ParsePrefix(prefStr)
-		if err != nil {
-			continue
-		}
-		if err := e.routes.Remove(p); err != nil {
-			log.Printf("WARN: remove route %s: %v", prefStr, err)
-		}
-	}
-	delete(e.intercepts, id)
-	log.Printf("removed intercept %s (%s)", id, info.Spec)
-	if e.camp != nil {
-		kept := e.camp.Intercepts[:0]
-		for _, it := range e.camp.Intercepts {
-			if it.Spec == info.Spec && it.Peer == info.Peer {
-				continue
-			}
-			kept = append(kept, it)
-		}
-		e.camp.Intercepts = kept
-		e.persistCampLocked()
-	}
-	// Drop the removed prefixes from AWG's allowed_ips trie so outbound
-	// packets to those destinations no longer route through this peer.
-	if e.awgDevice != nil {
-		go e.awgSyncPeers()
-	}
-	return nil
-}
-
-func isDomainSpec(spec string) bool {
-	if _, err := netip.ParsePrefix(spec); err == nil {
-		return false
-	}
-	if _, err := netip.ParseAddr(spec); err == nil {
-		return false
-	}
-	return true
-}
-
-// addInterceptLocked must be called with e.mu held and e.running == true.
-// peer is the camp-peer name traffic for this intercept is routed to.
-func (e *Engine) addInterceptLocked(spec, peer string) (InterceptInfo, error) {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return InterceptInfo{}, errors.New("empty intercept spec")
-	}
-	prefixes, err := resolveSpec(spec)
-	if err != nil {
-		return InterceptInfo{}, err
-	}
-	if len(prefixes) == 0 {
-		return InterceptInfo{}, fmt.Errorf("%q: no addresses", spec)
-	}
-
-	e.nextItemID++
-	id := "i" + strconv.FormatUint(e.nextItemID, 10)
-	info := &InterceptInfo{ID: id, Spec: spec, Peer: peer}
-	for _, p := range prefixes {
-		// IPv6 destinations get a -reject route instead of being sent into
-		// the utun: our tunnel is IPv4-only, and forwarding IPv6 packets
-		// into a v4-only utun results in OS picking en0 as source and the
-		// traffic bypassing us. With -reject the app gets ECONNREFUSED
-		// instantly and (in browsers) Happy Eyeballs falls back to the
-		// matching A record, which IS routed through the tunnel.
-		if p.Addr().Is6() {
-			if err := e.routes.AddReject(p); err != nil {
-				log.Printf("WARN: route -reject %s: %v", p, err)
-				continue
-			}
-			info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
-			log.Printf("route %s → reject (IPv6 fallback to IPv4)", p)
-			continue
-		}
-		if err := e.routes.Add(p); err != nil {
-			log.Printf("WARN: route %s: %v", p, err)
-			continue
-		}
-		info.Prefixes = append(info.Prefixes, p.String())
-		log.Printf("route %s → %s", p, e.tun.Name())
-	}
-	if len(info.Prefixes) == 0 {
-		return InterceptInfo{}, fmt.Errorf("%q: all route adds failed", spec)
-	}
-	e.intercepts[id] = info
-	return *info, nil
-}
-
-func (e *Engine) domainRefreshLoop(ctx context.Context) {
-	defer e.workers.Done()
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			e.refreshDomainRoutes()
-		}
-	}
-}
-
-func (e *Engine) refreshDomainRoutes() {
-	e.mu.Lock()
-	type entry struct {
-		id  string
-		spec string
-		old []string
-	}
-	var domains []entry
-	for id, info := range e.intercepts {
-		if isDomainSpec(info.Spec) {
-			domains = append(domains, entry{id: id, spec: info.Spec, old: append([]string(nil), info.Prefixes...)})
-		}
-	}
-	e.mu.Unlock()
-
-	for _, d := range domains {
-		newPrefixes, err := resolveSpec(d.spec)
-		if err != nil {
-			log.Printf("WARN: refresh %s: %v", d.spec, err)
-			continue
-		}
-
-		newSet := make(map[string]netip.Prefix, len(newPrefixes))
-		for _, p := range newPrefixes {
-			newSet[p.String()] = p
-		}
-		oldSet := make(map[string]struct{}, len(d.old))
-		for _, s := range d.old {
-			oldSet[strings.TrimSuffix(s, " (reject)")] = struct{}{}
-		}
-		changed := len(newSet) != len(oldSet)
-		if !changed {
-			for s := range oldSet {
-				if _, ok := newSet[s]; !ok {
-					changed = true
-					break
-				}
-			}
-		}
-		if !changed {
-			continue
-		}
-
-		e.mu.Lock()
-		info, ok := e.intercepts[d.id]
-		if !ok {
-			e.mu.Unlock()
-			continue
-		}
-		for _, prefStr := range info.Prefixes {
-			prefStr = strings.TrimSuffix(prefStr, " (reject)")
-			if p, err := netip.ParsePrefix(prefStr); err == nil {
-				if err := e.routes.Remove(p); err != nil {
-					log.Printf("WARN: refresh remove route %s: %v", p, err)
-				}
-			}
-		}
-		info.Prefixes = nil
-		for _, p := range newPrefixes {
-			if p.Addr().Is6() {
-				if err := e.routes.AddReject(p); err != nil {
-					log.Printf("WARN: refresh route -reject %s: %v", p, err)
-					continue
-				}
-				info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
-				continue
-			}
-			if err := e.routes.Add(p); err != nil {
-				log.Printf("WARN: refresh route %s: %v", p, err)
-				continue
-			}
-			info.Prefixes = append(info.Prefixes, p.String())
-		}
-		log.Printf("refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
-		e.mu.Unlock()
-	}
-}
-
-func resolveSpec(spec string) ([]netip.Prefix, error) {
-	if p, err := netip.ParsePrefix(spec); err == nil {
-		return []netip.Prefix{p}, nil
-	}
-	if a, err := netip.ParseAddr(spec); err == nil {
-		return []netip.Prefix{netip.PrefixFrom(a, a.BitLen())}, nil
-	}
-	ips, err := net.LookupIP(spec)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %q: %w", spec, err)
-	}
-	out := make([]netip.Prefix, 0, len(ips))
-	for _, ip := range ips {
-		a, ok := netip.AddrFromSlice(ip)
-		if !ok {
-			continue
-		}
-		a = a.Unmap()
-		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		log.Printf("resolved %s → %s", spec, a)
-	}
-	return out, nil
-}
 
 func (e *Engine) tunToPeerLoop(ctx context.Context) {
 	defer e.workers.Done()
@@ -2740,7 +1721,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		if len(pkt) == 0 {
 			continue
 		}
-		summary := packet.Summary(pkt)
+		summary := packetSummary(pkt)
 		action := "drop"
 		if !hasPeer {
 			packetLog("[%s] %s [%s]", e.tun.Name(), summary, action)
@@ -2780,16 +1761,16 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 // routeFor decides where an outgoing tunnel packet goes.
 //
 // Camp mode:
-//   1. dst is a known peer's tunnel_ip → that peer (meet, direct).
-//   2. dst is covered by an intercept → that intercept's bound peer.
-//   3. otherwise → drop (no implicit catch-all peer).
+//  1. dst is a known peer's tunnel_ip → that peer (meet, direct).
+//  2. dst is covered by an intercept → that intercept's bound peer.
+//  3. otherwise → drop (no implicit catch-all peer).
 //
 // Static mode: always to the configured static peer.
 func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	if e.cfg.Camp == nil {
 		return e.staticPeer.Load()
 	}
-	dst := packet.ExtractDst(pkt)
+	dst := extractDst(pkt)
 	if !dst.IsValid() {
 		return nil
 	}
@@ -2802,7 +1783,7 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 		if p.Pub == "" || p.UDPAddr == nil {
 			continue
 		}
-		if a, err := overlay.PubToV4Addr(p.Pub); err == nil && a == dst {
+		if a, err := PubToV4Addr(p.Pub); err == nil && a == dst {
 			return p.UDPAddr
 		}
 	}
@@ -2818,28 +1799,18 @@ func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
 	return nil
 }
 
-// interceptPeerForLocked returns the bound peer name for the first
-// intercept whose prefix contains dst, or "" if none match. Called with
-// e.mu held.
-func (e *Engine) interceptPeerForLocked(dst netip.Addr) string {
-	for _, info := range e.intercepts {
-		for _, prefStr := range info.Prefixes {
-			prefStr = strings.TrimSuffix(prefStr, " (reject)")
-			p, err := netip.ParsePrefix(prefStr)
-			if err != nil {
-				continue
-			}
-			if p.Contains(dst) {
-				return info.Peer
-			}
-		}
-	}
+// interceptPeerForLocked returned the bound peer name for an
+// intercept whose prefix contained dst. Used only by routeFor in
+// the legacy plaintext (--peer) data path, which is now phased out
+// in favour of AWG (the encrypted Device owns utun forwarding). The
+// hook is dead in AWG mode and routeFor handles a nil result fine.
+func (e *Engine) interceptPeerForLocked(_ netip.Addr) string {
 	return ""
 }
 
 func (e *Engine) peerToTunLoop(ctx context.Context) {
 	defer e.workers.Done()
-	buf := make([]byte, tunnel.MTU)
+	buf := make([]byte, utun.MTU)
 	for {
 		n, from, err := e.udp.ReadFromUDP(buf)
 		if err != nil {
@@ -2946,7 +1917,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			packetLog("[udp %s] drop non-IP byte=0x%02x (%d bytes)", from, pkt[0], n)
 			continue
 		}
-		summary := packet.Summary(pkt)
+		summary := packetSummary(pkt)
 
 		// When AWG owns utun, engine must not write to the same fd
 		// concurrently — Device's write goroutine and ours would race.
@@ -3009,10 +1980,6 @@ func (e *Engine) rollbackPartial() {
 	if e.routes != nil {
 		_ = e.routes.Cleanup()
 		e.routes = nil
-	}
-	if e.egr != nil {
-		_ = e.egr.Close()
-		e.egr = nil
 	}
 	e.announce = nil
 	e.poller = nil
