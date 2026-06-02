@@ -3,12 +3,9 @@ package engine
 import (
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
-	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // ensureStore lazily opens $HOME/.f2f/. Called from Start so test code
@@ -347,44 +344,29 @@ func (e *Engine) RemovePeerDomain(peerName, domainName string) error {
 	return nil
 }
 
-// RemoveTrustedPeer drops one peer CA — deletes the on-disk PEM, the
-// keychain entry, the in-memory cache, and the camp config entry.
-// Idempotent: missing pieces are skipped without error. Engine must
-// be running so we know which camp file to write.
-func (e *Engine) RemoveTrustedPeer(fingerprint string) error {
+// RemoveTrustedPeerFromCamp drops the metadata for one trusted peer
+// CA (by fingerprint) from the active camp config and persists. The
+// services/trust service owns the on-disk PEM and keychain entry —
+// this method handles only the camp config slice. No-op when the
+// engine isn't running.
+func (e *Engine) RemoveTrustedPeerFromCamp(fingerprint string) {
 	if fingerprint == "" {
-		return errors.New("empty fingerprint")
-	}
-	e.trustedPeerCAsMu.Lock()
-	entry, ok := e.trustedPeerCAs[fingerprint]
-	if ok {
-		delete(e.trustedPeerCAs, fingerprint)
-	}
-	e.trustedPeerCAsMu.Unlock()
-	if !ok {
-		return nil
-	}
-	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
-	if err := os.Remove(certPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("ca: remove %s: %v", certPath, err)
-	}
-	if err := platform.TrustStoreRemove(entry.CommonName); err != nil {
-		log.Printf("ca: trust store remove %s: %v", entry.CommonName, err)
+		return
 	}
 	e.mu.Lock()
-	if e.camp != nil {
-		kept := e.camp.TrustedPeers[:0]
-		for _, t := range e.camp.TrustedPeers {
-			if t.Fingerprint == fingerprint {
-				continue
-			}
-			kept = append(kept, t)
-		}
-		e.camp.TrustedPeers = kept
-		e.persistCampLocked()
+	defer e.mu.Unlock()
+	if e.camp == nil {
+		return
 	}
-	e.mu.Unlock()
-	return nil
+	kept := e.camp.TrustedPeers[:0]
+	for _, t := range e.camp.TrustedPeers {
+		if t.Fingerprint == fingerprint {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	e.camp.TrustedPeers = kept
+	e.persistCampLocked()
 }
 
 // restoreInterceptsFromCamp re-installs every (spec, peer) pair from

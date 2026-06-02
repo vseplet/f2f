@@ -31,6 +31,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/trust"
 )
 
 //go:embed assets
@@ -45,6 +46,7 @@ var assetsFS embed.FS
 type Server struct {
 	engine   *engine.Engine
 	firewall *firewall.Service
+	trust    *trust.Service
 	addr     string
 	srv      *http.Server
 
@@ -57,10 +59,11 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, fwSvc *firewall.Service, addr string) *Server {
+func New(eng *engine.Engine, fwSvc *firewall.Service, trustSvc *trust.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		firewall:    fwSvc,
+		trust:       trustSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -811,7 +814,7 @@ func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
 // handleTrustedPeers returns the UI's view of discovered peer CAs —
 // fingerprint, common name, install state.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.TrustedPeerCAs())
+	writeJSON(w, http.StatusOK, s.trust.List())
 }
 
 // handleInstallTrustedPeer adds a discovered peer CA to the system
@@ -823,7 +826,7 @@ func (s *Server) handleInstallTrustedPeer(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
 		return
 	}
-	if err := s.engine.InstallPeerCA(fp); err != nil {
+	if err := s.trust.Install(fp); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -856,7 +859,7 @@ func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fingerprint"))
 		return
 	}
-	if err := s.engine.RemoveTrustedPeer(fp); err != nil {
+	if err := s.trust.Remove(fp); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

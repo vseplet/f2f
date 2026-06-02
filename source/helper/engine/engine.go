@@ -6,14 +6,10 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -480,13 +476,6 @@ type Engine struct {
 	// ports without recompiling.
 	defaultListen string
 
-	// trustedPeerCAs tracks which peer CAs we've already installed in
-	// the system keychain (by SHA-256 fingerprint of the cert). Avoids
-	// repeated `security add-trusted-cert` calls (each one popping a
-	// password prompt). Key is fingerprint (hex), value is metadata.
-	trustedPeerCAs   map[string]TrustedPeerCA
-	trustedPeerCAsMu sync.Mutex
-
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
 	started time.Time
@@ -533,15 +522,6 @@ type Engine struct {
 	identity *identity.Identity
 }
 
-// TrustedPeerCA is one row in the UI's trusted-peers panel.
-type TrustedPeerCA struct {
-	PeerName    string `json:"peer_name"`
-	CommonName  string `json:"common_name"`
-	Fingerprint string `json:"fingerprint"`
-	InstalledAt int64  `json:"installed_at"`
-	Installed   bool   `json:"installed"` // true once added to the system keychain
-}
-
 // domainHealth is the latest health-check result for one local service.
 type domainHealth struct {
 	Status    string // "ok" | "fail"
@@ -562,28 +542,9 @@ func New() *Engine {
 	return &Engine{
 		intercepts:     map[string]*InterceptInfo{},
 		peers:          map[string]*peerState{},
-		trustedPeerCAs: map[string]TrustedPeerCA{},
 		myDomainHealth: map[string]domainHealth{},
 		tap:            newLogTap(),
 	}
-}
-
-// TrustedPeerCAs returns a snapshot for the UI panel, sorted by peer
-// name so the list doesn't shuffle between polls.
-func (e *Engine) TrustedPeerCAs() []TrustedPeerCA {
-	e.trustedPeerCAsMu.Lock()
-	defer e.trustedPeerCAsMu.Unlock()
-	out := make([]TrustedPeerCA, 0, len(e.trustedPeerCAs))
-	for _, t := range e.trustedPeerCAs {
-		out = append(out, t)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].PeerName == out[j].PeerName {
-			return out[i].Fingerprint < out[j].Fingerprint
-		}
-		return out[i].PeerName < out[j].PeerName
-	})
-	return out
 }
 
 // LogTap returns the io.Writer that should be added to log output so that
@@ -993,9 +954,10 @@ func (e *Engine) Start(cfg Config) error {
 		if err := e.ensureCA(); err != nil {
 			log.Printf("ca: %v (https disabled)", err)
 		}
-		e.loadTrustedPeerCAs()
-		e.workers.Add(1)
-		go e.peerCAPollLoop(ctx)
+		// Peer-CA discovery + keychain install was moved to
+		// services/trust — main.go owns the lifecycle, hooked off
+		// OnStarted/OnStopped so the per-camp on-disk cache is
+		// reloaded on every Start.
 	}
 	// BitTorrent client for camp file sharing. Binds on <tunnel_ip>:6881
 	// — only reachable through utun, never the public internet.
@@ -1540,9 +1502,13 @@ func (e *Engine) currentReflex() string {
 // camp A don't leak into camp B's "trusted peer CAs" UI panel.
 const trustedPeersRootDir = "/var/lib/f2f/trusted-peers"
 
-// trustedPeersDir returns the per-camp cache dir. Empty cfg.Camp falls
+// TrustedPeersDir returns the per-camp cache dir. Empty cfg.Camp falls
 // back to the root path (static --peer legacy mode, no notion of camp).
-func (e *Engine) trustedPeersDir() string {
+// Exposed for the services/trust service which owns the on-disk cert
+// management.
+func (e *Engine) TrustedPeersDir() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
 		return trustedPeersRootDir
 	}
@@ -1622,219 +1588,51 @@ func enabledUserFirewallRules(c *config.Camp) []firewall.PortRule {
 	return out
 }
 
-// loadTrustedPeerCAs reads the on-disk record of which peer CAs were
-// already installed (so we don't keychain-install them again on every
-// engine restart). Called once at engine.Start under camp mode.
-func (e *Engine) loadTrustedPeerCAs() {
-	dir := e.trustedPeersDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	e.trustedPeerCAsMu.Lock()
-	defer e.trustedPeerCAsMu.Unlock()
-	for _, en := range entries {
-		if en.IsDir() || !strings.HasSuffix(en.Name(), ".crt") {
-			continue
-		}
-		full := filepath.Join(dir, en.Name())
-		body, err := os.ReadFile(full)
-		if err != nil {
-			continue
-		}
-		block, _ := pem.Decode(body)
-		if block == nil {
-			continue
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			continue
-		}
-		fp := certFingerprint(cert)
-		full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
-		installed := platform.TrustStoreContains(full256)
-		installedAt := int64(0)
-		if installed {
-			if fi, err := os.Stat(full); err == nil {
-				installedAt = fi.ModTime().Unix()
-			}
-		}
-		e.trustedPeerCAs[fp] = TrustedPeerCA{
-			PeerName:    strings.TrimSuffix(en.Name(), ".crt"),
-			CommonName:  cert.Subject.CommonName,
-			Fingerprint: fp,
-			InstalledAt: installedAt,
-			Installed:   installed,
-		}
-	}
-}
-
-func certFingerprint(cert *x509.Certificate) string {
-	h := sha256.Sum256(cert.Raw)
-	return fmt.Sprintf("%x", h[:8])
-}
-
-// peerCAPollLoop walks every online peer once per tick and pulls their
-// /api/ca-cert. New CAs (fingerprint not in cache) get persisted on
-// disk and installed into the system keychain via `security`. Each new
-// CA install prompts the user once for their macOS password.
-//
-// First poll fires after a short delay (let camp peer-list populate),
-// then every 30s.
-func (e *Engine) peerCAPollLoop(ctx context.Context) {
-	defer e.workers.Done()
-	// Give camp poller a tick to discover peers before we try to talk
-	// to them. 5s is enough — first announce + first /api/id/<camp>
-	// usually complete in <2s.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(5 * time.Second):
-	}
-	e.pollAllPeerCAs(ctx)
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		e.pollAllPeerCAs(ctx)
-	}
-}
-
-func (e *Engine) pollAllPeerCAs(ctx context.Context) {
-	type target struct {
-		host string
-		name string
-	}
-	var targets []target
+// TunnelHTTPPort is the port other peers expose their /api/* on over
+// utun (same value we host the UI on). Empty when the engine wasn't
+// started with a UI bind. Exposed for services/trust and any future
+// peer-poll service.
+func (e *Engine) TunnelHTTPPort() string {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tunnelHTTPPort
+}
+
+// OnlinePeerHTTPInfo is one peer reachable over utun for any
+// service-level poll loop (CA poll, future domain poll, etc.). The
+// shape is intentionally minimal — just what a poller needs to dial
+// the peer and label log lines.
+type OnlinePeerHTTPInfo struct {
+	Name string
+	Host string // overlay v4 string
+}
+
+// OnlinePeersForCAPoll returns the snapshot of currently-online peers
+// in the shape services/trust needs. Filters out peers without a
+// deriveable HTTP host (no Pub yet).
+func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]OnlinePeerHTTPInfo, 0, len(e.peers))
 	for _, p := range e.peers {
 		if !p.IsOnline() {
 			continue
 		}
-		targets = append(targets, target{host: e.peerHTTPHostLocked(p), name: p.Name})
-	}
-	port := e.tunnelHTTPPort
-	e.mu.Unlock()
-	if port == "" {
-		log.Printf("ca-poll: tunnel HTTP port not set (engine running without UI?) — skipping")
-		return
-	}
-	if len(targets) == 0 {
-		return
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.host, port) + "/api/ca-cert"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
+		host := e.peerHTTPHostLocked(p)
+		if host == "" {
 			continue
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("ca-poll: peer %s: GET %s: %v", t.name, url, err)
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		resp.Body.Close()
-		if err != nil {
-			log.Printf("ca-poll: peer %s: read body: %v", t.name, err)
-			continue
-		}
-		if resp.StatusCode != 200 {
-			log.Printf("ca-poll: peer %s: HTTP %d (peer running an old f2f-mac without /api/ca-cert?)", t.name, resp.StatusCode)
-			continue
-		}
-		e.discoverPeerCA(t.name, body)
+		out = append(out, OnlinePeerHTTPInfo{Name: p.Name, Host: host})
 	}
+	return out
 }
 
-// discoverPeerCA parses the PEM body, computes a fingerprint, persists
-// the cert to disk, and records it as a known-but-not-installed peer CA.
-// It does NOT touch the system keychain — installing (which prompts for
-// the macOS password) is a deliberate user action via InstallPeerCA.
-// If the CA already happens to be in the keychain, it's marked installed.
-func (e *Engine) discoverPeerCA(peerName string, pem []byte) {
-	cert, err := parseCACert(pem)
-	if err != nil {
-		log.Printf("ca: peer %s: parse: %v", peerName, err)
-		return
-	}
-	fp := certFingerprint(cert)
-
-	e.trustedPeerCAsMu.Lock()
-	if _, seen := e.trustedPeerCAs[fp]; seen {
-		e.trustedPeerCAsMu.Unlock()
-		return
-	}
-	e.trustedPeerCAsMu.Unlock()
-
-	dir := e.trustedPeersDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		log.Printf("ca: mkdir %s: %v", dir, err)
-		return
-	}
-	certPath := filepath.Join(dir, peerName+".crt")
-	if err := os.WriteFile(certPath, pem, 0o644); err != nil {
-		log.Printf("ca: write %s: %v", certPath, err)
-		return
-	}
-
-	full256 := strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256(cert.Raw)))
-	installed := platform.TrustStoreContains(full256)
-
-	e.trustedPeerCAsMu.Lock()
-	entry := TrustedPeerCA{
-		PeerName:    peerName,
-		CommonName:  cert.Subject.CommonName,
-		Fingerprint: fp,
-		Installed:   installed,
-	}
-	if installed {
-		entry.InstalledAt = time.Now().Unix()
-	}
-	e.trustedPeerCAs[fp] = entry
-	e.trustedPeerCAsMu.Unlock()
-	e.persistTrustedPeerToCamp(entry)
-	log.Printf("ca: discovered peer %s CA (fp %s, installed=%v)", peerName, fp, installed)
-}
-
-// InstallPeerCA adds a previously-discovered peer CA to the system
-// trust store as a trusted root. macOS prompts for the admin
-// password. Triggered by the user clicking "install" in the UI.
-func (e *Engine) InstallPeerCA(fp string) error {
-	e.trustedPeerCAsMu.Lock()
-	entry, ok := e.trustedPeerCAs[fp]
-	e.trustedPeerCAsMu.Unlock()
-	if !ok {
-		return fmt.Errorf("unknown peer CA %s", fp)
-	}
-	if entry.Installed {
-		return nil
-	}
-	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
-	log.Printf("ca: installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
-	if err := platform.TrustStoreAdd(certPath); err != nil {
-		return fmt.Errorf("install peer %s: %w", entry.PeerName, err)
-	}
-	e.trustedPeerCAsMu.Lock()
-	entry.Installed = true
-	entry.InstalledAt = time.Now().Unix()
-	e.trustedPeerCAs[fp] = entry
-	e.trustedPeerCAsMu.Unlock()
-	e.persistTrustedPeerToCamp(entry)
-	log.Printf("ca: installed peer %s CA", entry.PeerName)
-	return nil
-}
-
-// persistTrustedPeerToCamp upserts the trusted-CA metadata into camp
-// config. PEM bytes stay under trustedPeersDir — config carries only
-// fingerprint + display fields so the UI can list and (eventually)
-// remove CAs without re-reading the trust store.
-func (e *Engine) persistTrustedPeerToCamp(t TrustedPeerCA) {
+// UpsertTrustedPeerInCamp upserts (by fingerprint) the trusted-CA
+// metadata into the active camp config and persists. PEM bytes stay
+// under TrustedPeersDir — config carries only fingerprint + display
+// fields so the UI can list and remove CAs without re-reading the
+// trust store. No-op when the engine isn't running.
+func (e *Engine) UpsertTrustedPeerInCamp(t config.TrustedPeer) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.camp == nil {
@@ -1842,31 +1640,13 @@ func (e *Engine) persistTrustedPeerToCamp(t TrustedPeerCA) {
 	}
 	for i, ex := range e.camp.TrustedPeers {
 		if ex.Fingerprint == t.Fingerprint {
-			e.camp.TrustedPeers[i] = config.TrustedPeer{
-				PeerName:    t.PeerName,
-				CommonName:  t.CommonName,
-				Fingerprint: t.Fingerprint,
-				InstalledAt: t.InstalledAt,
-			}
+			e.camp.TrustedPeers[i] = t
 			e.persistCampLocked()
 			return
 		}
 	}
-	e.camp.TrustedPeers = append(e.camp.TrustedPeers, config.TrustedPeer{
-		PeerName:    t.PeerName,
-		CommonName:  t.CommonName,
-		Fingerprint: t.Fingerprint,
-		InstalledAt: t.InstalledAt,
-	})
+	e.camp.TrustedPeers = append(e.camp.TrustedPeers, t)
 	e.persistCampLocked()
-}
-
-func parseCACert(p []byte) (*x509.Certificate, error) {
-	block, _ := pem.Decode(p)
-	if block == nil {
-		return nil, fmt.Errorf("not a PEM block")
-	}
-	return x509.ParseCertificate(block.Bytes)
 }
 
 // applyPeerList reconciles our peers map with the camp's current view

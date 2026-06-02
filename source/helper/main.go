@@ -22,6 +22,7 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/trust"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
 
@@ -146,11 +147,12 @@ func uiCmd(args []string) error {
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
 	// Services that ride on top of the engine. Construction is cheap
-	// and stateless — the actual lifecycle hooks (e.g. firewall first-
-	// apply at engine-ready) live inside each service.
+	// and stateless — the actual lifecycle hooks (firewall first-apply
+	// at engine-ready, trust poll loop) are wired below.
 	fwSvc := firewall.New(eng)
+	trustSvc := trust.New(eng)
 
-	srv := web.New(eng, fwSvc, *bind)
+	srv := web.New(eng, fwSvc, trustSvc, *bind)
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.
@@ -161,6 +163,11 @@ func uiCmd(args []string) error {
 		if err := srv.BindProxies(localIP); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
+		// Pick up this camp's on-disk peer-CA cache. Additive — entries
+		// from earlier camps stay in memory; that matches pre-extract
+		// behaviour and lets the UI show peers from any camp the user
+		// has ever joined.
+		trustSvc.Load()
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
@@ -174,6 +181,16 @@ func uiCmd(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Trust service poll loop runs for the lifetime of the process and
+	// is resilient to the engine going up/down — TunnelHTTPPort/peers
+	// getters return empty when the engine isn't running, the loop
+	// just skips that tick.
+	trustDone := make(chan struct{})
+	go func() {
+		defer close(trustDone)
+		trustSvc.Run(ctx)
+	}()
 
 	go func() {
 		log.Printf("UI listening on http://%s", *bind)
@@ -208,6 +225,13 @@ func uiCmd(args []string) error {
 	_ = srv.Shutdown(shutCtx)
 	if err := eng.Stop(); err != nil {
 		log.Printf("WARN: engine stop: %v", err)
+	}
+	// Wait for trust poll loop to drain its current tick before exit.
+	// ctx is already done, so the loop's select sees it on next pass.
+	select {
+	case <-trustDone:
+	case <-time.After(2 * time.Second):
+		log.Printf("WARN: trust poll loop did not exit in 2s")
 	}
 	return nil
 }
