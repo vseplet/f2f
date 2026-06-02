@@ -159,6 +159,132 @@ func TestBuildPeersBlockEmpty(t *testing.T) {
 	}
 }
 
+// First-time push: prev is empty, curr has peers → blob emits full
+// peer blocks (create semantics, no update_only). Drives the "device
+// just came up, all peers are new" path.
+func TestIncrementalFirstPush(t *testing.T) {
+	curr := NormalizePeers([]PeerSyncInfo{
+		{
+			WGPub:        strings.Repeat("a", 64),
+			Endpoint:     "1.1.1.1:1",
+			AllowedCIDRs: []string{"100.64.0.1/32"},
+		},
+		{
+			WGPub:        strings.Repeat("b", 64),
+			Endpoint:     "2.2.2.2:2",
+			AllowedCIDRs: []string{"100.64.0.2/32", "10.0.0.0/8"},
+		},
+	})
+	blob := BuildIncrementalBlock(nil, curr, 25)
+	if blob == "" {
+		t.Fatal("expected non-empty blob, got empty")
+	}
+	if strings.Contains(blob, "update_only=true") {
+		t.Errorf("first push should not use update_only: %s", blob)
+	}
+	if strings.Contains(blob, "remove=true") {
+		t.Errorf("first push should not have removes: %s", blob)
+	}
+	// Both peers' public_key must appear.
+	for _, p := range curr {
+		if !strings.Contains(blob, "public_key="+p.WGPub) {
+			t.Errorf("missing public_key=%s in blob:\n%s", p.WGPub, blob)
+		}
+	}
+}
+
+// Identical prev and curr → empty blob → caller skips IpcSet → live
+// sessions preserved. This is the optimization that kills the
+// every-30s thrash.
+func TestIncrementalNoOpWhenUnchanged(t *testing.T) {
+	peers := NormalizePeers([]PeerSyncInfo{
+		{WGPub: strings.Repeat("a", 64), Endpoint: "1.1.1.1:1", AllowedCIDRs: []string{"100.64.0.1/32"}},
+	})
+	blob := BuildIncrementalBlock(peers, peers, 25)
+	if blob != "" {
+		t.Errorf("expected empty blob for identical snapshot, got:\n%s", blob)
+	}
+}
+
+// Peer removed from camp → emit remove command for that pub. Other
+// peers' sessions remain untouched.
+func TestIncrementalRemove(t *testing.T) {
+	a := PeerSyncInfo{WGPub: strings.Repeat("a", 64), Endpoint: "1.1.1.1:1", AllowedCIDRs: []string{"100.64.0.1/32"}}
+	b := PeerSyncInfo{WGPub: strings.Repeat("b", 64), Endpoint: "2.2.2.2:2", AllowedCIDRs: []string{"100.64.0.2/32"}}
+	prev := NormalizePeers([]PeerSyncInfo{a, b})
+	curr := NormalizePeers([]PeerSyncInfo{a}) // b removed
+	blob := BuildIncrementalBlock(prev, curr, 25)
+	wantRemove := "public_key=" + b.WGPub + "\nremove=true\n"
+	if !strings.Contains(blob, wantRemove) {
+		t.Errorf("missing %q in blob:\n%s", wantRemove, blob)
+	}
+	// Should NOT touch peer a — no public_key=aaa... block (other than
+	// the one in the remove for b which is a different pub).
+	if strings.Contains(blob, "public_key="+a.WGPub) {
+		t.Errorf("blob touches unchanged peer a, should not:\n%s", blob)
+	}
+}
+
+// Peer endpoint changed (e.g. NAT-rebind picked up via camp poll) →
+// emit update_only + new endpoint, no replace_allowed_ips. Session is
+// preserved.
+func TestIncrementalEndpointChanged(t *testing.T) {
+	a := PeerSyncInfo{WGPub: strings.Repeat("a", 64), Endpoint: "1.1.1.1:1", AllowedCIDRs: []string{"100.64.0.1/32"}}
+	a2 := a
+	a2.Endpoint = "1.1.1.1:9999"
+	prev := NormalizePeers([]PeerSyncInfo{a})
+	curr := NormalizePeers([]PeerSyncInfo{a2})
+	blob := BuildIncrementalBlock(prev, curr, 25)
+	if !strings.Contains(blob, "update_only=true") {
+		t.Errorf("endpoint change should use update_only:\n%s", blob)
+	}
+	if !strings.Contains(blob, "endpoint=1.1.1.1:9999") {
+		t.Errorf("missing new endpoint:\n%s", blob)
+	}
+	if strings.Contains(blob, "replace_allowed_ips=true") {
+		t.Errorf("endpoint-only change should NOT emit replace_allowed_ips:\n%s", blob)
+	}
+}
+
+// Peer's AllowedCIDRs changed (intercept added/removed) → emit
+// update_only + replace_allowed_ips=true + new IP list. Session is
+// preserved; only the routing trie is updated.
+func TestIncrementalAllowedCIDRsChanged(t *testing.T) {
+	a := PeerSyncInfo{WGPub: strings.Repeat("a", 64), Endpoint: "1.1.1.1:1", AllowedCIDRs: []string{"100.64.0.1/32"}}
+	a2 := a
+	a2.AllowedCIDRs = []string{"100.64.0.1/32", "10.0.0.0/8"}
+	prev := NormalizePeers([]PeerSyncInfo{a})
+	curr := NormalizePeers([]PeerSyncInfo{a2})
+	blob := BuildIncrementalBlock(prev, curr, 25)
+	if !strings.Contains(blob, "update_only=true") {
+		t.Errorf("CIDR change should use update_only:\n%s", blob)
+	}
+	if !strings.Contains(blob, "replace_allowed_ips=true") {
+		t.Errorf("CIDR change should use replace_allowed_ips=true:\n%s", blob)
+	}
+	if !strings.Contains(blob, "allowed_ip=10.0.0.0/8") {
+		t.Errorf("missing new CIDR:\n%s", blob)
+	}
+	if strings.Contains(blob, "endpoint=") {
+		t.Errorf("CIDR-only change should NOT emit endpoint line:\n%s", blob)
+	}
+}
+
+// Order-independence: AllowedCIDRs in different declaration orders
+// must be considered equal after NormalizePeers. Otherwise a routine
+// camp poll could spuriously re-emit identical configs.
+func TestIncrementalOrderIndependent(t *testing.T) {
+	prev := NormalizePeers([]PeerSyncInfo{
+		{WGPub: strings.Repeat("a", 64), Endpoint: "1:1", AllowedCIDRs: []string{"10.0.0.0/8", "100.64.0.1/32"}},
+	})
+	curr := NormalizePeers([]PeerSyncInfo{
+		{WGPub: strings.Repeat("a", 64), Endpoint: "1:1", AllowedCIDRs: []string{"100.64.0.1/32", "10.0.0.0/8"}},
+	})
+	if blob := BuildIncrementalBlock(prev, curr, 25); blob != "" {
+		t.Errorf("reordered CIDRs should yield empty diff, got:\n%s", blob)
+	}
+}
+
 func itoa(u uint32) string {
 	const digits = "0123456789"
 	if u == 0 {

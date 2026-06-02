@@ -3,6 +3,7 @@ package awg
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
 	"github.com/amnezia-vpn/amneziawg-go/device"
@@ -19,8 +20,17 @@ import (
 //
 // One Device per camp — Start is called once at Engine.Start in camp
 // mode; Close is called once at Engine.Stop.
+//
+// SyncPeers tracks the last-pushed peer snapshot internally to compute
+// incremental diff against subsequent calls — this lets routine camp
+// polls (~every 30s) be no-ops when nothing changed, and lets endpoint
+// or AllowedIPs changes apply WITHOUT resetting live WG sessions for
+// unaffected peers.
 type Device struct {
 	dev *device.Device
+
+	mu        sync.Mutex
+	lastPeers []PeerSyncInfo
 }
 
 // Start brings up an AmneziaWG device backed by:
@@ -68,17 +78,34 @@ func (d *Device) Close() error {
 	return nil
 }
 
-// SyncPeers atomically replaces the device's peer list with the given
-// verified peers. Uses replace_peers=true: any in-flight handshakes
-// get reset, but at our call frequency (first pair-handshake success
-// per peer + periodic camp poll) this is acceptable — WG handshakes
-// re-complete in tens of ms.
+// SyncPeers reconciles the device's peer set with `peers` using
+// incremental UAPI updates: only diffs against the last-pushed
+// snapshot are sent. Unchanged peers keep their live WG sessions
+// across the call (no handshake reset). Peer additions / removals /
+// endpoint changes / AllowedIPs changes apply per-peer, not whole-set.
 //
-// Empty peers slice clears the device — device stays up, just routes
-// nothing.
+// Returns nil immediately (no IpcSet call) when the snapshot is
+// identical to the previous push — frequent caller (camp poll every
+// 30s) becomes a no-op when nothing actually changed.
+//
+// Empty peers slice removes all peers but keeps the device alive.
 func (d *Device) SyncPeers(peers []PeerSyncInfo) error {
 	if d == nil || d.dev == nil {
 		return fmt.Errorf("awg: device not started")
 	}
-	return d.dev.IpcSet(BuildPeersBlock(peers, keepaliveDefaultSec))
+	normalized := NormalizePeers(peers)
+	d.mu.Lock()
+	prev := d.lastPeers
+	blob := BuildIncrementalBlock(prev, normalized, keepaliveDefaultSec)
+	if blob == "" {
+		d.mu.Unlock()
+		return nil // identical snapshot — no IpcSet, sessions preserved
+	}
+	// Store the new snapshot BEFORE IpcSet so that even on partial
+	// failure (some peer-blocks applied, the rest failed) we don't
+	// re-emit the same blob next call — caller will see the failure
+	// and decide whether to retry.
+	d.lastPeers = normalized
+	d.mu.Unlock()
+	return d.dev.IpcSet(blob)
 }
