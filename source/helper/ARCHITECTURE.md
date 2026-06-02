@@ -3196,6 +3196,61 @@ camp'а, TLS у прокси server-only (клиент не аутентифиц
 WebAuthn/passkey тут естественен: у f2f настоящий HTTPS (local CA) и
 стабильный домен — готовый relying party.
 
+### Мимикрия под self-hosted OIDC-провайдеры
+
+В homelab/self-hosted сценах уже сложилась экосистема легковесных
+passkey-first OIDC-провайдеров: **PocketID**, **Authelia**, **Authentik**,
+Keycloak (потяжелее). Сервисы вроде Nextcloud, Gitea, Vaultwarden,
+Immich часто сконфигурированы поднимать логин через эти IDP'ы.
+
+Идея: f2f выставляет endpoint'ы в форматах **этих конкретных
+провайдеров**, чтобы существующая конфигурация сервиса (`oidc_issuer:
+https://pocket-id.example/...`) **просто работала** при направлении на
+f2f-endpoint — без правок настроек сервиса, без изучения generic OIDC.
+
+Что меняется в конфиге сервиса:
+- Только base URL: `pocket-id.example` → `auth.xyz.f2f`
+- Возможно client_id/secret (выдаются нашим OIDC при регистрации)
+
+Что **НЕ меняется**:
+- Discovery URL path, claims shape, scope-семантика — всё как у
+  имитируемого провайдера.
+
+В коде это под-профили мимикрии:
+
+```
+app/auth/profiles/
+  pocketid.go    — формат PocketID (passkey-first, минималистичный OIDC)
+  authelia.go    — Authelia API
+  authentik.go   — Authentik API
+  generic.go     — стандартный OIDC (для тех кто умеет custom provider)
+```
+
+Какой профиль активен — выбирается по virtual-host
+(`pocketid.xyz.f2f`, `authelia.xyz.f2f`) или по client_id-префиксу.
+Под капотом identity та же — camp Ed25519 + passkey gate.
+
+Зачем именно self-hosted, а не Google/GitHub-style мимикрия: эти IDP'ы
+**уже рассчитаны** на homelab, у них стандартизованные интерфейсы, не
+завязка на конкретные имена доменов или legal-имена брендов. Мимикрия
+под Google могла бы (теоретически) дать «Sign in with Google» в любом
+SaaS-приложении, но это:
+- сильно сложнее (Google'ский OIDC расширен specific-claims)
+- упирается в legal/branding (использование чужого имени)
+- наш use case — закрытая camp-сеть с self-hosted сервисами, где
+  PocketID-формат закрывает 90% случаев.
+
+Под-вопросы:
+- **Какие профили приоритетны**: PocketID + Authelia + generic — этого
+  должно хватить под текущие сервисы в camp.
+- **Discovery & JWKS**: каждый профиль выставляет свой
+  `.well-known/openid-configuration` + `jwks_uri` с **нашим**
+  подписывающим ключом. Сервис фетчит discovery → видит наш JWKS → ок.
+- **Token claims**: маппинг camp identity → claims конкретного
+  профиля. `sub` = pub-fingerprint, `preferred_username` = peer-name,
+  `email` = `<peer>@<camp>.f2f` и т.д., с поправкой на специфику
+  профиля.
+
 ### Фаза 1 (сейчас, голый UDP): «Sign in with f2f» + passkey
 
 Challenge-response, личность доказывается подписью, не сетью:
