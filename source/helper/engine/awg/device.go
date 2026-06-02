@@ -94,18 +94,22 @@ func (d *Device) SyncPeers(peers []PeerSyncInfo) error {
 		return fmt.Errorf("awg: device not started")
 	}
 	normalized := NormalizePeers(peers)
+	// Hold d.mu across the entire diff + IpcSet sequence. Without this,
+	// two concurrent SyncPeers calls can race: caller B's diff-against-A's-
+	// lastPeers gets computed and pushed BEFORE A's IpcSet actually
+	// applies — `update_only=true` then no-ops because the peer hasn't
+	// been created yet, and B's changes silently disappear.
 	d.mu.Lock()
-	prev := d.lastPeers
-	blob := BuildIncrementalBlock(prev, normalized, keepaliveDefaultSec)
+	defer d.mu.Unlock()
+	blob := BuildIncrementalBlock(d.lastPeers, normalized, keepaliveDefaultSec)
 	if blob == "" {
-		d.mu.Unlock()
 		return nil // identical snapshot — no IpcSet, sessions preserved
 	}
-	// Store the new snapshot BEFORE IpcSet so that even on partial
-	// failure (some peer-blocks applied, the rest failed) we don't
-	// re-emit the same blob next call — caller will see the failure
-	// and decide whether to retry.
+	if err := d.dev.IpcSet(blob); err != nil {
+		// Do NOT update lastPeers on failure — leave it as-is so the
+		// next sync recomputes the diff and retries the same changes.
+		return err
+	}
 	d.lastPeers = normalized
-	d.mu.Unlock()
-	return d.dev.IpcSet(blob)
+	return nil
 }

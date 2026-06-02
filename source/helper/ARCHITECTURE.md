@@ -2700,6 +2700,215 @@ Open. Open поддерживает Close→Open циклы корректно.
   бы это сразу — было видно что AWG-magic packets классифицируются
   и Deliver'ятся, но Device ничего не "Received". Логи спасли.
 
+### Критический фикс №2: Race в SyncPeers IpcSet (commit `e5bea28`)
+
+**Симптом**: после внедрения incremental UAPI (`33f4cd1`) HTTP-запросы
+через overlay (`ca-poll`, `domains-poll`, и т.д.) начали timeout'иться
+у ВСЕХ пиров одновременно. При этом:
+- pair-handshake (наш control plane через H5 envelope) работал — UI
+  показывал peer'ов зелёными
+- AWG handshake завершался — в логах `awg: peer(X) - Received
+  handshake response`, `Receiving keepalive packet`
+- НО реальный TCP-трафик через overlay не доходил
+
+То есть control plane живой, AWG-keepalive'ы летят, но data
+plane мёртв. Странное расхождение.
+
+**Корень проблемы** — гонка между **concurrent goroutine'ами**,
+запускающими `awgSyncPeers`.
+
+#### Почему вообще несколько goroutine'ов?
+
+`awgSyncPeers` запускается **через `go ...` (fire-and-forget)** из
+пяти точек:
+
+```
+handlePairReq    → on firstReq=true  → go awgSyncPeers
+handlePairRes    → on firstRes=true  → go awgSyncPeers
+applyPeerList    → каждый camp poll  → go awgSyncPeers
+AddIntercept     → после успеха      → go awgSyncPeers
+RemoveIntercept  → после успеха      → go awgSyncPeers
+```
+
+Зачем `go`? Чтобы **не блокировать** место вызова — handlePairReq
+должен быстро ответить pair_res'ом, applyPeerList не должен блочить
+camp poll. Все они на горячих путях.
+
+Но эти goroutine'ы между собой **никак не координируются**. При
+первом контакте с новым пиром три триггера летят в окне ~100ms:
+сначала applyPeerList сообщает что peer есть → потом приходит
+pair_req → потом pair_res. Три параллельных `awgSyncPeers`. Каждый
+строит свой snapshot и идёт в `dev.SyncPeers` → внутри в `IpcSet`.
+
+#### Что было в первой версии incremental кода
+
+```go
+func (d *Device) SyncPeers(peers []PeerSyncInfo) error {
+    normalized := NormalizePeers(peers)
+    d.mu.Lock()
+    blob := BuildIncrementalBlock(d.lastPeers, normalized, ...)
+    if blob == "" {
+        d.mu.Unlock()
+        return nil
+    }
+    d.lastPeers = normalized   // ← обновили БЕЗ IpcSet'а
+    d.mu.Unlock()              // ← отпустили lock ДО IpcSet'а
+    return d.dev.IpcSet(blob)  // ← IpcSet runs unsynchronized
+}
+```
+
+Lock защищает только diff и обновление `lastPeers`, но **не сам
+IpcSet**. После Unlock следующий вызывающий тут же лезет в lock,
+видит обновлённый `lastPeers`, считает свой diff против него,
+обновляет дальше, выходит, идёт в IpcSet.
+
+В итоге **N IpcSet'ов** запускаются параллельно, **порядок их
+выполнения не определён**.
+
+#### Что ломается из-за неупорядоченности
+
+Концретный сценарий с двумя goroutine'ами A и B при первом контакте:
+
+```
+T=0      A (firstReq):    diff против prev=nil → CREATE X с E1
+                          обновил lastPeers=[X с E1], отпустил lock
+                          ВНЕ lock'а: вызывает IpcSet(CREATE X с E1)
+
+T=0.001  B (firstRes):    в это время X уже в lastPeers, но не в
+                          Device. B видит lastPeers=[X с E1], считает
+                          diff против curr=[X с E2 — pair_res пришёл
+                          с другого endpoint'а] → update_only+endpoint=E2
+                          обновил lastPeers=[X с E2], отпустил lock
+                          ВНЕ lock'а: вызывает IpcSet(update_only X E2)
+
+T=0.002  Какой из IpcSet'ов выполнится первым в Device?
+```
+
+Если первым отработает A's IpcSet — peer X создан с E1. Потом B's
+IpcSet: `public_key=X` найдёт существующего → `update_only=true` no-op
+→ `endpoint=E2` обновит. **Финал: X с E2 ✓**.
+
+Если первым отработает B's IpcSet (это валидно — порядок неопределён):
+- `public_key=X` → LookupPeer(X) **не найдёт** (A ещё не создал) →
+  Device автоматом NewPeer(X) → `peer.created=true`
+- `update_only=true` → раз `peer.created=true`, Device **отменяет**
+  только что созданного → RemovePeer + dummy
+- `endpoint=E2` → применяется к dummy → **no-op**
+
+Потом A's IpcSet: создаёт X с E1. **Финал: X с E1 ✗**. E2 потеряно.
+
+**В нашем `lastPeers` записано E2, в Device по факту E1.** Они
+рассинхронизировались. AWG продолжает слать пакеты на E1 (старый
+endpoint после NAT-rebind). HTTP-пакеты идут "в никуда" → timeout.
+
+#### Почему control plane не пострадал
+
+Pair-handshake идёт через `e.udp.WriteToUDP(packet, peer.UDPAddr)` —
+**мы сами** управляем endpoint'ом каждого пакета. peer.UDPAddr в
+`peerState` мы апдейтим в handlePairReq/Res, и оно правильное.
+
+AWG же шлёт на endpoint **который ему запушили через UAPI** — а там
+из-за race застряло E1. Поэтому pair шёл, AWG handshake шёл (потому
+что mac-mini посылал нам, мы отвечали, всё бидиректное), но data
+plane (наш HTTP через утун → AWG → wire) умирал.
+
+Плюс был сопутствующий баг: `d.lastPeers = normalized` **до** вызова
+IpcSet. Если IpcSet возвращал ошибку, состояние Device и наша
+память расходятся ещё сильнее, retry не сработает (следующий diff
+покажет что всё ок).
+
+#### Фикс
+
+Lock держится **на всё время** SyncPeers, включая IpcSet:
+
+```go
+func (d *Device) SyncPeers(peers []PeerSyncInfo) error {
+    normalized := NormalizePeers(peers)
+    d.mu.Lock()
+    defer d.mu.Unlock()
+    blob := BuildIncrementalBlock(d.lastPeers, normalized, ...)
+    if blob == "" {
+        return nil
+    }
+    if err := d.dev.IpcSet(blob); err != nil {
+        return err  // не обновляем lastPeers — следующий sync ретрайнет
+    }
+    d.lastPeers = normalized
+    return nil
+}
+```
+
+Эффекты:
+- IpcSet'ы **строго сериализованы** через `d.mu`. Конкурентные
+  goroutine'ы выстраиваются в очередь.
+- `lastPeers` обновляется **только после успеха IpcSet** — память и
+  Device консистентны.
+- На ошибке IpcSet `lastPeers` не меняется, следующий sync вычислит
+  тот же diff и попробует снова.
+
+#### Лучшая архитектура на будущее (channel-coalescing)
+
+Lock работает, но плодит лишние IpcSet'ы — если 3 события прилетели
+в окне 100ms, делаются 3 sync'а (вторые два, скорее всего, no-op
+если первый уже отработал). Идеально — **один выделенный goroutine**
++ канал coalescing:
+
+```go
+type Engine struct {
+    ...
+    awgSyncCh chan struct{}  // buffered=1
+}
+
+func (e *Engine) requestAwgSync() {
+    select {
+    case e.awgSyncCh <- struct{}{}:
+    default: // уже есть pending — пропускаем, текущий обработает свежее состояние
+    }
+}
+
+// В Engine.Start:
+go e.awgSyncWorker(ctx)
+
+func (e *Engine) awgSyncWorker(ctx) {
+    for {
+        select {
+        case <-ctx.Done(): return
+        case <-e.awgSyncCh:
+            e.awgSyncPeers()  // строит свежий snapshot из e.peers, синхронно
+        }
+    }
+}
+```
+
+Триггеры (`handlePairReq`/`handlePairRes`/`applyPeerList`/intercept ops)
+вместо `go e.awgSyncPeers()` вызывают `e.requestAwgSync()`. Если 5
+триггеров случились за миллисекунду — в канале лежит максимум **один**
+запрос, worker'ом выполнится один sync, который увидит финальное
+состояние.
+
+Это в backlog'е как ещё одна оптимизация, не critical.
+
+#### Уроки
+
+- **Fire-and-forget `go` goroutine'ы на shared state — почти всегда
+  bug**. Если несколько мест запускают `go workerThatMutatesState()`,
+  нужно явно сериализовать через lock или single-goroutine pattern.
+- **Lock должен покрывать всё что должно быть атомарным**, не только
+  чтение и подготовку. В нашем случае IpcSet — изменяющая Device
+  операция — должен был быть под lock'ом.
+- **Если состояние нашей памяти ≠ состоянию внешней системы (Device)
+  — это потенциальный disaster** при возобновлении операций. Update
+  lastPeers ТОЛЬКО после подтверждения что Device применил блоб.
+- **Unit-тесты не поймали race** потому что они однопоточные — diff
+  для последовательных snapshot'ов проверялся, но не concurrent IpcSet
+  вызовы. Hard to test race conditions; нужны явные stress-тесты с
+  goroutine'ами или fuzz.
+- **Симптом был тонкий**: control plane живой, AWG handshake'и идут,
+  keepalive'ы летят, но HTTP не работает — потому что данные шли
+  на STARED endpoint, который не доходит до перерегистрированного
+  пира. Без понимания semantic'и `update_only=true` в WG UAPI вообще
+  не было бы зацепки.
+
 ### Открытые вопросы
 
 1. **Friend's Windows side**: пишет UDP-обёртку с нуля или использует
