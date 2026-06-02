@@ -175,6 +175,7 @@ func (s *Service) seedFromStore() error {
 	s.peerDomsMu.Lock()
 	s.peerDoms = pd
 	s.peerDomsMu.Unlock()
+	log.Printf("dns: seeded %d my-domains + %d peers with cached domains", len(mine), len(pd))
 	return nil
 }
 
@@ -287,35 +288,46 @@ func (s *Service) SetMyDomains(list []Entry) error {
 }
 
 // RemovePeerDomain drops one (peer, domain) entry from the in-memory
-// mirror and from the persisted peer catalog. If the peer is online
-// and still publishing the name, the next successful poll re-adds it
-// — removal is for stale entries where the peer no longer publishes.
+// mirror and from the persisted peer catalog. Walks every catalog
+// row matching peerName since legacy data may have multiple rows for
+// the same peer name (one stale row with empty Pub plus the current
+// row with a proper Pub). If the peer is online and still publishing
+// the name, the next successful poll re-adds it.
 func (s *Service) RemovePeerDomain(peerName, domainName string) error {
 	if peerName == "" || domainName == "" {
 		return errors.New("peer and name required")
 	}
-	var droppedPub string
+	droppedPubs := map[string]struct{}{}
 	if err := s.store.UpdateCamp(s.campID, func(c *config.Camp) {
 		for i := range c.PeerCatalog {
 			if c.PeerCatalog[i].Name != peerName {
 				continue
 			}
 			kept := c.PeerCatalog[i].Domains[:0]
+			changed := false
 			for _, d := range c.PeerCatalog[i].Domains {
 				if d.Name == domainName {
-					droppedPub = c.PeerCatalog[i].Pub
+					changed = true
 					continue
 				}
 				kept = append(kept, d)
 			}
-			c.PeerCatalog[i].Domains = kept
+			if changed {
+				c.PeerCatalog[i].Domains = kept
+				if c.PeerCatalog[i].Pub != "" {
+					droppedPubs[c.PeerCatalog[i].Pub] = struct{}{}
+				}
+			}
 		}
 	}); err != nil {
 		return err
 	}
-	if droppedPub != "" {
-		s.peerDomsMu.Lock()
-		list := s.peerDoms[droppedPub]
+	if len(droppedPubs) == 0 {
+		return nil
+	}
+	s.peerDomsMu.Lock()
+	for pub := range droppedPubs {
+		list := s.peerDoms[pub]
 		kept := list[:0]
 		for _, d := range list {
 			if d.Name == domainName {
@@ -323,9 +335,9 @@ func (s *Service) RemovePeerDomain(peerName, domainName string) error {
 			}
 			kept = append(kept, d)
 		}
-		s.peerDoms[droppedPub] = kept
-		s.peerDomsMu.Unlock()
+		s.peerDoms[pub] = kept
 	}
+	s.peerDomsMu.Unlock()
 	return nil
 }
 
@@ -454,12 +466,15 @@ func (s *Service) PollPeers(ctx context.Context) {
 func (s *Service) pollOnce(ctx context.Context) {
 	port := s.eng.TunnelHTTPPort()
 	if port == "" {
+		log.Printf("dns-poll: tunnel HTTP port not set — skipping")
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
+		log.Printf("dns-poll: 0 peers online — skipping tick")
 		return
 	}
+	log.Printf("dns-poll: polling %d peer(s) on port %s", len(targets), port)
 	client := &http.Client{Timeout: 3 * time.Second}
 	for _, t := range targets {
 		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
@@ -477,32 +492,30 @@ func (s *Service) pollOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		s.upsertPeer(t.Name, list)
+		s.upsertPeer(t.Pub, t.Name, list)
+		log.Printf("dns: peer %s published %d domain(s)", t.Name, len(list))
 	}
 }
 
 // upsertPeer mirrors a peer's just-polled domain list into both the
 // in-memory peerDoms map and the persisted PeerCatalog entry. Match
-// is by peer name (matches the camp catalog key in
-// store.PeerCatalog).
-func (s *Service) upsertPeer(peerName string, list []Entry) {
-	if peerName == "" {
+// is by Pub — Name is a display-only hint that may collide across
+// historical catalog entries (e.g. one legacy row with empty Pub
+// plus a new row with proper Pub for the same peer name). Pub is
+// the only stable key.
+func (s *Service) upsertPeer(pub, peerName string, list []Entry) {
+	if pub == "" {
 		return
 	}
 	cfgDomains := toCampDomains(list)
-	var pub string
 	_ = s.store.UpdateCamp(s.campID, func(c *config.Camp) {
 		for i := range c.PeerCatalog {
-			if c.PeerCatalog[i].Name == peerName {
+			if c.PeerCatalog[i].Pub == pub {
 				c.PeerCatalog[i].Domains = cfgDomains
-				pub = c.PeerCatalog[i].Pub
 				return
 			}
 		}
 	})
-	if pub == "" {
-		return
-	}
 	s.peerDomsMu.Lock()
 	s.peerDoms[pub] = append([]Entry(nil), list...)
 	s.peerDomsMu.Unlock()

@@ -680,7 +680,44 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.Status())
+	writeJSON(w, http.StatusOK, s.statusWithDomains())
+}
+
+// peerStatusView wraps engine.PeerStatusInfo with the per-peer
+// domains slice that engine no longer carries (services/dns owns
+// that catalog). Marshals as the original PeerStatusInfo shape plus
+// a "domains" field, so the UI doesn't need any client changes.
+type peerStatusView struct {
+	engine.PeerStatusInfo
+	Domains []dns.Entry `json:"domains,omitempty"`
+}
+
+// statusView re-serialises engine.Status with peerStatusView in
+// place of the bare PeerStatusInfo, preserving the rest of the
+// status shape verbatim.
+type statusView struct {
+	engine.Status
+	Peers []peerStatusView `json:"peers"`
+}
+
+// statusWithDomains assembles the /api/status response by joining
+// engine.Status with the dns service's view of each peer's domain
+// catalog. Self gets MyDomains; remote peers get their polled
+// PeerDomains snapshot (empty until the first poll succeeds).
+func (s *Server) statusWithDomains() statusView {
+	st := s.engine.Status()
+	peers := make([]peerStatusView, 0, len(st.Peers))
+	mine := s.dns.MyDomains()
+	for _, p := range st.Peers {
+		v := peerStatusView{PeerStatusInfo: p}
+		if p.Self {
+			v.Domains = mine
+		} else if p.Pub != "" {
+			v.Domains = s.dns.PeerDomains(p.Pub)
+		}
+		peers = append(peers, v)
+	}
+	return statusView{Status: st, Peers: peers}
 }
 
 // handleCampPeers serves the engine's view of the camp: peer list with
@@ -1277,7 +1314,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.engine.Status())
+	writeJSON(w, http.StatusOK, s.statusWithDomains())
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -1285,7 +1322,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.engine.Status())
+	writeJSON(w, http.StatusOK, s.statusWithDomains())
 }
 
 type addInterceptRequest struct {
