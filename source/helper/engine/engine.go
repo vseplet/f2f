@@ -202,7 +202,7 @@ type PeerStatusInfo struct {
 	Files       []PeerFile    `json:"files,omitempty"`
 	// Firewall lists the peer's user-published open ports (without
 	// built-ins). Polled from their tunnel-side /api/firewall.
-	Firewall []FirewallPort `json:"firewall,omitempty"`
+	Firewall []config.Firewall `json:"firewall,omitempty"`
 	// InCamp = camp server confirms peer is alive in its roster
 	// (sent announce within ~60s). This is independent of whether
 	// we can reach the peer ourselves — the Online flag above is the
@@ -305,7 +305,7 @@ type peerState struct {
 	LastSeenAt int64
 	Domains    []DomainEntry
 	Files      []PeerFile     // populated by filesPollLoop
-	Firewall   []FirewallPort // populated by peerFirewallPollLoop
+	Firewall   []config.Firewall // populated by peerFirewallPollLoop
 
 	UDPAddr      *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs   atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -486,12 +486,6 @@ type Engine struct {
 	// password prompt). Key is fingerprint (hex), value is metadata.
 	trustedPeerCAs   map[string]TrustedPeerCA
 	trustedPeerCAsMu sync.Mutex
-
-	// userFirewall holds user-configured allow rules for the inbound
-	// utun filter. Persisted; combined with builtinFirewallPorts when
-	// applying the pf anchor. Mutated through SetUserFirewallPorts so
-	// the anchor is kept in sync.
-	userFirewall []FirewallPort
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -857,16 +851,19 @@ func (e *Engine) Start(cfg Config) error {
 	// Firewall: default-deny inbound on the utun interface for
 	// packets directed at OUR tunnel_ip (other peers' addresses and
 	// egress-forwarded packets are unaffected). Allow only f2f-
-	// internal ports + user-configured ones. Failure here is non-
-	// fatal — tunnel still works, just without input filtering.
-	e.userFirewall = userFirewallFromCamp(e.camp)
-	fw, err := firewall.Open(tun.Name(), localIP, mergeFirewallRules(e.userFirewall))
+	// internal ports + enabled user-configured ones (sourced from the
+	// camp config, which the services/firewall service owns at the
+	// API surface). Failure here is non-fatal — tunnel still works,
+	// just without input filtering.
+	initialRules := append([]firewall.PortRule(nil), firewall.BuiltinRules...)
+	initialRules = append(initialRules, enabledUserFirewallRules(e.camp)...)
+	fw, err := firewall.Open(tun.Name(), localIP, initialRules)
 	if err != nil {
 		log.Printf("firewall: %v (input not filtered; any 0.0.0.0-bound service is exposed to camp)", err)
 	} else {
 		e.fw = fw
 		log.Printf("firewall: installed on %s scoped to %s/32, %d built-in + %d user rule(s)",
-			tun.Name(), localIP, len(builtinFirewallPorts), countEnabled(e.userFirewall))
+			tun.Name(), localIP, len(firewall.BuiltinRules), len(initialRules)-len(firewall.BuiltinRules))
 	}
 
 	// Route table is empty at start; intercepts are added via UI / API
@@ -1552,123 +1549,62 @@ func (e *Engine) trustedPeersDir() string {
 	return filepath.Join(trustedPeersRootDir, e.cfg.Camp.ID)
 }
 
-// builtinFirewallPorts are the ports f2f's own engine listens on over
-// the tunnel — always allowed, regardless of user settings. Keep in
-// sync with web.Server (HTTP API + reverse proxy ports) and the
-// torrent client.
-var builtinFirewallPorts = []firewall.PortRule{
-	{Port: 2202, Protocol: "tcp"}, // HTTP API on tunnel listener
-	{Port: 80, Protocol: "tcp"},   // HTTP reverse proxy
-	{Port: 443, Protocol: "tcp"},  // HTTPS reverse proxy
-	{Port: 6881, Protocol: "tcp"}, // BitTorrent peer wire
-	{Port: 6881, Protocol: "udp"}, // BitTorrent (uTP)
-}
-
-// FirewallPort is the API shape — a user-configured allow rule with
-// description and enabled flag (so users can toggle without losing
-// the row).
-type FirewallPort struct {
-	Port        int    `json:"port"`
-	Protocol    string `json:"protocol"`
-	Description string `json:"description,omitempty"`
-	Enabled     bool   `json:"enabled"`
-}
-
-// FirewallActive reports whether the pf anchor for the inbound utun
-// filter is currently loaded — true means user-toggled rules are
-// actually enforced by the kernel, false means the engine isn't
-// running (or pf-load failed at startup and we fell back to no
-// filtering).
-func (e *Engine) FirewallActive() bool {
+// FirewallHandle returns the live pf anchor handle (nil if pf-load
+// failed at Start or the engine isn't running). Borrowed by the
+// services/firewall service to push fresh rule sets without
+// reopening the anchor; lifecycle is owned by Engine.
+func (e *Engine) FirewallHandle() *firewall.Firewall {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.fw != nil
+	return e.fw
 }
 
-// BuiltinFirewallPorts returns the always-on f2f-internal allow list
-// (read-only from the UI's perspective).
-func (e *Engine) BuiltinFirewallPorts() []FirewallPort {
-	out := make([]FirewallPort, len(builtinFirewallPorts))
-	for i, r := range builtinFirewallPorts {
-		out[i] = FirewallPort{
-			Port:        r.Port,
-			Protocol:    r.Protocol,
-			Description: builtinPortLabel(r.Port, r.Protocol),
-			Enabled:     true,
-		}
+// CampFirewall returns a copy of the camp config's user-configured
+// firewall allow list. Returns nil when the engine isn't running
+// (no camp loaded → no list to surface).
+func (e *Engine) CampFirewall() []config.Firewall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.camp == nil {
+		return nil
 	}
+	out := make([]config.Firewall, len(e.camp.Firewall))
+	copy(out, e.camp.Firewall)
 	return out
 }
 
-func builtinPortLabel(port int, proto string) string {
-	switch {
-	case port == 2202 && proto == "tcp":
-		return "f2f HTTP API"
-	case port == 80 && proto == "tcp":
-		return "f2f HTTP proxy"
-	case port == 443 && proto == "tcp":
-		return "f2f HTTPS proxy"
-	case port == 6881:
-		return "f2f BitTorrent"
-	}
-	return ""
-}
-
-// UserFirewallPorts returns the user-configured allow list (a copy).
-func (e *Engine) UserFirewallPorts() []FirewallPort {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]FirewallPort, len(e.userFirewall))
-	copy(out, e.userFirewall)
-	return out
-}
-
-// SetUserFirewallPorts replaces the user allow list, persists it
-// into the per-camp config, and re-applies the pf anchor with
-// built-in + enabled user rules. Idempotent — safe to call on every
-// UI save. Returns ErrEngineNotRunning if the engine isn't up: the
-// camp config is keyed by camp_id, so we need a running engine to
-// know which file to write.
-func (e *Engine) SetUserFirewallPorts(list []FirewallPort) error {
-	cleaned := cleanUserFirewall(list)
+// SetCampFirewall replaces the camp config's firewall list and
+// persists the change to disk. Caller is expected to have already
+// validated the list (see services/firewall.CleanList).
+// Returns an error if the engine isn't running, since the camp
+// config is keyed by camp_id.
+func (e *Engine) SetCampFirewall(list []config.Firewall) error {
 	e.mu.Lock()
 	if !e.running || e.camp == nil {
 		e.mu.Unlock()
 		return errors.New("engine not running")
 	}
-	e.userFirewall = cleaned
-	e.camp.Firewall = userFirewallToCamp(cleaned)
-	fw := e.fw
+	e.camp.Firewall = append([]config.Firewall(nil), list...)
 	e.persistCampLocked()
 	e.mu.Unlock()
-	if fw == nil {
-		return nil // pf anchor failed at Start; will retry next Start
-	}
-	rules := mergeFirewallRules(cleaned)
-	if err := fw.Apply(rules); err != nil {
-		return fmt.Errorf("firewall: apply: %w", err)
-	}
 	return nil
 }
 
-// mergeFirewallRules combines built-in + enabled user entries into
-// the kernel-level rule list passed to pf.
-func mergeFirewallRules(user []FirewallPort) []firewall.PortRule {
-	out := make([]firewall.PortRule, 0, len(builtinFirewallPorts)+len(user))
-	out = append(out, builtinFirewallPorts...)
-	for _, p := range user {
+// enabledUserFirewallRules extracts the enabled user-configured
+// allow rules from the camp config in the shape pf wants. Used only
+// at Engine.Start to seed the initial pf-anchor rule set; subsequent
+// updates flow through services/firewall.Service.SetUserPorts which
+// owns its own merge logic.
+func enabledUserFirewallRules(c *config.Camp) []firewall.PortRule {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(c.Firewall))
+	out := make([]firewall.PortRule, 0, len(c.Firewall))
+	for _, p := range c.Firewall {
 		if !p.Enabled {
 			continue
 		}
-		out = append(out, firewall.PortRule{Port: p.Port, Protocol: p.Protocol})
-	}
-	return out
-}
-
-func cleanUserFirewall(in []FirewallPort) []FirewallPort {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]FirewallPort, 0, len(in))
-	for _, p := range in {
 		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
 		if proto != "tcp" && proto != "udp" {
 			continue
@@ -1681,56 +1617,9 @@ func cleanUserFirewall(in []FirewallPort) []FirewallPort {
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, FirewallPort{
-			Port:        p.Port,
-			Protocol:    proto,
-			Description: strings.TrimSpace(p.Description),
-			Enabled:     p.Enabled,
-		})
+		out = append(out, firewall.PortRule{Port: p.Port, Protocol: proto})
 	}
 	return out
-}
-
-// userFirewallFromCamp converts the on-disk shape to the engine's
-// in-memory FirewallPort. Returns a deduplicated/cleaned slice.
-func userFirewallFromCamp(c *config.Camp) []FirewallPort {
-	if c == nil {
-		return nil
-	}
-	out := make([]FirewallPort, 0, len(c.Firewall))
-	for _, p := range c.Firewall {
-		out = append(out, FirewallPort{
-			Port:        p.Port,
-			Protocol:    p.Protocol,
-			Description: p.Description,
-			Enabled:     p.Enabled,
-		})
-	}
-	return cleanUserFirewall(out)
-}
-
-// userFirewallToCamp is the inverse — engine shape → on-disk shape.
-func userFirewallToCamp(list []FirewallPort) []config.Firewall {
-	out := make([]config.Firewall, 0, len(list))
-	for _, p := range list {
-		out = append(out, config.Firewall{
-			Port:        p.Port,
-			Protocol:    p.Protocol,
-			Description: p.Description,
-			Enabled:     p.Enabled,
-		})
-	}
-	return out
-}
-
-func countEnabled(list []FirewallPort) int {
-	n := 0
-	for _, p := range list {
-		if p.Enabled {
-			n++
-		}
-	}
-	return n
 }
 
 // loadTrustedPeerCAs reads the on-disk record of which peer CAs were
@@ -2252,7 +2141,7 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 			continue
 		}
 		var body struct {
-			User []FirewallPort `json:"user"`
+			User []config.Firewall `json:"user"`
 		}
 		err = json.NewDecoder(resp.Body).Decode(&body)
 		resp.Body.Close()
@@ -2270,19 +2159,11 @@ func (e *Engine) pollAllPeerFirewall(ctx context.Context) {
 
 // persistPeerFirewallLocked mirrors a peer's published firewall list
 // into the camp catalog. Caller holds e.mu.
-func (e *Engine) persistPeerFirewallLocked(pub string, fw []FirewallPort) {
+func (e *Engine) persistPeerFirewallLocked(pub string, fw []config.Firewall) {
 	if e.camp == nil || pub == "" {
 		return
 	}
-	out := make([]config.Firewall, 0, len(fw))
-	for _, p := range fw {
-		out = append(out, config.Firewall{
-			Port:        p.Port,
-			Protocol:    p.Protocol,
-			Description: p.Description,
-			Enabled:     p.Enabled,
-		})
-	}
+	out := append([]config.Firewall(nil), fw...)
 	for i := range e.camp.PeerCatalog {
 		if e.camp.PeerCatalog[i].Pub == pub {
 			e.camp.PeerCatalog[i].Firewall = out
@@ -3091,7 +2972,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Active:      p.Pub == active,
 			Domains:     sortedDomains(p.Domains),
 			Files:       sortedFiles(p.Files),
-			Firewall:    append([]FirewallPort(nil), p.Firewall...),
+			Firewall:    append([]config.Firewall(nil), p.Firewall...),
 			LastPongMs:  lastPong,
 			RTTMs:       rtt,
 			Verified:    paired,

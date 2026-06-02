@@ -222,11 +222,7 @@ func (e *Engine) hydratePeersFromCatalog() {
 			st.Domains = dup
 		}
 		if len(p.Firewall) > 0 {
-			dup := make([]FirewallPort, len(p.Firewall))
-			for i, f := range p.Firewall {
-				dup[i] = FirewallPort{Port: f.Port, Protocol: f.Protocol, Description: f.Description, Enabled: f.Enabled}
-			}
-			st.Firewall = dup
+			st.Firewall = append([]config.Firewall(nil), p.Firewall...)
 		}
 		e.peers[p.Pub] = st
 	}

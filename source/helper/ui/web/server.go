@@ -27,9 +27,10 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
-	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/engine/overlay"
+	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
+	"github.com/vseplet/f2f/source/helper/services/firewall"
 )
 
 //go:embed assets
@@ -42,9 +43,10 @@ var assetsFS embed.FS
 //     WebRTC signalling through the tunnel without us exposing the UI to
 //     the LAN.
 type Server struct {
-	engine *engine.Engine
-	addr   string
-	srv    *http.Server
+	engine   *engine.Engine
+	firewall *firewall.Service
+	addr     string
+	srv      *http.Server
 
 	mu        sync.Mutex
 	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
@@ -55,9 +57,10 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, addr string) *Server {
+func New(eng *engine.Engine, fwSvc *firewall.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
+		firewall:    fwSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -903,9 +906,9 @@ func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
 // load failed, in which case ports show as inactive in UI.
 func (s *Server) handleListFirewall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"active":  s.engine.FirewallActive(),
-		"builtin": s.engine.BuiltinFirewallPorts(),
-		"user":    s.engine.UserFirewallPorts(),
+		"active":  s.firewall.Active(),
+		"builtin": s.firewall.BuiltinPorts(),
+		"user":    s.firewall.UserPorts(),
 	})
 }
 
@@ -914,20 +917,20 @@ func (s *Server) handleListFirewall(w http.ResponseWriter, r *http.Request) {
 // description, enabled}, ...]}.
 func (s *Server) handleSetFirewall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		User []engine.FirewallPort `json:"user"`
+		User []config.Firewall `json:"user"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.engine.SetUserFirewallPorts(body.User); err != nil {
+	if err := s.firewall.SetUserPorts(body.User); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"active":  s.engine.FirewallActive(),
-		"builtin": s.engine.BuiltinFirewallPorts(),
-		"user":    s.engine.UserFirewallPorts(),
+		"active":  s.firewall.Active(),
+		"builtin": s.firewall.BuiltinPorts(),
+		"user":    s.firewall.UserPorts(),
 	})
 }
 

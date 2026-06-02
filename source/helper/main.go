@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/engine"
+	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
 
@@ -144,7 +145,12 @@ func uiCmd(args []string) error {
 	eng.SetDefaultListen(*listen)
 	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
 
-	srv := web.New(eng, *bind)
+	// Services that ride on top of the engine. Construction is cheap
+	// and stateless — the actual lifecycle hooks (e.g. firewall first-
+	// apply at engine-ready) live inside each service.
+	fwSvc := firewall.New(eng)
+
+	srv := web.New(eng, fwSvc, *bind)
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.

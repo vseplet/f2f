@@ -34,6 +34,43 @@ type PortRule struct {
 	Protocol string `json:"protocol"`
 }
 
+// BuiltinRules are the ports f2f's own engine listens on over the
+// tunnel. They are always allowed by the inbound filter regardless of
+// user settings, because the engine itself is the consumer:
+//
+//   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer signal
+//     polling over utun.
+//   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
+//     locally-registered domains.
+//   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the drop
+//     subsystem.
+//
+// Keep in sync with web.Server and the torrent client.
+var BuiltinRules = []PortRule{
+	{Port: 2202, Protocol: "tcp"},
+	{Port: 80, Protocol: "tcp"},
+	{Port: 443, Protocol: "tcp"},
+	{Port: 6881, Protocol: "tcp"},
+	{Port: 6881, Protocol: "udp"},
+}
+
+// BuiltinLabel returns a human-readable description for a builtin
+// (port, proto) pair, intended for the UI's "always-on" rule list.
+// Returns "" for non-builtin combinations.
+func BuiltinLabel(port int, proto string) string {
+	switch {
+	case port == 2202 && proto == "tcp":
+		return "f2f HTTP API"
+	case port == 80 && proto == "tcp":
+		return "f2f HTTP proxy"
+	case port == 443 && proto == "tcp":
+		return "f2f HTTPS proxy"
+	case port == 6881:
+		return "f2f BitTorrent"
+	}
+	return ""
+}
+
 // Firewall holds the live firewall state. Call Close to remove it.
 type Firewall struct {
 	state state
