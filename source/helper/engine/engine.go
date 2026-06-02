@@ -962,8 +962,17 @@ func (e *Engine) Start(cfg Config) error {
 			}
 		}()
 	}
-	if e.OnStarted != nil {
-		e.OnStarted(cfg.LocalIP)
+	// Drop e.mu before invoking the OnStarted callback — handlers
+	// commonly call back into the engine (Status, CampFirewall,
+	// TrustedPeersDir, ...) which all acquire e.mu, and holding it
+	// across user code would deadlock. The deferred Unlock at the
+	// top of Start still balances correctly: Unlock here, Lock back
+	// to satisfy the defer's no-op release.
+	cb := e.OnStarted
+	if cb != nil {
+		e.mu.Unlock()
+		cb(cfg.LocalIP)
+		e.mu.Lock()
 	}
 	return nil
 }

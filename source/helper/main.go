@@ -169,6 +169,8 @@ func uiCmd(args []string) error {
 		st := eng.Status()
 		if err := fwSvc.Start(st.UtunName, localIP); err != nil {
 			log.Printf("firewall: %v (input not filtered)", err)
+		} else {
+			log.Printf("firewall: installed on %s scoped to %s/32", st.UtunName, localIP)
 		}
 		// Pick up this camp's on-disk peer-CA cache. Additive — entries
 		// from earlier camps stay in memory; that matches pre-extract
