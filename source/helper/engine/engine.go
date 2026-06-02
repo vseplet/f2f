@@ -1407,55 +1407,6 @@ func (e *Engine) currentReflex() string {
 	return ""
 }
 
-// trustedPeersRootDir is the parent under which per-camp peer-CA caches
-// live. Each camp gets its own subdir keyed by camp_id so CAs from
-// camp A don't leak into camp B's "trusted peer CAs" UI panel.
-const trustedPeersRootDir = "/var/lib/f2f/trusted-peers"
-
-// TrustedPeersDir returns the per-camp cache dir. Empty cfg.Camp falls
-// back to the root path (static --peer legacy mode, no notion of camp).
-// Exposed for the services/trust service which owns the on-disk cert
-// management.
-func (e *Engine) TrustedPeersDir() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.cfg.Camp == nil || e.cfg.Camp.ID == "" {
-		return trustedPeersRootDir
-	}
-	return filepath.Join(trustedPeersRootDir, e.cfg.Camp.ID)
-}
-
-// CampFirewall returns a copy of the camp config's user-configured
-// firewall allow list. Returns nil when the engine isn't running
-// (no camp loaded → no list to surface).
-func (e *Engine) CampFirewall() []config.Firewall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.camp == nil {
-		return nil
-	}
-	out := make([]config.Firewall, len(e.camp.Firewall))
-	copy(out, e.camp.Firewall)
-	return out
-}
-
-// SetCampFirewall replaces the camp config's firewall list and
-// persists the change to disk. Caller is expected to have already
-// validated the list (see services/firewall.CleanList).
-// Returns an error if the engine isn't running, since the camp
-// config is keyed by camp_id.
-func (e *Engine) SetCampFirewall(list []config.Firewall) error {
-	e.mu.Lock()
-	if !e.running || e.camp == nil {
-		e.mu.Unlock()
-		return errors.New("engine not running")
-	}
-	e.camp.Firewall = append([]config.Firewall(nil), list...)
-	e.persistCampLocked()
-	e.mu.Unlock()
-	return nil
-}
-
 // TunnelHTTPPort is the port other peers expose their /api/* on over
 // utun (same value we host the UI on). Empty when the engine wasn't
 // started with a UI bind. Exposed for services/trust and any future
@@ -1494,28 +1445,6 @@ func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
 		out = append(out, OnlinePeerHTTPInfo{Pub: p.Pub, Name: p.Name, Host: host})
 	}
 	return out
-}
-
-// UpsertTrustedPeerInCamp upserts (by fingerprint) the trusted-CA
-// metadata into the active camp config and persists. PEM bytes stay
-// under TrustedPeersDir — config carries only fingerprint + display
-// fields so the UI can list and remove CAs without re-reading the
-// trust store. No-op when the engine isn't running.
-func (e *Engine) UpsertTrustedPeerInCamp(t config.TrustedPeer) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.camp == nil {
-		return
-	}
-	for i, ex := range e.camp.TrustedPeers {
-		if ex.Fingerprint == t.Fingerprint {
-			e.camp.TrustedPeers[i] = t
-			e.persistCampLocked()
-			return
-		}
-	}
-	e.camp.TrustedPeers = append(e.camp.TrustedPeers, t)
-	e.persistCampLocked()
 }
 
 // applyPeerList reconciles our peers map with the camp's current view

@@ -44,19 +44,38 @@ type Entry struct {
 // once in main.go and outlive camp transitions. Load is idempotent
 // (additive) and safe to call from each engine.OnStarted hook so the
 // per-camp on-disk cache is picked up after camp switches.
-type Service struct {
-	eng *engine.Engine
+// trustedPeersRootDir is the on-disk parent for per-camp peer-CA
+// caches. Each camp gets its own subdir keyed by camp_id so CAs from
+// camp A don't leak into camp B's UI.
+const trustedPeersRootDir = "/var/lib/f2f/trusted-peers"
 
-	mu  sync.Mutex
-	cas map[string]Entry // keyed by fingerprint
+type Service struct {
+	store *config.Store
+	eng   *engine.Engine
+
+	mu     sync.Mutex
+	cas    map[string]Entry // keyed by fingerprint
+	campID string           // active camp; updated by Load
 }
 
-// New constructs a Service. The engine must outlive the service.
-func New(eng *engine.Engine) *Service {
+// New constructs a Service. store and engine must outlive the service.
+// store owns the persisted catalog of trusted-peer metadata; engine
+// is consulted only for live peer iteration and the tunnel HTTP port.
+func New(store *config.Store, eng *engine.Engine) *Service {
 	return &Service{
-		eng: eng,
-		cas: make(map[string]Entry),
+		store: store,
+		eng:   eng,
+		cas:   make(map[string]Entry),
 	}
+}
+
+// trustedPeersDir returns the per-camp cache dir for s.campID. Empty
+// campID falls back to the root path (legacy --peer mode).
+func (s *Service) trustedPeersDir() string {
+	if s.campID == "" {
+		return trustedPeersRootDir
+	}
+	return filepath.Join(trustedPeersRootDir, s.campID)
 }
 
 // List returns a snapshot of the current trust set, sorted by peer
@@ -79,11 +98,15 @@ func (s *Service) List() []Entry {
 
 // Load reads the per-camp on-disk record of which peer CAs were
 // already discovered (so we don't keychain-install them again on
-// every engine restart). Idempotent and additive — running it twice
-// just re-asserts the same entries; running it after a camp switch
+// every engine restart). Pass the active camp id (typically from
+// eng.Status().CampID). Idempotent and additive — running it twice
+// re-asserts the same entries; running it after a camp switch
 // merges the new camp's directory into the same in-memory set.
-func (s *Service) Load() {
-	dir := s.eng.TrustedPeersDir()
+func (s *Service) Load(campID string) {
+	s.mu.Lock()
+	s.campID = campID
+	s.mu.Unlock()
+	dir := s.trustedPeersDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -213,7 +236,7 @@ func (s *Service) discover(peerName string, pemBytes []byte) {
 	}
 	s.mu.Unlock()
 
-	dir := s.eng.TrustedPeersDir()
+	dir := s.trustedPeersDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("ca: mkdir %s: %v", dir, err)
 		return
@@ -238,8 +261,9 @@ func (s *Service) discover(peerName string, pemBytes []byte) {
 	}
 	s.mu.Lock()
 	s.cas[fp] = entry
+	campID := s.campID
 	s.mu.Unlock()
-	s.eng.UpsertTrustedPeerInCamp(entryToCampPeer(entry))
+	s.upsertInCamp(campID, entry)
 	log.Printf("ca: discovered peer %s CA (fp %s, installed=%v)", peerName, fp, installed)
 }
 
@@ -260,14 +284,28 @@ func (s *Service) Remove(fingerprint string) error {
 	if !ok {
 		return nil
 	}
-	certPath := filepath.Join(s.eng.TrustedPeersDir(), entry.PeerName+".crt")
+	s.mu.Lock()
+	campID := s.campID
+	s.mu.Unlock()
+	certPath := filepath.Join(s.trustedPeersDir(), entry.PeerName+".crt")
 	if err := os.Remove(certPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("ca: remove %s: %v", certPath, err)
 	}
 	if err := platform.TrustStoreRemove(entry.CommonName); err != nil {
 		log.Printf("ca: trust store remove %s: %v", entry.CommonName, err)
 	}
-	s.eng.RemoveTrustedPeerFromCamp(fingerprint)
+	if campID != "" {
+		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
+			kept := c.TrustedPeers[:0]
+			for _, t := range c.TrustedPeers {
+				if t.Fingerprint == fingerprint {
+					continue
+				}
+				kept = append(kept, t)
+			}
+			c.TrustedPeers = kept
+		})
+	}
 	return nil
 }
 
@@ -284,7 +322,7 @@ func (s *Service) Install(fp string) error {
 	if entry.Installed {
 		return nil
 	}
-	certPath := filepath.Join(s.eng.TrustedPeersDir(), entry.PeerName+".crt")
+	certPath := filepath.Join(s.trustedPeersDir(), entry.PeerName+".crt")
 	log.Printf("ca: installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
 	if err := platform.TrustStoreAdd(certPath); err != nil {
 		return fmt.Errorf("install peer %s: %w", entry.PeerName, err)
@@ -293,10 +331,29 @@ func (s *Service) Install(fp string) error {
 	entry.Installed = true
 	entry.InstalledAt = time.Now().Unix()
 	s.cas[fp] = entry
+	campID := s.campID
 	s.mu.Unlock()
-	s.eng.UpsertTrustedPeerInCamp(entryToCampPeer(entry))
+	s.upsertInCamp(campID, entry)
 	log.Printf("ca: installed peer %s CA", entry.PeerName)
 	return nil
+}
+
+// upsertInCamp inserts or replaces a trusted-peer record in the camp
+// config (by fingerprint), then persists. No-op when no camp is
+// active. Common path for both discover and install.
+func (s *Service) upsertInCamp(campID string, e Entry) {
+	if campID == "" {
+		return
+	}
+	_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
+		for i, ex := range c.TrustedPeers {
+			if ex.Fingerprint == e.Fingerprint {
+				c.TrustedPeers[i] = entryToCampPeer(e)
+				return
+			}
+		}
+		c.TrustedPeers = append(c.TrustedPeers, entryToCampPeer(e))
+	})
 }
 
 func entryToCampPeer(e Entry) config.TrustedPeer {

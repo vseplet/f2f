@@ -70,47 +70,58 @@ func BuiltinLabel(port int, proto string) string {
 	return ""
 }
 
-// Engine is the small slice of *engine.Engine the firewall service
-// composes against — kept as an interface so this package doesn't
-// import engine (avoids an import cycle since main.go wires both).
-type Engine interface {
-	CampFirewall() []config.Firewall
-	SetCampFirewall(list []config.Firewall) error
-}
-
-// Service is the per-process firewall manager. Construct in main.go
-// with New, then call Start(iface, tunnelIP) once the engine reports
-// the tunnel is up (eng.OnStarted). Stop closes the pf anchor and
-// removes the state file; safe to call when never started.
+// Service is the per-process firewall manager. Owns the pf-anchor
+// lifecycle and reads/writes its own slice of camp config (the user
+// firewall rule list) directly through *config.Store — no engine
+// indirection. The camp identity is picked up at Start(iface,
+// tunnelIP, campID) so the service is camp-independent until then.
 type Service struct {
-	eng Engine
+	store *config.Store
 
 	mu     sync.Mutex
 	anchor *anchor
+	campID string
 }
 
-// New constructs a Service. The engine must outlive the service but
-// need not be Start'ed yet.
-func New(eng Engine) *Service {
-	return &Service{eng: eng}
+// New constructs a Service. The store must outlive the service.
+func New(store *config.Store) *Service {
+	return &Service{store: store}
 }
 
 // Start installs the pf anchor on iface scoped to tunnelIP with the
-// builtin + currently-enabled user rules. Idempotent enough — calling
-// twice without Stop in between will fail because the prior pid is
-// still alive; that's fine, callers don't do that.
-func (s *Service) Start(iface, tunnelIP string) error {
+// builtin + currently-enabled user rules. campID identifies which
+// camp's section of the store this run operates on; usually obtained
+// from eng.Status().CampID by the caller. Idempotent enough — calling
+// twice without Stop in between fails because the prior pid is still
+// alive; that's fine, callers don't do that.
+func (s *Service) Start(iface, tunnelIP, campID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.anchor != nil {
 		return errors.New("firewall: already started")
 	}
-	a, err := openAnchor(iface, tunnelIP, mergeRules(s.eng.CampFirewall()))
+	s.campID = campID
+	a, err := openAnchor(iface, tunnelIP, mergeRules(s.userPortsLocked()))
 	if err != nil {
 		return err
 	}
 	s.anchor = a
 	return nil
+}
+
+// userPortsLocked reads the user-configured allow list from the
+// camp config in the store. Returns nil on read error (which the
+// caller treats as "no user rules"). Caller holds s.mu, but the
+// store has its own mutex so reads are safe either way.
+func (s *Service) userPortsLocked() []config.Firewall {
+	if s.campID == "" {
+		return nil
+	}
+	c, err := s.store.SnapshotCamp(s.campID)
+	if err != nil || c == nil {
+		return nil
+	}
+	return c.Firewall
 }
 
 // Stop tears down the pf anchor and removes the state file.
@@ -151,25 +162,32 @@ func (s *Service) BuiltinPorts() []config.Firewall {
 }
 
 // UserPorts returns a copy of the user-configured allow list, sourced
-// from the engine's current camp config. Returns nil if the engine
-// isn't running.
+// from the on-disk camp config. Returns nil before Start (campID not
+// yet set) or on store error.
 func (s *Service) UserPorts() []config.Firewall {
-	return s.eng.CampFirewall()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]config.Firewall(nil), s.userPortsLocked()...)
 }
 
 // SetUserPorts replaces the user allow list, persists it into the
 // per-camp config on disk, and re-applies the pf anchor with builtin
-// + enabled user rules. Returns ErrEngineNotRunning if the engine
-// isn't up. Re-applying the anchor while it isn't open is a no-op —
-// rules will be picked up on the next Start.
+// + enabled user rules. Re-applying the anchor while it isn't open
+// is a no-op — rules will be picked up on the next Start.
 func (s *Service) SetUserPorts(list []config.Firewall) error {
 	cleaned := CleanList(list)
-	if err := s.eng.SetCampFirewall(cleaned); err != nil {
-		return err
-	}
 	s.mu.Lock()
+	campID := s.campID
 	a := s.anchor
 	s.mu.Unlock()
+	if campID == "" {
+		return ErrEngineNotRunning
+	}
+	if err := s.store.UpdateCamp(campID, func(c *config.Camp) {
+		c.Firewall = append([]config.Firewall(nil), cleaned...)
+	}); err != nil {
+		return err
+	}
 	if a == nil {
 		return nil
 	}

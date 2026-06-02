@@ -161,8 +161,8 @@ func uiCmd(args []string) error {
 	// Services riding on top of the engine. Construction is cheap and
 	// stateless — actual lifecycle (firewall pf-anchor, dns server,
 	// trust poll loop) is wired off eng.OnStarted/OnStopped below.
-	fwSvc := firewall.New(eng)
-	trustSvc := trust.New(eng)
+	fwSvc := firewall.New(store)
+	trustSvc := trust.New(store, eng)
 	dnsSvc := dns.New(store, eng)
 
 	srv := web.New(eng, fwSvc, trustSvc, dnsSvc, *bind)
@@ -180,7 +180,7 @@ func uiCmd(args []string) error {
 		// — the tunnel still works, just without input filtering, and
 		// the UI flags it via fwSvc.Active() returning false.
 		st := eng.Status()
-		if err := fwSvc.Start(st.UtunName, localIP); err != nil {
+		if err := fwSvc.Start(st.UtunName, localIP, st.CampID); err != nil {
 			log.Printf("firewall: %v (input not filtered)", err)
 		} else {
 			log.Printf("firewall: installed on %s scoped to %s/32", st.UtunName, localIP)
@@ -195,7 +195,7 @@ func uiCmd(args []string) error {
 		// from earlier camps stay in memory; that matches pre-extract
 		// behaviour and lets the UI show peers from any camp the user
 		// has ever joined.
-		trustSvc.Load()
+		trustSvc.Load(st.CampID)
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()

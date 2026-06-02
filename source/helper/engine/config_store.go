@@ -285,31 +285,6 @@ func (e *Engine) StartLastCamp() error {
 	return e.Start(cfg)
 }
 
-// RemoveTrustedPeerFromCamp drops the metadata for one trusted peer
-// CA (by fingerprint) from the active camp config and persists. The
-// services/trust service owns the on-disk PEM and keychain entry —
-// this method handles only the camp config slice. No-op when the
-// engine isn't running.
-func (e *Engine) RemoveTrustedPeerFromCamp(fingerprint string) {
-	if fingerprint == "" {
-		return
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.camp == nil {
-		return
-	}
-	kept := e.camp.TrustedPeers[:0]
-	for _, t := range e.camp.TrustedPeers {
-		if t.Fingerprint == fingerprint {
-			continue
-		}
-		kept = append(kept, t)
-	}
-	e.camp.TrustedPeers = kept
-	e.persistCampLocked()
-}
-
 // restoreInterceptsFromCamp re-installs every (spec, peer) pair from
 // camp config. Called near the end of Start, after utun + routes are
 // up and e.peers is hydrated. Entries whose peer is no longer in the
