@@ -1785,6 +1785,100 @@ func (s *Server) routes(mux *http.ServeMux) {
 | Intercepts + domainRefreshLoop | 250 | `app/intercept/` |
 | Diagnostics + Status | 200 | engine (остаётся) |
 
+### Текущий снимок engine.go (для R3-фазы)
+
+После внедрения pair + AWG (2026-06-02) `engine.go` — это **3897 строк,
+105 функций, 15 типов**. Реальная карта по строкам:
+
+```
+1-77       — packetLog, awgDebug, package doc                       (engine)
+83-244     — Config, Status, CampHealth, Diagnostics,               (engine)
+             PeerStatusInfo, InterceptInfo, DomainEntry — wire-shapes
+254-403    — peerState + IsOnline/IsPaired/IsHalfPaired             (engine)
+406-602    — Engine struct, New, LogTap, Subscribe                  (engine)
+
+605-1030   — Start() — 425 строк, главный конструктор всего         (engine)
+1033-1071  — ensureCA + CA() accessor                               🟡 core/ca/
+
+1076-1497  — Torrent: startTorrent, prune/refeed, chown, rescan,    🔴 helper/torrent/
+             save/load, AddDownload, RemoveDownload, restore        (целый менеджер, ~420 строк)
+1521-1546  — currentReflex, trustedPeersDir                         (engine helpers)
+
+1567-1736  — Firewall config: 12 функций про user-rules,            🟡 helper/firewall/
+             cleanUserFirewall, merge, persist                       config-side, ~170 строк
+
+1739-1976  — Trusted peer CAs: load, peerCAPollLoop, discover,      🔴 helper/ca/peer_trust.go
+             InstallPeerCA, persistTrustedPeerToCamp ~240 строк
+
+1987-2127  — applyPeerList (camp peer-list → e.peers reconcile)     (engine)
+2129-2447  — Polling-loops: files/firewall/domains/health           🟡 helper/{files,dns,...}/
+             ~320 строк 4 одинаковых паттерна
+
+2454-2545  — SetTunnelHTTPPort, SetDefaultListen, awgSyncPeers,     (engine)
+             pairReqPacket
+2546-2664  — handlePairReq, handlePairRes                           (engine)
+2666-2789  — holePunchLoop, restartOnEphemeralPort                  (engine)
+2791-2833  — diagnosticsLocked, campHealthLocked                    (engine)
+
+2836-2961  — Stop()                                                 (engine)
+2964-3147  — Status() + peersStatusLocked + helpers                 (engine)
+
+3179-3320  — SetActivePeer, MyDomains/SetMyDomains, LookupHost      🟡 mix: DNS — в dns/,
+             (DNS resolver)                                          active-peer/MyDomains — в app/dns
+
+3325-3477  — AddIntercept, RemoveIntercept, addInterceptLocked      🟡 engine/intercept/
+             ~200 строк (нужен engine state для AllowedIPs sync)
+
+3479-3593  — domainRefreshLoop, refreshDomainRoutes, resolveSpec    🟡 engine/intercept/
+
+3595-3892  — tunToPeerLoop, routeFor, interceptPeerForLocked,       (engine — core data path)
+             peerToTunLoop, ipv4Src, rollbackPartial, sameUDPAddr
+```
+
+#### Чистое engine ≈ 1500 строк
+
+Если вытащить только **транспортный substrate**:
+- Engine struct + Start/Stop + rollbackPartial
+- peerState + IsOnline/IsPaired/IsHalfPaired
+- applyPeerList (camp roster → e.peers)
+- handlePairReq/Res + awgSyncPeers + pairReqPacket
+- holePunchLoop + restartOnEphemeralPort
+- tunToPeerLoop + peerToTunLoop + multiplex
+- Status builder
+
+Это ~1500 строк чистой «как поднять и поддерживать AWG-туннель».
+Остальные ~2400 — features которые engine хостит и которые **должны
+делегироваться через интерфейсы**.
+
+#### Приоритизированный план extraction'а
+
+| # | Кандидат | Текущий объём | Целевое место | Сложность |
+|---|---|---|---|---|
+| 1 | **Torrent (BT manager)** | ~420 строк | `helper/torrent/manager.go` | средняя — нужно вынести state + lifecycle |
+| 2 | **Trusted peer CAs** | ~240 строк | `helper/ca/peer_trust.go` | низкая — мало engine-state'а |
+| 3 | **Calls (engine/call.go)** | ~280 строк | `helper/call/` (или `sfu/`) | средняя — нужны hooks от engine |
+| 4 | **Firewall config** | ~170 строк | `helper/firewall/` (расширить) | низкая |
+| 5 | **Polling loops generic** | ~320 строк × 4 | `helper/{dns,files,firewall}/poller.go` | средняя — можно сделать общий паттерн |
+| 6 | **Intercepts** | ~200 строк | `engine/intercept/` (всё-таки в engine — нужен awgSyncPeers) | низкая |
+| 7 | **DNS LookupHost** | ~70 строк | `helper/dns/resolver.go` через интерфейс | низкая |
+| 8 | **Start() декомпозиция** | ~425 строк | разнести по соответствующим пакетам | сложная — много кросс-завязок |
+
+После всех этих extraction'ов `engine.go` ужмётся до ~1500 строк
+чистого transport-substrate'а. Каждый extraction — отдельный коммит,
+behavior-preserving, проверяется тем что всё работает после рестарта.
+
+**Принцип**: features импортируют engine, engine не импортирует
+features. Engine выставляет наружу:
+- `Peers() []PeerStatusInfo` (read-only snapshot)
+- `OverlayIP() netip.Addr` (own overlay)
+- `Subscribe(eventKind)` для событий (peer joined/left, paired/unpaired)
+- `SendToPeer(pub, payload []byte)` для in-tunnel HTTP (когда мигрируем
+  на QUIC)
+- `Identity()` — read-only access
+
+Features используют это для своих нужд. UI/web слой обращается к
+features напрямую через их API, не через Engine.
+
 ### Что выносится из web/server.go
 
 | Блок | Куда |
