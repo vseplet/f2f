@@ -392,10 +392,9 @@ type Engine struct {
 	camp *config.Camp
 	// identity is the per-camp Ed25519 keypair under
 	// /var/lib/f2f/identity/<camp_id>/. Loaded (or generated) on Start
-	// in camp mode; nil otherwise. Identifier the camp server will use
-	// for sticky bindings and invite-signing once we wire it through
-	// the protocol — for now it's just persisted so the keys exist
-	// when we need them.
+	// in camp mode; nil otherwise. Identifier the camp server uses for
+	// rendezvous, the seed the overlay-IP derives from, and (once we
+	// wire it through the protocol) the invite-signing key.
 	identity *identity.Identity
 }
 
@@ -571,7 +570,7 @@ func (e *Engine) Start(cfg Config) error {
 		localIP = a.String()
 	}
 
-	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
+	// utun. In Camp mode the interface owns the whole 100.64.0.0/10
 	// overlay; static mode keeps the legacy point-to-point form.
 	var tun *utun.Tunnel
 	if cfg.CampID != "" {
@@ -947,10 +946,10 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 					log.Printf("camp: peer %s back in roster (pub=%s)", p.Name, p.Pub)
 				}
 			} else {
-				// Camp evicted the peer (no announce in ~60s) but kept
-				// the sticky binding. Drop the endpoint we cached for
-				// punch/forwarding — when peer comes back, camp will
-				// publish a fresh UDPEndpoint and we'll resolve again.
+				// Camp evicted the peer (no announce in ~60s). Drop the
+				// endpoint we cached for punch/forwarding — when peer
+				// comes back, camp will publish a fresh UDPEndpoint and
+				// we'll resolve again.
 				existing.UDPAddr = nil
 				existing.UDPEndpoint = ""
 				existing.PublicIP = ""
@@ -1652,7 +1651,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 			continue
 		}
 		// Two routing modes:
-		//   - If dst is a known peer's tunnel_ip (10.99.0.X) → send to
+		//   - If dst is a known peer's tunnel_ip (100.64.X.Y) → send to
 		//     that peer directly. Lets meet and direct-IP traffic flow
 		//     even without an active peer selected.
 		//   - Otherwise (catch-all destinations) → send to the active

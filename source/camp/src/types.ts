@@ -15,13 +15,10 @@ export type PeerInfo = {
   // punching.
   udp_port?: number;
   udp_endpoint?: string;
-  // Legacy field — clients now derive their own overlay v4 from pub.
-  // Kept for wire-compat; always empty for new peers.
-  tunnel_ip?: string;
   joined_at: number;
-  // online = peer has announced within EVICT_AFTER_MS. Offline peers
-  // come from the sticky-binding catalog only, so they may lack
-  // public_ip/udp_endpoint (set to "" / undefined in that case).
+  // Always true for peers the server returns — stale entries are
+  // evicted, not kept around. Retained on the wire for clients that
+  // track their own locally-cached offline peers.
   online: boolean;
   last_seen_at: number;
 };

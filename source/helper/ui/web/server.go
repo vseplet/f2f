@@ -1407,7 +1407,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:   "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
+		LocalIP:   "100.64.0.1", // placeholder; engine derives the real overlay-IP from pub on Start
 		Listen:    ":9000",
 		CampID:    req.CampID,
 		CampName:  name,

@@ -2,7 +2,7 @@
 // A peer sends `{t:"announce", name, camp_id}` on this socket; we read
 // the source address off the packet itself (no need for a separate STUN
 // step), upsert the peer into the hub, and reply with `{t:"announced",
-// you:PeerInfo}` so the client learns its tunnel_ip and reflex.
+// you:PeerInfo}` so the client learns its observed public endpoint.
 //
 // One UDP packet does three jobs at once:
 //   1. registers / refreshes the peer entry (driven by the periodic

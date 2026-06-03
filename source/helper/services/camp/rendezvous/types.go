@@ -9,8 +9,9 @@ package rendezvous
 // PeerInfo is the camp server's view of a connected peer. The same
 // shape is used in announce replies (`you`) and in /api/id/:id.
 //
-// Online == false means the peer is in the sticky-binding catalog but
-// hasn't announced recently — PublicIP/UDPEndpoint may be empty.
+// The server only ever returns peers that have announced recently, so
+// Online is always true here; offline peers are merged in client-side
+// from the local config cache.
 type PeerInfo struct {
 	Name string `json:"name"`
 	// Pub is the peer's Ed25519 public key in hex (64 chars). Stable
@@ -20,7 +21,6 @@ type PeerInfo struct {
 	PublicIP    string `json:"public_ip"`
 	UDPPort     int    `json:"udp_port,omitempty"`
 	UDPEndpoint string `json:"udp_endpoint,omitempty"`
-	TunnelIP    string `json:"tunnel_ip"`
 	JoinedAt    int64  `json:"joined_at"`
 	Online      bool   `json:"online"`
 	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
