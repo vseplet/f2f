@@ -57,7 +57,13 @@ type Camp struct {
 	// wrote before we moved name into Identity. Marshalled with
 	// omitempty so it disappears on next save once migrated. Always
 	// empty after normaliseCamp runs.
-	LegacyName   string        `json:"name,omitempty"`
+	LegacyName string `json:"name,omitempty"`
+	// ServerURL / StunAddr point at the rendezvous server hosting
+	// this camp. Defaults applied by NewCamp; can be overridden by
+	// hand-editing the per-camp file. Used by services/camp to spin
+	// up the announce client + HTTP poller.
+	ServerURL    string        `json:"server_url,omitempty"`
+	StunAddr     string        `json:"stun_addr,omitempty"`
 	Identity     Identity      `json:"identity"`
 	Intercepts   []Intercept   `json:"intercepts"`
 	MyDomains    []Domain      `json:"my_domains"`
@@ -65,6 +71,15 @@ type Camp struct {
 	TrustedPeers []TrustedPeer `json:"trusted_peers"`
 	PeerCatalog  []Peer        `json:"peer_catalog"`
 }
+
+// DefaultCampServerURL and DefaultCampStunAddr are the production
+// rendezvous endpoints we ship with. NewCamp stamps these into the
+// per-camp file so users can hand-edit later (point at their own
+// camp server) without code changes.
+const (
+	DefaultCampServerURL = "wss://f2f-camp.fly.dev/ws"
+	DefaultCampStunAddr  = "f2f-camp.fly.dev:3478"
+)
 
 // Identity is who you are in this camp: display name + public side of
 // the per-camp Ed25519 keypair. Pub/Fingerprint are mirrored here so
@@ -353,6 +368,14 @@ func normaliseCamp(c *Camp, id string) (migrated bool) {
 		c.LegacyName = ""
 		migrated = true
 	}
+	if c.ServerURL == "" {
+		c.ServerURL = DefaultCampServerURL
+		migrated = true
+	}
+	if c.StunAddr == "" {
+		c.StunAddr = DefaultCampStunAddr
+		migrated = true
+	}
 
 	if c.Intercepts == nil {
 		c.Intercepts = []Intercept{}
@@ -372,10 +395,15 @@ func normaliseCamp(c *Camp, id string) (migrated bool) {
 	return migrated
 }
 
-// NewCamp returns a zero-valued Camp with non-nil slices, ready to
-// populate and save.
+// NewCamp returns a zero-valued Camp with non-nil slices and default
+// rendezvous endpoints, ready to populate and save.
 func NewCamp(id, name string) *Camp {
-	c := &Camp{CampID: id, Identity: Identity{Name: name}}
+	c := &Camp{
+		CampID:    id,
+		ServerURL: DefaultCampServerURL,
+		StunAddr:  DefaultCampStunAddr,
+		Identity:  Identity{Name: name},
+	}
 	normaliseCamp(c, id)
 	return c
 }

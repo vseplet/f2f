@@ -63,25 +63,18 @@ func awgDebug(format string, args ...any) {
 	}
 }
 
-// CampConfig points the engine at a rendezvous (camp) server: instead of
-// the user supplying the peer's UDP endpoint via --peer, we discover our
-// own external endpoint via STUN, register with camp under (Name, ID),
-// and adopt the other peer in the same camp when it announces an endpoint.
-type CampConfig struct {
-	URL      string // wss://f2f-camp.fly.dev/ws
-	Name     string // our identity within the camp
-	ID       string // shared camp id; empty triggers the "create new camp" path (Label required)
-	Label    string // human-friendly camp label, used only when ID is empty to derive ID = <pub>_<label>
-	StunAddr string // host:port for the UDP STUN probe (e.g. f2f-camp.fly.dev:3478)
-}
-
 // Config is the input to Start.
 type Config struct {
-	LocalIP     string      // utun local point-to-point address
-	PeerIP      string      // utun remote point-to-point address (static mode only)
-	Listen      string      // UDP listen address (":9000"), empty = no peer mode
-	Peer        string      // UDP peer address ("host:9000"); ignored when Camp is set
-	Camp        *CampConfig // optional: use a rendezvous server instead of static Peer
+	LocalIP string // utun local point-to-point address
+	PeerIP  string // utun remote point-to-point address (static mode only)
+	Listen  string // UDP listen address (":9000"), empty = no peer mode
+	Peer    string // UDP peer address ("host:9000"); ignored when CampID is set
+	// Camp mode — engine wants the minimum it needs for identity /
+	// obfenv / store key. Server endpoints (URL/StunAddr) live in
+	// the per-camp config.Camp and are read by services/camp.
+	CampID    string // shared camp id; empty triggers create-new path (CampLabel required)
+	CampName  string // our display alias in the camp
+	CampLabel string // human label for create-new (derives ID = <pub>_<label>)
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
@@ -93,18 +86,11 @@ type Status struct {
 	PeerIP       string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
 	ListenAddr   string `json:"listen_addr,omitempty"`
 	PeerAddr     string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
-	CampURL      string `json:"camp_url,omitempty"`
-	CampName     string `json:"camp_name,omitempty"`
-	CampID       string `json:"camp_id,omitempty"`
-	// CampLabel is the human-friendly suffix of CampID — what we use
-	// as the DNS zone (`<label>.f2f`) and what the UI shows. For new
-	// camps CampID is `<creator_pub_hex>_<label>`; for legacy free-form
-	// camps it equals CampID itself.
-	CampLabel    string `json:"camp_label,omitempty"`
-	CampPeerName string `json:"camp_peer_name,omitempty"` // active peer's name (display alias)
-	// CampActive / CampReflex / CampHealth are filled by web
-	// statusView from services/camp — engine no longer owns those
-	// signals and doesn't carry the fields.
+	// CampID is the only camp metadata engine carries — it's the
+	// active session key (config store / identity / obfenv all keyed
+	// by it). URL/StunAddr/Name/Label and connection signals
+	// (Active/Reflex/Health) live in services/camp + web statusView.
+	CampID string `json:"camp_id,omitempty"`
 	// Identity (Ed25519) for the running camp. Pub is the full 32-byte
 	// public key in hex; Fingerprint is the short SHA-256 prefix the
 	// UI shows. Empty in static --peer mode.
@@ -336,7 +322,7 @@ type Engine struct {
 	udpHandlers   []UDPHandler
 
 	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
-	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
+	// header ranges H1..H8) derived deterministically from cfg.CampID.
 	// Built once at Start in camp mode; nil in static --peer mode.
 	obfenv *obfenv.Camp
 	// awgBind is the conn.Bind implementation that amneziawg-go's Device
@@ -446,21 +432,21 @@ func (e *Engine) Start(cfg Config) error {
 	if e.running {
 		return errors.New("engine already running")
 	}
-	if cfg.Camp != nil {
+	if cfg.CampID != "" {
 		// With Camp, peer is auto-discovered; we still need a UDP socket
 		// to receive on.
 		if cfg.Listen == "" {
 			return errors.New("Camp mode requires Listen")
 		}
-		if cfg.Camp.URL == "" || cfg.Camp.Name == "" || cfg.Camp.StunAddr == "" {
-			return errors.New("Camp.{URL,Name,StunAddr} all required")
+		if cfg.CampName == "" {
+			return errors.New("Camp mode requires CampName")
 		}
 		// camp_id is optional iff we have a label — empty id means
 		// "create a new camp": generate identity first, derive id from
 		// the pub. ID populated here so the rest of Start sees a normal
 		// fully-formed CampConfig.
-		if cfg.Camp.ID == "" {
-			label := strings.TrimSpace(cfg.Camp.Label)
+		if cfg.CampID == "" {
+			label := strings.TrimSpace(cfg.CampLabel)
 			if label == "" {
 				return errors.New("camp create: Camp.Label required when ID is empty")
 			}
@@ -471,13 +457,13 @@ func (e *Engine) Start(cfg Config) error {
 			if err != nil {
 				return fmt.Errorf("camp create: identity: %w", err)
 			}
-			cfg.Camp.ID = id.PubHex() + "_" + label
-			idDir := filepath.Join("/var/lib/f2f/identity", cfg.Camp.ID)
+			cfg.CampID = id.PubHex() + "_" + label
+			idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
 			if err := id.Save(idDir); err != nil {
 				return fmt.Errorf("camp create: save identity: %w", err)
 			}
 			e.identity = id
-			log.Printf("camp create: new camp id=%s pub=%s", cfg.Camp.ID, id.PubHex())
+			log.Printf("camp create: new camp id=%s pub=%s", cfg.CampID, id.PubHex())
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
@@ -485,13 +471,13 @@ func (e *Engine) Start(cfg Config) error {
 
 	// Open $HOME/.f2f/ + load (or create) the per-camp config. Camp
 	// mode only — static --peer mode has no per-camp identity.
-	if cfg.Camp != nil {
+	if cfg.CampID != "" {
 		if err := e.ensureStore(); err != nil {
 			return fmt.Errorf("config store: %w", err)
 		}
-		c, err := e.loadOrCreateCamp(cfg.Camp.ID, cfg.Camp.Name)
+		c, err := e.loadOrCreateCamp(cfg.CampID, cfg.CampName)
 		if err != nil {
-			return fmt.Errorf("config load %s: %w", cfg.Camp.ID, err)
+			return fmt.Errorf("config load %s: %w", cfg.CampID, err)
 		}
 		e.camp = c
 		// Per-camp Ed25519 keypair. Lives under /var/lib/f2f/ (root,
@@ -501,13 +487,13 @@ func (e *Engine) Start(cfg Config) error {
 		// to the camp server once that path is wired through.
 		// If we already created+saved one above (camp-create path),
 		// LoadOrGenerate finds it on disk and returns it.
-		idDir := filepath.Join("/var/lib/f2f/identity", cfg.Camp.ID)
+		idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
 		id, err := identity.LoadOrGenerate(idDir)
 		if err != nil {
-			return fmt.Errorf("identity %s: %w", cfg.Camp.ID, err)
+			return fmt.Errorf("identity %s: %w", cfg.CampID, err)
 		}
 		e.identity = id
-		log.Printf("identity: camp %s pub=%s fp=%s", cfg.Camp.ID, id.PubHex(), id.Fingerprint())
+		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, id.PubHex(), id.Fingerprint())
 		// Mirror pub/fingerprint into camp config so the UI can show
 		// it offline. Private key stays under /var/lib/f2f/identity/.
 		// Only writes when the pub changes (avoids touching the file
@@ -526,8 +512,8 @@ func (e *Engine) Start(cfg Config) error {
 		// derived deterministically from camp_id. Every member of this
 		// camp computes the same values; camp_id never leaves the invite
 		// chain so an outside observer can't derive them.
-		e.obfenv = obfenv.NewCamp(cfg.Camp.ID)
-		log.Printf("pair: control envelope ready for camp %s", cfg.Camp.ID)
+		e.obfenv = obfenv.NewCamp(cfg.CampID)
+		log.Printf("pair: control envelope ready for camp %s", cfg.CampID)
 	}
 
 	// Egress NAT (route the overlay subnet out through the host's
@@ -549,7 +535,7 @@ func (e *Engine) Start(cfg Config) error {
 		e.udp = udp
 		// In Camp mode, peerPtr starts nil — campLoop adopts the peer
 		// when it announces an endpoint. In static mode, resolve now.
-		if cfg.Camp == nil && cfg.Peer != "" {
+		if cfg.CampID == "" && cfg.Peer != "" {
 			initialPeer, err := net.ResolveUDPAddr("udp", cfg.Peer)
 			if err != nil {
 				e.rollbackPartial()
@@ -576,7 +562,7 @@ func (e *Engine) Start(cfg Config) error {
 		localIP = cfg.LocalIP
 		peerIP  = cfg.PeerIP
 	)
-	if cfg.Camp != nil && e.identity != nil {
+	if cfg.CampID != "" && e.identity != nil {
 		a, derr := PubToV4Addr(e.identity.PubHex())
 		if derr != nil {
 			e.rollbackPartial()
@@ -588,7 +574,7 @@ func (e *Engine) Start(cfg Config) error {
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
 	// overlay; static mode keeps the legacy point-to-point form.
 	var tun *utun.Tunnel
-	if cfg.Camp != nil {
+	if cfg.CampID != "" {
 		t, err := utun.OpenSubnet(localIP, 10)
 		if err != nil {
 			e.rollbackPartial()
@@ -609,7 +595,7 @@ func (e *Engine) Start(cfg Config) error {
 	// Reflect the actual addresses we ended up using back into the
 	// stored config so Status() shows ground truth, not user intent.
 	cfg.LocalIP = localIP
-	if cfg.Camp == nil {
+	if cfg.CampID == "" {
 		cfg.PeerIP = peerIP
 	}
 	if e.udp != nil {
@@ -622,7 +608,7 @@ func (e *Engine) Start(cfg Config) error {
 	// hands them to Bind.Send; the reverse path is Bind.Deliver →
 	// Device decrypts → utun.Write. No peers yet; awgSyncPeers below
 	// pushes them in once pair-handshake verifies them.
-	if cfg.Camp != nil && e.awgBind != nil && e.identity != nil && e.obfenv != nil {
+	if cfg.CampID != "" && e.awgBind != nil && e.identity != nil && e.obfenv != nil {
 		awgDev, err := awg.Start(tun.Device(), e.awgBind, e.identity, e.obfenv)
 		if err != nil {
 			e.rollbackPartial()
@@ -653,7 +639,7 @@ func (e *Engine) Start(cfg Config) error {
 	e.routes = route.New(tun.Name())
 
 	// Stamp cfg into the engine before any hydrate path runs — they
-	// read e.cfg.Camp.Name to filter our own entry out of the peer
+	// read e.cfg.CampName to filter our own entry out of the peer
 	// catalog. (Workers don't start until further down; e.running is
 	// still false, so nothing observes the partial state.)
 	e.cfg = cfg
@@ -827,20 +813,6 @@ func (e *Engine) ApplyCampRoster(peers []rendezvous.PeerInfo) {
 	e.applyPeerList(peers)
 }
 
-// CampConfigSnapshot returns the camp config the engine is currently
-// running with (URL/Name/ID/...), or nil when running in static
-// --peer mode. Exposed for services/camp which needs URL+ID to spin
-// up the announce client and HTTP poller.
-func (e *Engine) CampConfigSnapshot() *CampConfig {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.cfg.Camp == nil {
-		return nil
-	}
-	c := *e.cfg.Camp
-	return &c
-}
-
 // UDPConn returns the shared UDP socket the transport runs on. Nil
 // before Start / after Stop. services/camp borrows it to construct
 // its AnnounceClient (the announce protocol piggybacks on the same
@@ -914,10 +886,7 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 	// Snapshot() exposes it to the UI). Engine just merges the diff
 	// into peers + catalog.
 
-	var ourName string
-	if cfg := e.cfg.Camp; cfg != nil {
-		ourName = cfg.Name
-	}
+	ourName := e.cfg.CampName
 
 	seen := make(map[string]struct{}, len(peers))
 	e.mu.Lock()
@@ -1112,10 +1081,10 @@ func (e *Engine) awgSyncPeers() {
 // Returns nil + error when we're not in camp mode (no obfenv, no
 // identity) — caller falls back to skipping pair_req.
 func (e *Engine) pairReqPacket(sentMs int64) ([]byte, error) {
-	if e.cfg.Camp == nil || e.identity == nil || e.obfenv == nil {
+	if e.cfg.CampID == "" || e.identity == nil || e.obfenv == nil {
 		return nil, errors.New("pair_req: not in camp mode")
 	}
-	reqJSON, err := pair.BuildReq(e.identity, e.cfg.Camp.Name, sentMs)
+	reqJSON, err := pair.BuildReq(e.identity, e.cfg.CampName, sentMs)
 	if err != nil {
 		return nil, fmt.Errorf("pair_req build: %w", err)
 	}
@@ -1173,10 +1142,10 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	// Build and send the response. Our own sent_ms is the response's
 	// sent_ms; echo_ms carries the requester's sent_ms verbatim so they
 	// can compute RTT on receipt.
-	if e.cfg.Camp == nil || e.identity == nil || e.obfenv == nil {
+	if e.cfg.CampID == "" || e.identity == nil || e.obfenv == nil {
 		return
 	}
-	resJSON, err := pair.BuildRes(e.identity, e.cfg.Camp.Name, now, req.SentMs)
+	resJSON, err := pair.BuildRes(e.identity, e.cfg.CampName, now, req.SentMs)
 	if err != nil {
 		log.Printf("pair_res build: %v", err)
 		return
@@ -1391,8 +1360,8 @@ func (e *Engine) diagnosticsLocked() *Diagnostics {
 	}
 	// DNS server stats now live in services/dns; UI reads them via
 	// a separate endpoint backed by dns.Service.Stats().
-	if e.cfg.Camp != nil {
-		d.DNSResolverOK = platform.ZoneResolverInstalled(identity.CampLabel(e.cfg.Camp.ID))
+	if e.cfg.CampID != "" {
+		d.DNSResolverOK = platform.ZoneResolverInstalled(identity.CampLabel(e.cfg.CampID))
 	}
 	return d
 }
@@ -1498,31 +1467,23 @@ func (e *Engine) Status() Status {
 	if e.running {
 		st.LocalIP = e.cfg.LocalIP
 		st.ListenAddr = e.cfg.Listen
-		if e.cfg.Camp == nil {
+		if e.cfg.CampID == "" {
 			// Static --peer mode — legacy, single peer.
 			st.PeerIP = e.cfg.PeerIP
 			if p := e.staticPeer.Load(); p != nil {
 				st.PeerAddr = p.String()
 			}
 		}
-		if e.cfg.Camp != nil {
-			// CampActive + CampReflex are filled by web statusView from
-			// services/camp (it owns AnnounceClient now).
-			st.CampURL = e.cfg.Camp.URL
-			st.CampName = e.cfg.Camp.Name
-			st.CampID = e.cfg.Camp.ID
-			st.CampLabel = identity.CampLabel(e.cfg.Camp.ID)
+		if e.cfg.CampID != "" {
+			st.CampID = e.cfg.CampID
 			if e.identity != nil {
 				st.IdentityPub = e.identity.PubHex()
 				st.IdentityFP = e.identity.Fingerprint()
 			}
 			if active := e.activePub.Load(); active != nil {
 				st.ActivePeerPub = *active
-				if p, ok := e.peers[*active]; ok {
-					st.CampPeerName = p.Name
-					if p.UDPAddr != nil {
-						st.PeerAddr = p.UDPAddr.String()
-					}
+				if p, ok := e.peers[*active]; ok && p.UDPAddr != nil {
+					st.PeerAddr = p.UDPAddr.String()
 				}
 			}
 			st.Peers = e.peersStatusLocked()
@@ -1542,7 +1503,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		active = *a
 	}
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
-	if e.cfg.Camp != nil {
+	if e.cfg.CampID != "" {
 		selfPub, selfFp := "", ""
 		if e.identity != nil {
 			selfPub = e.identity.PubHex()
@@ -1551,7 +1512,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		// UDPEndpoint for self comes from services/camp via web
 		// statusView (engine no longer owns the announce reply).
 		out = append(out, PeerStatusInfo{
-			Name:       e.cfg.Camp.Name,
+			Name:       e.cfg.CampName,
 			Pub:        selfPub,
 			Fp:         selfFp,
 			JoinedAt:   e.started.UnixMilli(),
@@ -1699,7 +1660,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		// Static --peer mode is handled by the third branch.
 		peerAddr := e.routeFor(pkt)
 		if peerAddr == nil {
-			if e.cfg.Camp != nil {
+			if e.cfg.CampID != "" {
 				action = "drop-no-route"
 			} else {
 				action = "drop-no-peer"
@@ -1730,7 +1691,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 //
 // Static mode: always to the configured static peer.
 func (e *Engine) routeFor(pkt []byte) *net.UDPAddr {
-	if e.cfg.Camp == nil {
+	if e.cfg.CampID == "" {
 		return e.staticPeer.Load()
 	}
 	dst := extractDst(pkt)
@@ -1848,7 +1809,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		// NAT rebinds invalidate this until the next camp poll, at
 		// which point applyPeerList re-resolves the UDPEndpoint and
 		// the next packet from them re-matches.
-		if e.cfg.Camp != nil {
+		if e.cfg.CampID != "" {
 			now := time.Now().UnixMilli()
 			e.mu.Lock()
 			var hit *peerState
@@ -1904,15 +1865,6 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			packetLog("[udp %s] %s [→utun]", from, summary)
 		}
 	}
-}
-
-// ipv4Src extracts the IPv4 source address from a packet, or returns
-// ("", false) for non-IPv4 / too-short input.
-func ipv4Src(pkt []byte) (string, bool) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 {
-		return "", false
-	}
-	return net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15]).String(), true
 }
 
 // rollbackPartial cleans up whatever Start managed to bring up before

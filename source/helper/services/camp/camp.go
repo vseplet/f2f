@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
@@ -96,7 +97,10 @@ func New(eng *engine.Engine) *Service {
 // (the old AnnounceOnce path) would steal the announce reply and
 // wedge peerToTunLoop with i/o timeout. Idempotent — Stop required
 // between consecutive Starts for different camps.
-func (s *Service) Start(cfg engine.CampConfig) error {
+func (s *Service) Start(c *config.Camp) error {
+	if c == nil {
+		return errors.New("camp: nil config")
+	}
 	s.mu.Lock()
 	if s.announce != nil {
 		s.mu.Unlock()
@@ -108,7 +112,7 @@ func (s *Service) Start(cfg engine.CampConfig) error {
 		return errors.New("camp: engine UDP socket not ready")
 	}
 	pub := s.eng.IdentityPub()
-	ac, err := rendezvous.NewAnnounceClient(udp, cfg.StunAddr, cfg.Name, cfg.ID, pub)
+	ac, err := rendezvous.NewAnnounceClient(udp, c.StunAddr, c.Identity.Name, c.CampID, pub)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -119,6 +123,8 @@ func (s *Service) Start(cfg engine.CampConfig) error {
 	// reaches HandlePacket via the engine read loop without anyone
 	// else having to touch the socket.
 	campAddr := ac.CampAddr()
+	campName := c.Identity.Name
+	campID := c.CampID
 	unreg := s.eng.RegisterUDPHandler(func(pkt []byte, from *net.UDPAddr) bool {
 		if !sameUDPAddr(campAddr, from) {
 			return false
@@ -132,19 +138,19 @@ func (s *Service) Start(cfg engine.CampConfig) error {
 					if reflex == "" {
 						reflex = self.PublicIP
 					}
-					log.Printf("camp: registered as %s in camp %s, reflex=%s", cfg.Name, cfg.ID, reflex)
+					log.Printf("camp: registered as %s in camp %s, reflex=%s", campName, campID, reflex)
 				}
 			}
 		}
 		return claimed
 	})
 
-	base, perr := rendezvous.CampHTTPBase(cfg.URL)
+	base, perr := rendezvous.CampHTTPBase(c.ServerURL)
 	var poller *rendezvous.PeerListPoller
 	if perr != nil {
 		log.Printf("camp: %v (peer list disabled)", perr)
 	} else {
-		poller = rendezvous.NewPeerListPoller(base, cfg.ID, s.onUpdate)
+		poller = rendezvous.NewPeerListPoller(base, c.CampID, s.onUpdate)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

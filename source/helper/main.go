@@ -70,11 +70,11 @@ func run(bind string) error {
 	pkiSvc := pki.New(store, eng)
 	dnsSvc := dns.New(store, eng)
 	dropSvc := drop.New(eng)
-	callsSvc := calls.New(eng)
+	callsSvc := calls.New(store, eng)
 	tunnelSvc := tunnel.New(store, eng)
 	campSvc := camp.New(eng)
 
-	srv := web.New(eng, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -109,12 +109,15 @@ func run(bind string) error {
 		},
 		{
 			name: "camp",
-			start: func(_ string, _ engine.Status) error {
-				cc := eng.CampConfigSnapshot()
-				if cc == nil {
+			start: func(_ string, st engine.Status) error {
+				if st.CampID == "" {
 					return nil
 				}
-				return campSvc.Start(*cc)
+				c, err := store.SnapshotCamp(st.CampID)
+				if err != nil || c == nil {
+					return err
+				}
+				return campSvc.Start(c)
 			},
 			stop: campSvc.Stop,
 		},

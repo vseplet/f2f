@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/services/calls/sfu"
 )
@@ -55,7 +56,8 @@ type callCtx struct {
 // Construct once in main.go; the SFU lifecycle is tied to
 // CreateCall/EndCall, not to engine start/stop.
 type Service struct {
-	eng *engine.Engine
+	eng   *engine.Engine
+	store *config.Store
 
 	// OnLocalSignal delivers SFU signal messages destined for the
 	// local browser, bypassing HTTP-through-tunnel. Set by main.go
@@ -71,9 +73,9 @@ type Service struct {
 	mu sync.Mutex
 }
 
-// New constructs a Service. The engine must outlive it.
-func New(eng *engine.Engine) *Service {
-	return &Service{eng: eng}
+// New constructs a Service. The engine and store must outlive it.
+func New(store *config.Store, eng *engine.Engine) *Service {
+	return &Service{store: store, eng: eng}
 }
 
 // --- state helpers ---
@@ -198,7 +200,11 @@ func (s *Service) Create() (*State, error) {
 	}
 	s.call.Store(cc)
 
-	if _, err := sfuInst.AddParticipant(st.LocalIP, st.CampName); err != nil {
+	var ourName string
+	if cc, _ := s.store.SnapshotCamp(st.CampID); cc != nil {
+		ourName = cc.Identity.Name
+	}
+	if _, err := sfuInst.AddParticipant(st.LocalIP, ourName); err != nil {
 		sfuInst.Close()
 		s.clearCall()
 		return nil, fmt.Errorf("add self to sfu: %w", err)

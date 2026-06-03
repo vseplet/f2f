@@ -49,6 +49,7 @@ var assetsFS embed.FS
 //     the LAN.
 type Server struct {
 	engine   *engine.Engine
+	store    *config.Store
 	firewall *firewall.Service
 	pki      *pki.Service
 	drop     *drop.Service
@@ -68,9 +69,10 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
+		store:       store,
 		firewall:    fwSvc,
 		pki:         pkiSvc,
 		dns:         dnsSvc,
@@ -270,8 +272,7 @@ func (s *Server) UnbindProxies() error {
 // "localhost" for IPv6-only dev servers, or a LAN IP). Anything
 // outside our zone or with no matching label returns 404.
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	st := s.engine.Status()
-	campID := strings.ToLower(strings.TrimSpace(st.CampID))
+	campID := strings.ToLower(strings.TrimSpace(s.engine.Status().CampID))
 	if campID == "" {
 		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
 		return
@@ -648,9 +649,11 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	// Unified node labels: every actor in the camp is "<name> · <tunnel_ip>".
 	// Interface name (utun7) and public endpoints are diagnostic detail,
 	// shown elsewhere — here we want the user-visible identity.
-	selfName := st.CampName
-	if selfName == "" {
-		selfName = "you"
+	selfName := "you"
+	if st.CampID != "" {
+		if c, _ := s.store.SnapshotCamp(st.CampID); c != nil && c.Identity.Name != "" {
+			selfName = c.Identity.Name
+		}
 	}
 	selfLabel := selfName
 	if st.LocalIP != "" {
@@ -711,10 +714,17 @@ type statusView struct {
 	engine.Status
 	Peers      []peerStatusView       `json:"peers"`
 	Intercepts []tunnel.InterceptInfo `json:"intercepts"`
-	// camp_active / camp_reflex / camp_health live here (not in
-	// engine.Status) because engine no longer talks to the camp
-	// server — services/camp does, and this view merges its signals
-	// in for the UI's /api/status hot path.
+	// Camp metadata (URL/Name/ID/Label/PeerName) read from engine
+	// config snapshot — engine.Status proper carries only runtime
+	// state, not cfg metadata.
+	CampURL      string `json:"camp_url,omitempty"`
+	CampName     string `json:"camp_name,omitempty"`
+	CampID       string `json:"camp_id,omitempty"`
+	CampLabel    string `json:"camp_label,omitempty"`
+	CampPeerName string `json:"camp_peer_name,omitempty"`
+	// Camp connection signals (Active/Reflex/Health) come from
+	// services/camp; web merges them into /api/status so the UI
+	// keeps one endpoint.
 	CampActive bool         `json:"camp_active"`
 	CampReflex string       `json:"camp_reflex,omitempty"`
 	CampHealth *camp.Health `json:"camp_health,omitempty"`
@@ -750,17 +760,43 @@ func (s *Server) statusWithDomains() statusView {
 			}
 		}
 	}
+	// Camp metadata from engine config snapshot. PeerName derived
+	// from active peer.
+	var (
+		campURL, campName, campID, campLabel, peerName string
+	)
+	campID = st.CampID
+	if campID != "" {
+		if c, _ := s.store.SnapshotCamp(campID); c != nil {
+			campURL = c.ServerURL
+			campName = c.Identity.Name
+			campLabel = identity.CampLabel(campID)
+		}
+	}
+	if st.ActivePeerPub != "" {
+		for _, p := range st.Peers {
+			if p.Pub == st.ActivePeerPub && !p.Self {
+				peerName = p.Name
+				break
+			}
+		}
+	}
 	var health *camp.Health
-	if st.Running && st.CampID != "" {
+	if st.Running && campID != "" {
 		health = s.camp.HealthSnapshot()
 	}
 	return statusView{
-		Status:     st,
-		Peers:      peers,
-		Intercepts: s.tunnel.List(),
-		CampActive: s.camp.Active(),
-		CampReflex: reflex,
-		CampHealth: health,
+		Status:       st,
+		Peers:        peers,
+		Intercepts:   s.tunnel.List(),
+		CampURL:      campURL,
+		CampName:     campName,
+		CampID:       campID,
+		CampLabel:    campLabel,
+		CampPeerName: peerName,
+		CampActive:   s.camp.Active(),
+		CampReflex:   reflex,
+		CampHealth:   health,
 	}
 }
 
@@ -978,7 +1014,7 @@ func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing camp_id"))
 		return
 	}
-	c, err := s.engine.CampConfig(id)
+	c, err := s.store.SnapshotCamp(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1325,7 +1361,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if cur := s.engine.Status(); cur.Running {
 		if req.CampID != "" && cur.CampID == req.CampID {
-			writeJSON(w, http.StatusOK, cur)
+			writeJSON(w, http.StatusOK, s.statusWithDomains())
 			return
 		}
 		if err := s.engine.Stop(); err != nil {
@@ -1335,7 +1371,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	name := req.CampName
 	if name == "" && req.CampID != "" {
-		if existing, err := s.engine.CampConfig(req.CampID); err == nil && existing != nil {
+		if existing, err := s.store.SnapshotCamp(req.CampID); err == nil && existing != nil {
 			name = existing.Identity.Name
 		}
 	}
@@ -1344,15 +1380,11 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP: "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
-		Listen:  ":9000",
-		Camp: &engine.CampConfig{
-			URL:      "wss://f2f-camp.fly.dev/ws",
-			StunAddr: "f2f-camp.fly.dev:3478",
-			Name:     name,
-			ID:       req.CampID,
-			Label:    req.CampLabel,
-		},
+		LocalIP:   "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
+		Listen:    ":9000",
+		CampID:    req.CampID,
+		CampName:  name,
+		CampLabel: req.CampLabel,
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)

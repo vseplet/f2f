@@ -92,8 +92,8 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 		return
 	}
 	var ourName string
-	if e.cfg.Camp != nil {
-		ourName = e.cfg.Camp.Name
+	if e.cfg.CampID != "" {
+		ourName = e.cfg.CampName
 	}
 	byPub := make(map[string]int, len(e.camp.PeerCatalog))
 	for i, p := range e.camp.PeerCatalog {
@@ -150,10 +150,10 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 // older builds (before we filtered self in mergePeerSnapshotLocked).
 // Called from Start under e.mu. Persists if anything changed.
 func (e *Engine) pruneSelfFromCatalogLocked() {
-	if e.camp == nil || e.cfg.Camp == nil {
+	if e.camp == nil || e.cfg.CampID == "" {
 		return
 	}
-	ourName := e.cfg.Camp.Name
+	ourName := e.cfg.CampName
 	ourPub := ""
 	if e.identity != nil {
 		ourPub = e.identity.PubHex()
@@ -183,8 +183,8 @@ func (e *Engine) hydratePeersFromCatalog() {
 		return
 	}
 	var ourName string
-	if e.cfg.Camp != nil {
-		ourName = e.cfg.Camp.Name
+	if e.cfg.CampID != "" {
+		ourName = e.cfg.CampName
 	}
 	for _, p := range e.camp.PeerCatalog {
 		if p.Name == ourName {
@@ -269,14 +269,10 @@ func (e *Engine) StartLastCamp() error {
 		listen = ":0"
 	}
 	cfg := Config{
-		LocalIP: "10.99.0.1", // placeholder; camp announce overrides
-		Listen:  listen,
-		Camp: &CampConfig{
-			URL:      "wss://f2f-camp.fly.dev/ws",
-			StunAddr: "f2f-camp.fly.dev:3478",
-			Name:     camp.Identity.Name,
-			ID:       camp.CampID,
-		},
+		LocalIP:  "10.99.0.1", // placeholder; camp announce overrides
+		Listen:   listen,
+		CampID:   camp.CampID,
+		CampName: camp.Identity.Name,
 	}
 	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Identity.Name)
 	return e.Start(cfg)
