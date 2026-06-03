@@ -93,7 +93,6 @@ type Status struct {
 	PeerIP       string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
 	ListenAddr   string `json:"listen_addr,omitempty"`
 	PeerAddr     string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
-	CampActive   bool   `json:"camp_active"`
 	CampURL      string `json:"camp_url,omitempty"`
 	CampName     string `json:"camp_name,omitempty"`
 	CampID       string `json:"camp_id,omitempty"`
@@ -103,7 +102,9 @@ type Status struct {
 	// camps it equals CampID itself.
 	CampLabel    string `json:"camp_label,omitempty"`
 	CampPeerName string `json:"camp_peer_name,omitempty"` // active peer's name (display alias)
-	CampReflex   string `json:"camp_reflex,omitempty"`    // our own external endpoint per STUN
+	// CampActive / CampReflex / CampHealth are filled by web
+	// statusView from services/camp — engine no longer owns those
+	// signals and doesn't carry the fields.
 	// Identity (Ed25519) for the running camp. Pub is the full 32-byte
 	// public key in hex; Fingerprint is the short SHA-256 prefix the
 	// UI shows. Empty in static --peer mode.
@@ -118,28 +119,13 @@ type Status struct {
 	RxBytes       uint64           `json:"rx_bytes"`
 	TxPackets     uint64           `json:"tx_packets"`
 	RxPackets     uint64           `json:"rx_packets"`
-	// CampHealth surfaces UDP + HTTP liveness with the camp server,
-	// used by the UI's camp-health section. Nil when camp mode is off.
-	CampHealth *CampHealth `json:"camp_health,omitempty"`
 	// Diagnostics is the runtime info dump for the diagnostics tab —
 	// DNS counters, goroutines, etc. Always populated when Running.
 	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
 }
 
-// CampHealth aggregates the UDP-announce and HTTP-poll signals against
-// the camp server. UDP and HTTP travel different paths (different
-// sockets, different transport), so split health makes asymmetric
-// failures visible — e.g. HTTP fine + UDP wedged after sleep.
-type CampHealth struct {
-	UDPLastSentMs     int64  `json:"udp_last_sent_ms,omitempty"`
-	UDPLastReplyMs    int64  `json:"udp_last_reply_ms,omitempty"`
-	UDPRTTMs          int64  `json:"udp_rtt_ms,omitempty"`
-	HTTPLastPollMs    int64  `json:"http_last_poll_ms,omitempty"`
-	HTTPLastSuccessMs int64  `json:"http_last_success_ms,omitempty"`
-	HTTPRTTMs         int64  `json:"http_rtt_ms,omitempty"`
-	HTTPLastErr       string `json:"http_last_err,omitempty"`
-	HTTPPeersCount    int    `json:"http_peers_count,omitempty"`
-}
+// Camp connection health (UDP-announce + HTTP-poll counters) lives
+// in services/camp now; web statusView merges it into /api/status.
 
 // Diagnostics is the catch-all runtime info displayed in the UI's
 // diagnostics tab. Keep additions here purely additive — JSON omitempty
@@ -340,9 +326,15 @@ type Engine struct {
 	cfg     Config
 
 	tun      *utun.Tunnel
-	udp      *net.UDPConn
-	routes   *route.Manager
-	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
+	udp    *net.UDPConn
+	routes *route.Manager
+
+	// udpHandlers are external claimants of UDP packets from
+	// peerToTunLoop. services/camp registers one to catch camp-source
+	// packets (announce reply). Empty slot left by unregister() is nil.
+	udpHandlersMu sync.Mutex
+	udpHandlers   []UDPHandler
+
 	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
 	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
 	// Built once at Start in camp mode; nil in static --peer mode.
@@ -356,16 +348,6 @@ type Engine struct {
 	// awgDevice is active. Peers are pushed into it via SyncPeers,
 	// triggered by pair-handshake success and camp polls.
 	awgDevice *awg.Device
-	// campAddr is the resolved UDP endpoint of the camp server. The main
-	// read loop checks each incoming packet's source against this so we
-	// can dispatch announce replies before they hit IP-version parsing.
-	campAddr atomic.Pointer[net.UDPAddr]
-	// campReflex is display-only.
-	campReflex atomic.Pointer[string]
-	// campPeers holds the latest peer-list snapshot from the camp HTTP
-	// poller. The UI reads from this cache via /api/camp/peers so each
-	// browser refresh costs zero camp requests.
-	campPeers atomic.Pointer[[]rendezvous.PeerInfo]
 
 	// peers tracks every peer we currently know about (via camp poll or
 	// static config). Keyed by tunnel_ip. We send periodic hole-punch
@@ -585,50 +567,22 @@ func (e *Engine) Start(cfg Config) error {
 		}
 	}
 
-	// Camp: announce ourselves over UDP on the same socket the tunnel
-	// uses. The reply carries our camp-assigned tunnel IP (which utun
-	// will be opened with below) and our public endpoint as observed
-	// by camp — that doubles as STUN. The peer list comes from the
-	// periodic HTTP poller started further down.
+	// Local IP for utun is derived from our Ed25519 identity (no camp
+	// involvement) — unique per-peer so intercept replies routed back
+	// through this overlay don't collide on the egress peer's utun.
+	// The camp roster (UDP announce + HTTP peer-list poll) is owned
+	// by services/camp now and runs after eng.OnStarted.
 	var (
 		localIP = cfg.LocalIP
 		peerIP  = cfg.PeerIP
 	)
-	if cfg.Camp != nil {
-		pub := ""
-		if e.identity != nil {
-			pub = e.identity.PubHex()
-		}
-		ac, err := rendezvous.NewAnnounceClient(e.udp, cfg.Camp.StunAddr, cfg.Camp.Name, cfg.Camp.ID, pub)
-		if err != nil {
+	if cfg.Camp != nil && e.identity != nil {
+		a, derr := PubToV4Addr(e.identity.PubHex())
+		if derr != nil {
 			e.rollbackPartial()
-			return fmt.Errorf("camp announce client: %w", err)
+			return fmt.Errorf("derive v4 alias: %w", derr)
 		}
-		self, err := ac.AnnounceOnce(5 * time.Second)
-		if err != nil {
-			e.rollbackPartial()
-			return fmt.Errorf("camp announce: %w", err)
-		}
-		e.announce = ac
-		e.campAddr.Store(ac.CampAddr())
-		reflex := self.UDPEndpoint
-		if reflex == "" {
-			reflex = self.PublicIP
-		}
-		e.campReflex.Store(&reflex)
-		// v4 alias is derived from our own pub — unique per-peer so
-		// intercept replies routed back through this overlay don't
-		// land on the egress peer's own utun (would happen with a
-		// shared address). Camp-assigned tunnel_ip is ignored.
-		if e.identity != nil {
-			a, derr := PubToV4Addr(e.identity.PubHex())
-			if derr != nil {
-				e.rollbackPartial()
-				return fmt.Errorf("derive v4 alias: %w", derr)
-			}
-			localIP = a.String()
-		}
-		log.Printf("camp: registered as %s in camp %s, reflex=%s (utun v4 alias=%s)", cfg.Camp.Name, cfg.Camp.ID, reflex, localIP)
+		localIP = a.String()
 	}
 
 	// utun. In Camp mode the interface owns the whole 10.99.0.0/24
@@ -738,17 +692,8 @@ func (e *Engine) Start(cfg Config) error {
 		e.workers.Add(1)
 		go e.peerToTunLoop(ctx)
 	}
-	if e.announce != nil {
-		// Periodic announce keeps both camp's last_seen fresh and the
-		// camp-facing NAT mapping alive (matters under symmetric NAT).
-		e.workers.Add(1)
-		go func() {
-			defer e.workers.Done()
-			e.announce.Run(ctx, 20*time.Second)
-		}()
-		// HTTP peer-list poll lives in services/camp; main.go starts
-		// it off eng.OnStarted via campSvc.Start(cfg.Camp).
-	}
+	// Camp announce + HTTP poller + UDP dispatch handler all live in
+	// services/camp; main.go starts the service off eng.OnStarted.
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
@@ -773,31 +718,6 @@ func (e *Engine) Start(cfg Config) error {
 		e.mu.Lock()
 	}
 	return nil
-}
-
-// currentReflex returns our latest camp-observed external endpoint —
-// the value the camp server most recently told us about ourselves on
-// an announce reply. announce.HandlePacket keeps this fresh on every
-// reply, so this reflects the live NAT mapping (matters after Wi-Fi
-// switches, network changes etc.) instead of the boot-time value.
-// Returns "" when announce is not running or no reply has arrived
-// yet. e.campReflex is kept as a fallback for the bootstrap window
-// before the first reply.
-func (e *Engine) currentReflex() string {
-	if e.announce != nil {
-		if self := e.announce.Self(); self != nil {
-			if self.UDPEndpoint != "" {
-				return self.UDPEndpoint
-			}
-			if self.PublicIP != "" {
-				return self.PublicIP
-			}
-		}
-	}
-	if r := e.campReflex.Load(); r != nil {
-		return *r
-	}
-	return ""
 }
 
 // Routes returns the live route manager — the OS-level primitive
@@ -910,7 +830,7 @@ func (e *Engine) ApplyCampRoster(peers []rendezvous.PeerInfo) {
 // CampConfigSnapshot returns the camp config the engine is currently
 // running with (URL/Name/ID/...), or nil when running in static
 // --peer mode. Exposed for services/camp which needs URL+ID to spin
-// up the HTTP poller.
+// up the announce client and HTTP poller.
 func (e *Engine) CampConfigSnapshot() *CampConfig {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -921,13 +841,78 @@ func (e *Engine) CampConfigSnapshot() *CampConfig {
 	return &c
 }
 
+// UDPConn returns the shared UDP socket the transport runs on. Nil
+// before Start / after Stop. services/camp borrows it to construct
+// its AnnounceClient (the announce protocol piggybacks on the same
+// socket so camp can observe our external endpoint via the packet
+// source — replaces STUN).
+func (e *Engine) UDPConn() *net.UDPConn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.udp
+}
+
+// IdentityPub returns the local Ed25519 public key in hex, or "" if
+// the engine isn't running in camp mode. services/camp tags the
+// announce packet with this so peers in the camp can route us by
+// identity.
+func (e *Engine) IdentityPub() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.identity == nil {
+		return ""
+	}
+	return e.identity.PubHex()
+}
+
+// UDPHandler claims a UDP packet by returning true. peerToTunLoop
+// walks registered handlers in order before falling through to the
+// engine's own dispatch (obfenv multiplex → tun.Write).
+type UDPHandler func(pkt []byte, from *net.UDPAddr) bool
+
+// RegisterUDPHandler adds h to the dispatch chain. Returns an
+// unregister func that removes it again. services/camp registers
+// one in Start to claim packets whose source is the camp server.
+func (e *Engine) RegisterUDPHandler(h UDPHandler) (unregister func()) {
+	e.udpHandlersMu.Lock()
+	defer e.udpHandlersMu.Unlock()
+	e.udpHandlers = append(e.udpHandlers, h)
+	idx := len(e.udpHandlers) - 1
+	return func() {
+		e.udpHandlersMu.Lock()
+		defer e.udpHandlersMu.Unlock()
+		if idx < len(e.udpHandlers) {
+			e.udpHandlers[idx] = nil
+		}
+	}
+}
+
+// dispatchUDP walks the registered handlers and returns true as soon
+// as one claims the packet. Called from peerToTunLoop hot path; lock
+// is held only long enough to snapshot the slice.
+func (e *Engine) dispatchUDP(pkt []byte, from *net.UDPAddr) bool {
+	e.udpHandlersMu.Lock()
+	hs := append([]UDPHandler(nil), e.udpHandlers...)
+	e.udpHandlersMu.Unlock()
+	for _, h := range hs {
+		if h == nil {
+			continue
+		}
+		if h(pkt, from) {
+			return true
+		}
+	}
+	return false
+}
+
 // applyPeerList reconciles our peers map with the camp's current view
 // and caches the snapshot for the UI. Every peer (except ourselves) is
 // tracked so the holePunchLoop can keep NAT mappings open with all of
 // them. Active selection is independent and driven by the UI.
 func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
-	snap := append([]rendezvous.PeerInfo(nil), peers...)
-	e.campPeers.Store(&snap)
+	// Snapshot of the polled roster lives in services/camp now (its
+	// Snapshot() exposes it to the UI). Engine just merges the diff
+	// into peers + catalog.
 
 	var ourName string
 	if cfg := e.cfg.Camp; cfg != nil {
@@ -1045,18 +1030,8 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 	}
 }
 
-// CampPeers returns the most recent peer-list snapshot from the camp
-// poller. Empty slice if the engine isn't running or no poll has
-// completed yet. The returned slice is a copy and safe to mutate.
-func (e *Engine) CampPeers() []rendezvous.PeerInfo {
-	p := e.campPeers.Load()
-	if p == nil {
-		return nil
-	}
-	out := make([]rendezvous.PeerInfo, len(*p))
-	copy(out, *p)
-	return out
-}
+// Camp roster snapshot lives in services/camp now — UI hits
+// campSvc.Snapshot() directly.
 
 // 1-byte UDP punch/keepalive packets are below our 20-byte IP minimum,
 // so the receiving peer's peerToTunLoop drops them without touching
@@ -1422,20 +1397,6 @@ func (e *Engine) diagnosticsLocked() *Diagnostics {
 	return d
 }
 
-// campHealthLocked builds the CampHealth snapshot from the announce
-// client and the HTTP poller. Caller must hold e.mu.
-func (e *Engine) campHealthLocked() *CampHealth {
-	h := &CampHealth{}
-	if e.announce != nil {
-		h.UDPLastSentMs = e.announce.LastSentMs()
-		h.UDPLastReplyMs = e.announce.LastReplyMs()
-		h.UDPRTTMs = e.announce.LastRTTMs()
-	}
-	// HTTP poller stats now live in services/camp; web statusView
-	// merges them in via Service.PollerStats().
-	return h
-}
-
 // Stop tears everything down in reverse order. Idempotent.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
@@ -1501,10 +1462,6 @@ func (e *Engine) Stop() error {
 	e.awgDevice = nil
 	e.obfenv = nil
 	e.routes = nil
-	e.announce = nil
-	e.campAddr.Store(nil)
-	e.campPeers.Store(nil)
-	e.campReflex.Store(nil)
 	e.peers = map[string]*peerState{}
 	e.activePub.Store(nil)
 	e.staticPeer.Store(nil)
@@ -1549,12 +1506,12 @@ func (e *Engine) Status() Status {
 			}
 		}
 		if e.cfg.Camp != nil {
-			st.CampActive = e.announce != nil
+			// CampActive + CampReflex are filled by web statusView from
+			// services/camp (it owns AnnounceClient now).
 			st.CampURL = e.cfg.Camp.URL
 			st.CampName = e.cfg.Camp.Name
 			st.CampID = e.cfg.Camp.ID
 			st.CampLabel = identity.CampLabel(e.cfg.Camp.ID)
-			st.CampReflex = e.currentReflex()
 			if e.identity != nil {
 				st.IdentityPub = e.identity.PubHex()
 				st.IdentityFP = e.identity.Fingerprint()
@@ -1569,7 +1526,6 @@ func (e *Engine) Status() Status {
 				}
 			}
 			st.Peers = e.peersStatusLocked()
-			st.CampHealth = e.campHealthLocked()
 		}
 		st.Diagnostics = e.diagnosticsLocked()
 	}
@@ -1587,25 +1543,25 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	}
 	out := make([]PeerStatusInfo, 0, len(e.peers)+1)
 	if e.cfg.Camp != nil {
-		selfEndpoint := e.currentReflex()
 		selfPub, selfFp := "", ""
 		if e.identity != nil {
 			selfPub = e.identity.PubHex()
 			selfFp = e.identity.Fingerprint()
 		}
+		// UDPEndpoint for self comes from services/camp via web
+		// statusView (engine no longer owns the announce reply).
 		out = append(out, PeerStatusInfo{
-			Name:        e.cfg.Camp.Name,
-			Pub:         selfPub,
-			Fp:          selfFp,
-			UDPEndpoint: selfEndpoint,
-			JoinedAt:    e.started.UnixMilli(),
-			InCamp:      true,
-			Online:      true,
-			Reachable:   true,
-			Verified:    true,
-			Paired:      true,
-			Self:        true,
-			OverlayV4:   e.cfg.LocalIP,
+			Name:       e.cfg.Camp.Name,
+			Pub:        selfPub,
+			Fp:         selfFp,
+			JoinedAt:   e.started.UnixMilli(),
+			InCamp:     true,
+			Online:     true,
+			Reachable:  true,
+			Verified:   true,
+			Paired:     true,
+			Self:       true,
+			OverlayV4:  e.cfg.LocalIP,
 		})
 	}
 	// Sort peer-keys so the UI list is stable across refreshes —
@@ -1827,12 +1783,12 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			return
 		}
 		pkt := buf[:n]
-		// Camp announce replies arrive on this same socket. Dispatch
-		// them first so they don't get treated as tunnel data.
-		if ca := e.campAddr.Load(); ca != nil && sameUDPAddr(ca, from) {
-			if e.announce != nil && e.announce.HandlePacket(pkt) {
-				continue
-			}
+		// External claimants first: services/camp registers a handler
+		// that catches announce-reply packets from the camp server
+		// (and could be extended by future control-plane services
+		// piggybacking on the same socket).
+		if e.dispatchUDP(pkt, from) {
+			continue
 		}
 		// Control-envelope multiplex (hello + future control types + AWG).
 		// First uint32 of every packet is the magic header — if it lands
@@ -1988,7 +1944,6 @@ func (e *Engine) rollbackPartial() {
 		_ = e.routes.Cleanup()
 		e.routes = nil
 	}
-	e.announce = nil
 	e.obfenv = nil
 }
 

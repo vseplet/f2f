@@ -709,8 +709,15 @@ type peerStatusView struct {
 // status shape verbatim.
 type statusView struct {
 	engine.Status
-	Peers      []peerStatusView        `json:"peers"`
-	Intercepts []tunnel.InterceptInfo  `json:"intercepts"`
+	Peers      []peerStatusView       `json:"peers"`
+	Intercepts []tunnel.InterceptInfo `json:"intercepts"`
+	// camp_active / camp_reflex / camp_health live here (not in
+	// engine.Status) because engine no longer talks to the camp
+	// server — services/camp does, and this view merges its signals
+	// in for the UI's /api/status hot path.
+	CampActive bool         `json:"camp_active"`
+	CampReflex string       `json:"camp_reflex,omitempty"`
+	CampHealth *camp.Health `json:"camp_health,omitempty"`
 }
 
 // statusWithDomains assembles the /api/status response by joining
@@ -732,22 +739,28 @@ func (s *Server) statusWithDomains() statusView {
 		}
 		peers = append(peers, v)
 	}
-	// engine.Status only carries the UDP-announce half of CampHealth
-	// (it owns the AnnounceClient still). The HTTP-poll half lives in
-	// services/camp now — splice its stats in so the UI's camp-health
-	// card stays whole.
-	if st.CampHealth != nil {
-		ps := s.camp.PollerStats()
-		st.CampHealth.HTTPLastPollMs = ps.LastPollMs
-		st.CampHealth.HTTPLastSuccessMs = ps.LastSuccessMs
-		st.CampHealth.HTTPRTTMs = ps.LastRTTMs
-		st.CampHealth.HTTPLastErr = ps.LastErr
-		st.CampHealth.HTTPPeersCount = ps.PeersCount
+	reflex := s.camp.Reflex()
+	// Self peer entry from engine doesn't carry UDPEndpoint anymore —
+	// merge camp.Reflex() in here.
+	if reflex != "" {
+		for i := range peers {
+			if peers[i].Self {
+				peers[i].UDPEndpoint = reflex
+				break
+			}
+		}
+	}
+	var health *camp.Health
+	if st.Running && st.CampID != "" {
+		health = s.camp.HealthSnapshot()
 	}
 	return statusView{
 		Status:     st,
 		Peers:      peers,
 		Intercepts: s.tunnel.List(),
+		CampActive: s.camp.Active(),
+		CampReflex: reflex,
+		CampHealth: health,
 	}
 }
 
@@ -756,17 +769,17 @@ func (s *Server) statusWithDomains() statusView {
 // state — no camp HTTP call here (the engine's poller refreshes the
 // cache every ~30s).
 func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
-	st := s.engine.Status()
-	if !st.CampActive {
+	view := s.statusWithDomains()
+	if !view.CampActive {
 		writeJSON(w, http.StatusOK, map[string]any{"running": false})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running": true,
-		"you":     st.CampName,
-		"camp_id": st.CampID,
-		"active":  st.ActivePeerPub,
-		"peers":   st.Peers,
+		"you":     view.CampName,
+		"camp_id": view.CampID,
+		"active":  view.ActivePeerPub,
+		"peers":   view.Peers,
 	})
 }
 

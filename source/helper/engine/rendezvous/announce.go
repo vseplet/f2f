@@ -126,10 +126,14 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 	return PeerInfo{}, errors.New("camp: no announce reply within timeout")
 }
 
-// Run sends a periodic announce until ctx is done. Reply packets are
-// handled by HandlePacket via the engine's main read loop — we don't
-// read from the socket here.
+// Run sends an immediate announce, then continues every `every`
+// until ctx is done. Reply packets are handled by HandlePacket via
+// the engine's main read loop (or the camp service's UDP dispatch
+// handler) — Run never reads from the socket itself.
 func (a *AnnounceClient) Run(ctx context.Context, every time.Duration) {
+	if err := a.sendAnnounce(); err != nil {
+		log.Printf("camp: announce: %v", err)
+	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
