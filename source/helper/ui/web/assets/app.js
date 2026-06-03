@@ -50,6 +50,178 @@ $(function () {
     $(document).on('mousemove.sbres', onMove).on('mouseup.sbres', onUp);
   });
 
+  // Toggle button: collapse if expanded, restore to last non-collapsed
+  // width if currently collapsed. lastExpandedWidth survives reloads
+  // via localStorage so users always get back to their preferred size.
+  const LAST_EXPANDED_KEY = 'f2f:sidebar-expanded-width';
+  let lastExpandedWidth = parseInt(localStorage.getItem(LAST_EXPANDED_KEY) || '', 10);
+  if (!Number.isFinite(lastExpandedWidth) || lastExpandedWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
+    lastExpandedWidth = sidebarDefault;
+  }
+  $('#ax-sidebar-toggle').on('click', function () {
+    if ($sidebar.hasClass('ax-collapsed')) {
+      applySidebarWidth(lastExpandedWidth);
+    } else {
+      lastExpandedWidth = $sidebar.outerWidth();
+      try { localStorage.setItem(LAST_EXPANDED_KEY, String(lastExpandedWidth)); } catch (_) {}
+      applySidebarWidth(SIDEBAR_MIN);
+    }
+    try { localStorage.setItem(SIDEBAR_KEY, String($sidebar.outerWidth())); } catch (_) {}
+  });
+  // Update the toggle glyph to match the current state. ‹ when open
+  // (click to collapse), › when collapsed (click to expand).
+  function updateToggleGlyph() {
+    $('#ax-sidebar-toggle').text($sidebar.hasClass('ax-collapsed') ? '›' : '‹');
+  }
+  new MutationObserver(updateToggleGlyph)
+    .observe($sidebar[0], { attributes: true, attributeFilter: ['class'] });
+  updateToggleGlyph();
+
+  // ---- Right notifications sidebar ----
+  // Symmetric to the left tree but feeds off a moving log of events.
+  // Width + collapsed state persist independently. Mock data for now;
+  // a real notification service will push entries through the same
+  // renderNotifications() function once it ships.
+  const $notif = $('#ax-notifications');
+  const $notifResize = $('#ax-notifications-resize');
+  const NOTIF_KEY = 'f2f:notif-width';
+  const NOTIF_EXPANDED_KEY = 'f2f:notif-expanded-width';
+  const notifDefault = 260;
+  function applyNotifWidth(px) {
+    const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px));
+    $notif.css('width', clamped + 'px');
+    $notif.toggleClass('ax-collapsed', clamped < SIDEBAR_COLLAPSE_THRESHOLD);
+  }
+  try {
+    const saved = parseInt(localStorage.getItem(NOTIF_KEY) || '', 10);
+    applyNotifWidth(Number.isFinite(saved) ? saved : notifDefault);
+  } catch (_) { applyNotifWidth(notifDefault); }
+  let lastNotifExpanded = parseInt(localStorage.getItem(NOTIF_EXPANDED_KEY) || '', 10);
+  if (!Number.isFinite(lastNotifExpanded) || lastNotifExpanded < SIDEBAR_COLLAPSE_THRESHOLD) {
+    lastNotifExpanded = notifDefault;
+  }
+  $notifResize.on('mousedown', function (e) {
+    e.preventDefault();
+    $notifResize.addClass('dragging');
+    const startX = e.clientX;
+    const startW = $notif.outerWidth();
+    function onMove(ev) {
+      // Resize handle is on the LEFT of the right panel — drag right
+      // shrinks the panel, drag left grows it. Sign flips.
+      applyNotifWidth(startW - (ev.clientX - startX));
+    }
+    function onUp() {
+      $notifResize.removeClass('dragging');
+      $(document).off('mousemove.nres mouseup.nres');
+      try { localStorage.setItem(NOTIF_KEY, String($notif.outerWidth())); } catch (_) {}
+    }
+    $(document).on('mousemove.nres', onMove).on('mouseup.nres', onUp);
+  });
+  $('#ax-notifications-toggle').on('click', function () {
+    if ($notif.hasClass('ax-collapsed')) {
+      applyNotifWidth(lastNotifExpanded);
+    } else {
+      lastNotifExpanded = $notif.outerWidth();
+      try { localStorage.setItem(NOTIF_EXPANDED_KEY, String(lastNotifExpanded)); } catch (_) {}
+      applyNotifWidth(SIDEBAR_MIN);
+    }
+    try { localStorage.setItem(NOTIF_KEY, String($notif.outerWidth())); } catch (_) {}
+  });
+  function updateNotifGlyph() {
+    // Mirror of the left toggle: › when open (click to collapse right),
+    // ‹ when collapsed (click to expand back).
+    $('#ax-notifications-toggle').text($notif.hasClass('ax-collapsed') ? '‹' : '›');
+  }
+  new MutationObserver(updateNotifGlyph)
+    .observe($notif[0], { attributes: true, attributeFilter: ['class'] });
+  updateNotifGlyph();
+
+  // Notifications mock. kind ∈ {ok, warn, info, muted} drives the
+  // accent bar colour: ok = something good happened, warn = needs
+  // attention, info = passive, muted = stale/closed. group is the
+  // day-bucket header the cards live under.
+  // Each notification has a stable `id` so we can find/remove it after
+  // render. Real notification service will mint these server-side; for
+  // now we generate from the index at module load time.
+  const MOCK_NOTIFICATIONS = [
+    { kind: 'ok',    group: 'today',     when: 'just now', title: 'artpani started a meet',                meta: '#dev · join now' },
+    { kind: 'warn',  group: 'today',     when: '2m',       title: 'mac-mini-m4 wants to install your CA',  meta: 'click to approve' },
+    { kind: 'ok',    group: 'today',     when: '5m',       title: 'sevapp_vm_ubuntu joined the camp',      meta: '100.109.72.42' },
+    { kind: 'muted', group: 'today',     when: '12m',      title: 'dinar went offline',                    meta: '' },
+    { kind: 'info',  group: 'today',     when: '1h',       title: 'mac-mini-m4 shared a file',             meta: 'project-notes.md · 12 KB' },
+    { kind: 'warn',  group: 'today',     when: '3h',       title: 'firewall blocked inbound :22',          meta: 'from artpani · 4 attempts' },
+    { kind: 'info',  group: 'yesterday', when: '1d',       title: 'new domain registered',                 meta: 'foo.local → :3000' },
+    { kind: 'muted', group: 'yesterday', when: '1d',       title: '#offtopic archived',                    meta: '' },
+    { kind: 'ok',    group: 'this week', when: '3d',       title: 'sevapp_vm_nixos joined the camp',       meta: '' },
+  ].map((n, i) => ({ ...n, id: 'n' + i }));
+  let selectedNotifId = null;
+  function renderNotifications() {
+    const q = ($('#ax-notifications-search').val() || '').trim().toLowerCase();
+    const items = q
+      ? MOCK_NOTIFICATIONS.filter(n =>
+          (n.title + ' ' + (n.meta || '')).toLowerCase().includes(q))
+      : MOCK_NOTIFICATIONS;
+    if (!items.length) {
+      $('#ax-notifications-list').html(empty('no notifications'));
+      return;
+    }
+    // Group by .group preserving the natural order in MOCK_NOTIFICATIONS
+    // (it's already chronological newest-first).
+    let lastGroup = null;
+    const parts = [];
+    for (const n of items) {
+      if (n.group !== lastGroup) {
+        parts.push(`<div class="ax-notif-group">${esc(n.group)}</div>`);
+        lastGroup = n.group;
+      }
+      const selected = n.id === selectedNotifId ? ' selected' : '';
+      parts.push(
+        `<div class="ax-notif ${esc(n.kind)}${selected}" data-id="${esc(n.id)}" title="${esc(n.title)}">`
+          + `<div class="ax-notif-accent"></div>`
+          + `<div class="ax-notif-body">`
+            + `<div class="ax-notif-title">${esc(n.title)}</div>`
+            + (n.meta ? `<div class="ax-notif-meta">${esc(n.meta)}</div>` : '')
+          + `</div>`
+          + `<div class="ax-notif-time">${esc(n.when)}</div>`
+          + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
+        + `</div>`
+      );
+    }
+    $('#ax-notifications-list').html(parts.join(''));
+  }
+  $('#ax-notifications-search').on('input', renderNotifications);
+  $('#ax-notifications-search').on('keydown', function (e) {
+    if (e.key === 'Escape') { $(this).val('').trigger('input').blur(); }
+  });
+
+  // Click on the × — fade the card out, then drop it from the model
+  // and re-render. stopPropagation so the parent .ax-notif click
+  // (selection) doesn't also fire.
+  $('#ax-notifications-list').on('click', '.ax-notif-close', function (e) {
+    e.stopPropagation();
+    const $card = $(this).closest('.ax-notif');
+    const id = $card.data('id');
+    $card.addClass('removing');
+    setTimeout(function () {
+      const idx = MOCK_NOTIFICATIONS.findIndex(n => n.id === id);
+      if (idx >= 0) MOCK_NOTIFICATIONS.splice(idx, 1);
+      if (selectedNotifId === id) selectedNotifId = null;
+      renderNotifications();
+    }, 180);
+  });
+  // Click anywhere else on the card selects it. Real handlers (open
+  // the meet, approve the CA, jump to the file) will branch off n.kind
+  // once the backend lands — for now we just visually mark selection
+  // and log to console so the click is observable.
+  $('#ax-notifications-list').on('click', '.ax-notif', function () {
+    const id = $(this).data('id');
+    selectedNotifId = (selectedNotifId === id) ? null : id;
+    const n = MOCK_NOTIFICATIONS.find(x => x.id === id);
+    if (n) console.log('notif click:', n);
+    renderNotifications();
+  });
+  renderNotifications();
+
   // Category collapse: click the row toggles .collapsed on the category;
   // the CSS adjacent-sibling selector hides .ax-tree-children.
   $('#ax-tree').on('click', '.ax-tree-category', function () {
@@ -496,6 +668,42 @@ $(function () {
       }
     }
 
+    // chats — visual mock until the chat service ships. Direct = 1-1
+    // mapped to a single peer; group = named room with N members. An
+    // active call inside a chat is hinted in the meta column ("in call"
+    // for DMs, "live · N" for groups) so users can see at a glance
+    // where the talking is happening. Same data drives the standalone
+    // `calls` category below — for now the calls list is computed off
+    // these mocks too.
+    const MOCK_DIRECTS = [
+      { peer: 'mac-mini-m4', unread: 2, online: true },
+      { peer: 'artpani',     unread: 0, online: true,  inCall: true },
+      { peer: 'sevapp_vm_ubuntu', unread: 0, online: true },
+      { peer: 'dinar',       unread: 0, online: false },
+    ];
+    const MOCK_GROUPS = [
+      { name: '#general',    members: 5, unread: 3 },
+      { name: '#dev',        members: 3, unread: 0, liveCall: { participants: 2 } },
+      { name: '#offtopic',   members: 8, unread: 0 },
+      { name: '#sf-only',    members: 4, unread: 1 },
+    ];
+
+    const directsBody = MOCK_DIRECTS.map(d => {
+      const state = d.online ? 'online' : 'offline';
+      const tags = [];
+      if (d.unread) tags.push(`${d.unread} new`);
+      if (d.inCall) tags.push('● in call');
+      return row(state, d.peer, tags.join(' · '));
+    }).join('');
+
+    const groupsBody = MOCK_GROUPS.map(g => {
+      const state = g.liveCall ? 'online' : '';
+      const tags = [`${g.members} members`];
+      if (g.unread) tags.push(`${g.unread} new`);
+      if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
+      return row(state, g.name, tags.join(' · '));
+    }).join('');
+
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
     const interceptsBody = intercepts.length
@@ -510,15 +718,32 @@ $(function () {
           t.installed ? 'installed' : 'pending')).join('')
       : empty('none');
 
+    // All messaging lives under a single "messages" group with three
+    // section dividers (channels / direct / active calls) — not
+    // separately collapsible. The unread badge on the outer "messages"
+    // header sums new messages across both lists so a collapsed
+    // sidebar still shows pending traffic.
+    const totalUnread =
+      MOCK_DIRECTS.reduce((n, d) => n + (d.unread || 0), 0)
+      + MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
+    function section(label) {
+      return `<div class="ax-tree-section">${esc(label)}</div>`;
+    }
+    const meetsBody = calls.length ? callsBody : '';
+    const messagingBody =
+      section('meets')    + meetsBody
+      + section('channels') + groupsBody
+      + section('direct')   + directsBody;
+
     $tree.html(
-      category('camps',       'camps',       knownCamps.length, campsBody)
-      + category('peers',      'peers',      peers.length, peersBody)
-      + category('calls',      'calls',      calls.length, callsBody)
-      + category('intercepts', 'intercepts', intercepts.length, interceptsBody)
-      + category('domains',    'domains',    allDomains.length, domainsBody)
-      + category('ports',      'ports',      allPorts.length, portsBody)
-      + category('files',      'files',      allFiles.length, filesBody)
-      + category('trusted',    'trusted CAs', trusted.length, trustedBody)
+      category('camps',      'camps',      knownCamps.length, campsBody)
+      + category('peers',     'peers',     peers.length, peersBody)
+      + category('messages',  'messages',  totalUnread || null, messagingBody)
+      + category('intercepts','intercepts',intercepts.length, interceptsBody)
+      + category('domains',   'domains',   allDomains.length, domainsBody)
+      + category('ports',     'ports',     allPorts.length, portsBody)
+      + category('files',     'files',     allFiles.length, filesBody)
+      + category('trusted',   'trusted CAs', trusted.length, trustedBody)
     );
   }
 
@@ -531,6 +756,69 @@ $(function () {
     else collapsedCats.delete(key);
     saveCollapsed(collapsedCats);
   });
+
+  // Sidebar search/filter. Substring match against the visible text of
+  // each .ax-tree-row and .ax-tree-category label. A category survives
+  // the filter if it OR any of its descendants match — that way users
+  // can type a peer name and still see its parent group. Empty query
+  // restores everything.
+  let sidebarQuery = '';
+  function applySidebarFilter() {
+    const q = sidebarQuery.trim().toLowerCase();
+    const $tree = $('#ax-tree');
+    if (!q) {
+      $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+        .css('display', '');
+      return;
+    }
+    // Hide everything first.
+    $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+      .css('display', 'none');
+    // Leaf rows that match show themselves.
+    $tree.find('.ax-tree-row').each(function () {
+      if ($(this).text().toLowerCase().includes(q)) {
+        $(this).css('display', '');
+      }
+    });
+    // Walk each .ax-tree-children: if any descendant is visible OR the
+    // owning category's label matches, the children block + its
+    // category header become visible. Iterate deepest-first so parent
+    // visibility cascades up correctly.
+    const allChildren = $tree.find('.ax-tree-children').toArray().reverse();
+    for (const ch of allChildren) {
+      const $ch = $(ch);
+      const key = $ch.attr('data-cat-children');
+      const $cat = $tree.find('.ax-tree-category[data-cat="' + (key || '').replace(/"/g, '\\"') + '"]');
+      const labelMatch = $cat.find('> .ax-tree-label').text().toLowerCase().includes(q);
+      const hasVisible = $ch.children().filter(function () {
+        return $(this).css('display') !== 'none';
+      }).length > 0;
+      if (labelMatch || hasVisible) {
+        $ch.css('display', '');
+        $cat.css('display', '');
+        // If the category was collapsed, expand it for the search
+        // duration so the match is visible. We don't persist this.
+        $cat.removeClass('collapsed');
+      }
+    }
+  }
+  $('#ax-sidebar-search').on('input', function () {
+    sidebarQuery = $(this).val() || '';
+    applySidebarFilter();
+  });
+  // Esc clears the filter when the input is focused.
+  $('#ax-sidebar-search').on('keydown', function (e) {
+    if (e.key === 'Escape') {
+      $(this).val('').trigger('input').blur();
+    }
+  });
+  // Re-apply filter after every status re-render — without this the
+  // 2-second tick wipes search results.
+  const _origRenderSidebar = renderSidebarTree;
+  renderSidebarTree = function (s) {
+    _origRenderSidebar(s);
+    if (sidebarQuery) applySidebarFilter();
+  };
 
   // Last status sample used to compute tx/rx rates. We poll /api/status
   // every 3s (see setInterval below), so the delta is the per-window

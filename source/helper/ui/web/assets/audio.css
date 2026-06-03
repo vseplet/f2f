@@ -54,6 +54,185 @@
     line-height: 1.6;
     display: flex;
 }
+.ax-sidebar-inner {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.ax-sidebar-header {
+    padding: 10px 12px 8px;
+    border-bottom: 1px dotted #2a2218;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ax-sidebar-toggle {
+    background: transparent;
+    color: #6b5a3a;
+    border: 1px solid #2a2218;
+    border-radius: 0;
+    padding: 0;
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    cursor: pointer;
+    font-size: 14px;
+    flex-shrink: 0;
+    font-family: inherit;
+}
+.ax-sidebar-toggle:hover {
+    color: #d4c8a6;
+    border-color: #5a4830;
+}
+/* When sidebar is collapsed we keep only the toggle visible — the
+   search input and tree are hidden, and the header reduces to just
+   the affordance for re-expanding. */
+.ax-sidebar.ax-collapsed {
+    width: 32px !important;
+}
+.ax-sidebar.ax-collapsed .ax-search,
+.ax-sidebar.ax-collapsed .ax-sidebar-scroll {
+    display: none;
+}
+.ax-sidebar.ax-collapsed .ax-sidebar-header {
+    padding: 8px 5px;
+    border-bottom: none;
+    justify-content: center;
+}
+/* Right-side sidebar mirrors the left one — same chrome but the
+   resize handle sits on its INNER (left) edge so dragging right
+   shrinks the panel and dragging left grows it. The handle is the
+   first child in the markup, so default row direction already places
+   it on the left — no flip needed. */
+.ax-sidebar-right {
+    border-right: none;
+    border-left: 1px dotted #3a3024;
+}
+
+/* Notification cards. Each entry is one row of:
+   [accent bar] [title + meta] [time]
+   The accent bar's colour encodes the event kind (positive / warning
+   / passive). Hover lifts the row subtly so users can tell it's
+   clickable once the real handlers ship. */
+.ax-notif {
+    display: grid;
+    grid-template-columns: 3px 1fr auto auto;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px dotted #221d16;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.12s, opacity 0.18s, max-height 0.18s, padding 0.18s;
+    max-height: 120px;
+    overflow: hidden;
+}
+.ax-notif:hover { background: #1c1916; }
+.ax-notif:active { background: #221d16; }
+.ax-notif.selected {
+    background: #1c1916;
+    box-shadow: inset 2px 0 0 #b8a576;
+}
+.ax-notif.removing {
+    opacity: 0;
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-width: 0;
+    pointer-events: none;
+}
+/* Close button — appears on hover of the card so cards look clean
+   in the resting state, then offers a one-click dismiss. */
+.ax-notif-close {
+    background: transparent;
+    border: none;
+    color: #5a4830;
+    cursor: pointer;
+    font-size: 14px;
+    width: 18px;
+    height: 18px;
+    line-height: 1;
+    padding: 0;
+    border-radius: 0;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s;
+    align-self: start;
+    font-family: inherit;
+}
+.ax-notif:hover .ax-notif-close { opacity: 1; }
+.ax-notif-close:hover { color: #d4c8a6; }
+.ax-notif-accent {
+    background: #5a4830;
+    border-radius: 0;
+}
+.ax-notif.ok    .ax-notif-accent { background: #6b9b54; }
+.ax-notif.warn  .ax-notif-accent { background: #d4a85c; }
+.ax-notif.info  .ax-notif-accent { background: #4a6b8a; }
+.ax-notif.muted .ax-notif-accent { background: #3a3024; }
+.ax-notif-body { min-width: 0; }
+.ax-notif-title {
+    color: #d4c8a6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-notif-meta {
+    color: #8c7a52;
+    font-size: 11px;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-notif-time {
+    color: #6b5a3a;
+    font-size: 11px;
+    align-self: start;
+    white-space: nowrap;
+}
+
+/* Right sidebar's scroll area has no inner padding — cards bleed
+   edge-to-edge so the accent bar lines up with the sidebar's left
+   dotted border. */
+.ax-sidebar-right .ax-sidebar-scroll { padding: 0; }
+
+/* Day-grouping header inside the notifications list. */
+.ax-notif-group {
+    color: #6b5a3a;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 10px 12px 4px;
+    background: #131110;
+    border-bottom: 1px dotted #221d16;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+.ax-search {
+    width: 100%;
+    box-sizing: border-box;
+    background: #0c0a08;
+    color: #d4c8a6;
+    border: 1px solid #3a3024;
+    border-radius: 0;
+    padding: 4px 8px;
+    font: inherit;
+    outline: none;
+}
+.ax-search::placeholder { color: #5a4830; }
+.ax-search:focus { border-color: #6b5a3a; }
+.ax-search::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: #5a4830;
+    cursor: pointer;
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 2l8 8M10 2l-8 8' stroke='black' stroke-width='2'/></svg>") center/contain no-repeat;
+}
 .ax-sidebar-scroll {
     flex: 1;
     overflow-y: auto;
@@ -76,28 +255,51 @@
     display: none;
 }
 
-/* Resource tree. Categories are top-level "— name" lines; children
-   indent under them. Hide children when the parent has .collapsed.
-   Hover row highlights with a thin underline. */
+/* Resource tree. Top-level categories render as full-width
+   click-strips so it's immediately obvious they're collapsible —
+   bg colour + a hint of separator above and below. Nested categories
+   (inside .ax-tree-children) keep the cheap inline style so the
+   stripes don't compound visually. */
 .ax-tree-category {
     color: #b8a576;
     cursor: pointer;
     user-select: none;
-    margin-top: 8px;
     display: flex;
     align-items: center;
     gap: 6px;
 }
-.ax-tree-category:first-child {
-    margin-top: 0;
-}
 .ax-tree-category:hover {
     color: #d4c8a6;
+}
+/* Top-level categories only — direct children of #ax-tree. The
+   negative horizontal margins cancel out the .ax-sidebar-scroll
+   padding so the strip runs edge-to-edge. */
+.ax-tree > .ax-tree-category {
+    background: #1c1916;
+    margin-left: -14px;
+    margin-right: -14px;
+    padding: 4px 14px;
+    border-top: 1px solid #221d16;
+    border-bottom: 1px solid #0c0a08;
+    transition: background 0.1s;
+}
+.ax-tree > .ax-tree-category:first-child {
+    border-top: none;
+}
+.ax-tree > .ax-tree-category:hover {
+    background: #252118;
+}
+/* Nested categories keep a vertical breath but no bg strip. */
+.ax-tree-children > .ax-tree-category {
+    margin-top: 6px;
+}
+.ax-tree-children > .ax-tree-category:first-child {
+    margin-top: 0;
 }
 .ax-tree-caret {
     display: inline-block;
     width: 10px;
-    color: #6b5a3a;
+    color: #8c7a52;
     transition: transform 0.1s;
 }
 .ax-tree-category.collapsed .ax-tree-caret {
@@ -152,6 +354,24 @@
 .ax-tree-row.offline .ax-tree-dot,
 .ax-tree-dot.off {
     background: #5a4830;
+}
+/* In-group section divider (uncollapsible). Used inside .ax-tree-children
+   to separate sibling lists without giving each its own caret — e.g.
+   "channels / direct / active calls" inside the messages group. */
+.ax-tree-section {
+    color: #6b5a3a;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 6px 0 2px;
+}
+.ax-tree-section:first-child {
+    padding-top: 0;
+}
+/* A category placed directly under a section divider shouldn't add
+   its own 8px top-margin — the section already provides spacing. */
+.ax-tree-section + .ax-tree-category {
+    margin-top: 0;
 }
 .ax-tree-empty {
     color: #6b5a3a;
