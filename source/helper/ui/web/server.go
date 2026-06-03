@@ -728,6 +728,12 @@ type statusView struct {
 	CampActive bool         `json:"camp_active"`
 	CampReflex string       `json:"camp_reflex,omitempty"`
 	CampHealth *camp.Health `json:"camp_health,omitempty"`
+	// Sidebar tree fodder. Pulled in here so the left-rail tree can
+	// render off a single /api/status response — saves N fetches per
+	// 2s tick. Keep these to lightweight in-memory reads only.
+	KnownCamps   []config.KnownCamp `json:"known_camps,omitempty"`
+	Calls        []calls.State      `json:"calls,omitempty"`
+	TrustedPeers []pki.PeerEntry    `json:"trusted_peers,omitempty"`
 }
 
 // statusWithDomains assembles the /api/status response by joining
@@ -785,6 +791,10 @@ func (s *Server) statusWithDomains() statusView {
 	if st.Running && campID != "" {
 		health = s.camp.HealthSnapshot()
 	}
+	var knownCamps []config.KnownCamp
+	if gs, err := s.engine.ListCamps(); err == nil && gs != nil {
+		knownCamps = gs.KnownCamps
+	}
 	return statusView{
 		Status:       st,
 		Peers:        peers,
@@ -797,6 +807,9 @@ func (s *Server) statusWithDomains() statusView {
 		CampActive:   s.camp.Active(),
 		CampReflex:   reflex,
 		CampHealth:   health,
+		KnownCamps:   knownCamps,
+		Calls:        s.calls.AllCalls(),
+		TrustedPeers: s.pki.ListPeerCAs(),
 	}
 }
 

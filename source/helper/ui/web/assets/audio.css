@@ -37,6 +37,128 @@
     overflow-y: auto;
 }
 
+/* Sidebar layout. Sibling of the main tab column inside the root
+   `.h-screen flex` row — sits flush against the left edge of the body. */
+.ax-sidebar {
+    width: 240px;
+    min-width: 32px;
+    max-width: 600px;
+    flex-shrink: 0;
+    position: relative;
+    background: #161412;
+    border-right: 1px dotted #3a3024;
+    color: #d4c8a6;
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
+        Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    display: flex;
+}
+.ax-sidebar-scroll {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px 14px;
+}
+.ax-sidebar-resize {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    border-left: 1px solid transparent;
+}
+.ax-sidebar-resize:hover,
+.ax-sidebar-resize.dragging {
+    background: #3a3024;
+    border-left-color: #5a4830;
+}
+.ax-sidebar.ax-collapsed .ax-sidebar-scroll {
+    display: none;
+}
+
+/* Resource tree. Categories are top-level "— name" lines; children
+   indent under them. Hide children when the parent has .collapsed.
+   Hover row highlights with a thin underline. */
+.ax-tree-category {
+    color: #b8a576;
+    cursor: pointer;
+    user-select: none;
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ax-tree-category:first-child {
+    margin-top: 0;
+}
+.ax-tree-category:hover {
+    color: #d4c8a6;
+}
+.ax-tree-caret {
+    display: inline-block;
+    width: 10px;
+    color: #6b5a3a;
+    transition: transform 0.1s;
+}
+.ax-tree-category.collapsed .ax-tree-caret {
+    transform: rotate(-90deg);
+}
+.ax-tree-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-tree-badge {
+    color: #6b5a3a;
+    font-size: 11px;
+}
+.ax-tree-children {
+    margin-left: 14px;
+    padding-left: 6px;
+    border-left: 1px dotted #2a2218;
+    margin-top: 2px;
+    margin-bottom: 4px;
+}
+.ax-tree-category.collapsed + .ax-tree-children {
+    display: none;
+}
+.ax-tree-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 0;
+    cursor: pointer;
+    color: #9c8c66;
+}
+.ax-tree-row:hover {
+    color: #d4c8a6;
+}
+.ax-tree-row .ax-tree-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #5a4830;
+    flex-shrink: 0;
+}
+.ax-tree-row.online .ax-tree-dot,
+.ax-tree-dot.on {
+    background: #6b9b54;
+}
+.ax-tree-row.half .ax-tree-dot,
+.ax-tree-dot.half {
+    background: #d4a85c;
+}
+.ax-tree-row.offline .ax-tree-dot,
+.ax-tree-dot.off {
+    background: #5a4830;
+}
+.ax-tree-empty {
+    color: #6b5a3a;
+    font-style: italic;
+    padding: 2px 0;
+}
+
 .tab-panel > .ax-frame {
     border-top-style: none;
     border-left-style: none;

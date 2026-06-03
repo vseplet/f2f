@@ -11,6 +11,51 @@ $(function () {
     $(document).trigger('f2f:tab-changed', [tab]);
   });
 
+  // Left sidebar: width persists in localStorage, drag handle on the
+  // right edge resizes it. Below the collapse threshold the tree hides
+  // and only the handle stays visible — drag further right to restore.
+  const $sidebar = $('#ax-sidebar');
+  const $sidebarResize = $('#ax-sidebar-resize');
+  const SIDEBAR_KEY = 'f2f:sidebar-width';
+  const SIDEBAR_COLLAPSE_THRESHOLD = 80; // px
+  const SIDEBAR_MIN = 32;
+  const SIDEBAR_MAX = 600;
+  const sidebarDefault = 240;
+
+  function applySidebarWidth(px) {
+    const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px));
+    $sidebar.css('width', clamped + 'px');
+    $sidebar.toggleClass('ax-collapsed', clamped < SIDEBAR_COLLAPSE_THRESHOLD);
+  }
+  try {
+    const saved = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
+    applySidebarWidth(Number.isFinite(saved) ? saved : sidebarDefault);
+  } catch (_) {
+    applySidebarWidth(sidebarDefault);
+  }
+
+  $sidebarResize.on('mousedown', function (e) {
+    e.preventDefault();
+    $sidebarResize.addClass('dragging');
+    const startX = e.clientX;
+    const startW = $sidebar.outerWidth();
+    function onMove(ev) {
+      applySidebarWidth(startW + (ev.clientX - startX));
+    }
+    function onUp() {
+      $sidebarResize.removeClass('dragging');
+      $(document).off('mousemove.sbres mouseup.sbres');
+      try { localStorage.setItem(SIDEBAR_KEY, String($sidebar.outerWidth())); } catch (_) {}
+    }
+    $(document).on('mousemove.sbres', onMove).on('mouseup.sbres', onUp);
+  });
+
+  // Category collapse: click the row toggles .collapsed on the category;
+  // the CSS adjacent-sibling selector hides .ax-tree-children.
+  $('#ax-tree').on('click', '.ax-tree-category', function () {
+    $(this).toggleClass('collapsed');
+  });
+
   const $btnEngine = $('#btn-engine');
   const $engineState = $btnEngine.find('.ax-engine-state');
   const $engineLabel = $btnEngine.find('.ax-engine-label');
@@ -298,7 +343,180 @@ $(function () {
 
     renderCampHealth(s);
     renderDiagnostics(s);
+    renderSidebarTree(s);
   }
+
+  // Sidebar tree. Rebuilt from /api/status every tick — cheap because
+  // the categories are tiny lists. Per-category collapsed-state lives
+  // in localStorage so it survives re-renders.
+  const SIDEBAR_TREE_KEY = 'f2f:sidebar-collapsed';
+  function loadCollapsed() {
+    try { return new Set(JSON.parse(localStorage.getItem(SIDEBAR_TREE_KEY) || '[]')); }
+    catch (_) { return new Set(); }
+  }
+  function saveCollapsed(set) {
+    try { localStorage.setItem(SIDEBAR_TREE_KEY, JSON.stringify([...set])); } catch (_) {}
+  }
+  let collapsedCats = loadCollapsed();
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // category(key, label, count, body) builds <div.ax-tree-category>
+  // + <div.ax-tree-children>. key uniquely identifies the category in
+  // localStorage so collapse state is stable across reloads.
+  function category(key, label, count, body) {
+    const collapsed = collapsedCats.has(key) ? ' collapsed' : '';
+    const badge = count != null
+      ? `<span class="ax-tree-badge">${count}</span>`
+      : '';
+    return (
+      `<div class="ax-tree-category${collapsed}" data-cat="${esc(key)}">`
+        + `<span class="ax-tree-caret">▾</span>`
+        + `<span class="ax-tree-label">${esc(label)}</span>`
+        + badge
+      + `</div>`
+      + `<div class="ax-tree-children" data-cat-children="${esc(key)}">${body}</div>`
+    );
+  }
+
+  function row(state, label, extra) {
+    return `<div class="ax-tree-row ${state}" title="${esc(extra || label)}">`
+      + `<span class="ax-tree-dot"></span>`
+      + `<span class="ax-tree-label">${esc(label)}</span>`
+      + (extra ? `<span class="ax-tree-badge">${esc(extra)}</span>` : '')
+      + `</div>`;
+  }
+
+  function empty(text) { return `<div class="ax-tree-empty">${esc(text)}</div>`; }
+
+  function renderSidebarTree(s) {
+    const $tree = $('#ax-tree');
+    if (!$tree.length) return;
+
+    // camps — replaces the old "identity" category. The currently
+    // active camp gets the online dot; the rest are offline rows.
+    // The camp's display name is the label suffix after the last "_"
+    // in its ID — that's what users actually call the camp ("xyz",
+    // "test1"); KnownCamp.name is the local user's nickname inside
+    // that camp, which we surface as a sub-line.
+    const knownCamps = (s && s.known_camps) || [];
+    const activeID = (s && s.camp_id) || '';
+    let campsBody = '';
+    if (!knownCamps.length) {
+      campsBody = empty('no camps joined');
+    } else {
+      for (const c of knownCamps) {
+        const active = c.id === activeID;
+        const label = (c.id.split('_').pop() || c.id);
+        const meta = c.name ? `as ${c.name}` : '';
+        campsBody += row(active ? 'online' : 'offline', label, meta);
+      }
+    }
+
+    // peers — every peer is its own sub-tree of domains/files/ports.
+    const peers = (s && s.peers) || [];
+    let peersBody = '';
+    if (!peers.length) {
+      peersBody = empty('no peers');
+    } else {
+      for (const p of peers) {
+        const state = p.self ? 'online'
+          : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+        const label = (p.name || p.pub.slice(0, 12)) + (p.self ? ' (you)' : '');
+        const ip = p.tunnel_ip || '';
+        const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
+          ? `${p.last_rtt_ms}ms` : '';
+        const meta = [ip, rtt].filter(Boolean).join(' · ');
+        const peerKey = 'peer:' + (p.pub || p.name);
+        // Each peer is its own collapsible — domains/files/ports under it.
+        const collapsed = collapsedCats.has(peerKey) ? ' collapsed' : '';
+        const doms = (p.domains || []).map(d => row('', d.name, d.host ? d.host : '')).join('');
+        const files = (p.files || []).map(f => row('', f.name, fmtBytes(f.size || 0))).join('');
+        const fw = (p.firewall || []).filter(x => x.enabled).map(x =>
+          row('', `:${x.port} ${x.protocol || 'tcp'}`, x.description || '')
+        ).join('');
+        let subBody = '';
+        if (doms) subBody += `<div class="ax-tree-empty">— domains</div>` + doms;
+        if (files) subBody += `<div class="ax-tree-empty">— files</div>` + files;
+        if (fw) subBody += `<div class="ax-tree-empty">— ports</div>` + fw;
+        if (!subBody) subBody = empty('no resources');
+        peersBody += (
+          `<div class="ax-tree-category${collapsed}" data-cat="${esc(peerKey)}">`
+            + `<span class="ax-tree-caret">▾</span>`
+            + `<span class="ax-tree-dot ${state === 'online' ? 'on' : state === 'half' ? 'half' : 'off'}"></span>`
+            + `<span class="ax-tree-label">${esc(label)}</span>`
+            + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
+          + `</div>`
+          + `<div class="ax-tree-children" data-cat-children="${esc(peerKey)}">${subBody}</div>`
+        );
+      }
+    }
+
+    // calls — both local and remote. Each row shows participant count.
+    const calls = (s && s.calls) || [];
+    const callsBody = calls.length
+      ? calls.map(c => {
+          const parts = (c.participants || []).length;
+          return row('online',
+            c.call_id || c.sfu_host || 'call',
+            parts ? `${parts} participants` : '');
+        }).join('')
+      : empty('no active calls');
+
+    // intercepts — :port -> peer.
+    const intercepts = (s && s.intercepts) || [];
+    const interceptsBody = intercepts.length
+      ? intercepts.map(i => row('', i.spec, i.peer || '')).join('')
+      : empty('none');
+
+    // my domains/files/ports — pulled out of the self peer entry.
+    const self = peers.find(p => p.self) || {};
+    const myDoms = self.domains || [];
+    const myFiles = self.files || [];
+    const myPorts = (self.firewall || []).filter(x => x.enabled);
+
+    const myDomsBody = myDoms.length
+      ? myDoms.map(d => row('', d.name, d.host ? d.host : '')).join('')
+      : empty('none');
+    const myFilesBody = myFiles.length
+      ? myFiles.map(f => row('', f.name, fmtBytes(f.size || 0))).join('')
+      : empty('none');
+    const myPortsBody = myPorts.length
+      ? myPorts.map(p => row('', `:${p.port} ${p.protocol || 'tcp'}`, p.description || '')).join('')
+      : empty('none');
+
+    // trusted CAs.
+    const trusted = (s && s.trusted_peers) || [];
+    const trustedBody = trusted.length
+      ? trusted.map(t => row(t.installed ? 'online' : 'half',
+          t.peer_name || t.common_name || t.fingerprint.slice(0, 12),
+          t.installed ? 'installed' : 'pending')).join('')
+      : empty('none');
+
+    $tree.html(
+      category('camps',       'camps',       knownCamps.length, campsBody)
+      + category('peers',      'peers',      peers.length, peersBody)
+      + category('calls',      'calls',      calls.length, callsBody)
+      + category('intercepts', 'intercepts', intercepts.length, interceptsBody)
+      + category('my-domains', 'my domains', myDoms.length, myDomsBody)
+      + category('my-files',   'my files',   myFiles.length, myFilesBody)
+      + category('my-ports',   'my ports',   myPorts.length, myPortsBody)
+      + category('trusted',    'trusted CAs', trusted.length, trustedBody)
+    );
+  }
+
+  // Persist category collapsed state. The handler defined earlier
+  // toggles .collapsed; we hook the same click to write the set.
+  $('#ax-tree').on('click', '.ax-tree-category', function () {
+    const key = $(this).data('cat');
+    if (!key) return;
+    if ($(this).hasClass('collapsed')) collapsedCats.add(key);
+    else collapsedCats.delete(key);
+    saveCollapsed(collapsedCats);
+  });
 
   // Last status sample used to compute tx/rx rates. We poll /api/status
   // every 3s (see setInterval below), so the delta is the per-window
