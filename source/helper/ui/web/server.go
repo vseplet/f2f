@@ -728,6 +728,12 @@ type statusView struct {
 	CampActive bool         `json:"camp_active"`
 	CampReflex string       `json:"camp_reflex,omitempty"`
 	CampHealth *camp.Health `json:"camp_health,omitempty"`
+	// Sidebar tree fodder. Pulled in here so the left-rail tree can
+	// render off a single /api/status response — saves N fetches per
+	// 2s tick. Keep these to lightweight in-memory reads only.
+	KnownCamps   []config.KnownCamp `json:"known_camps,omitempty"`
+	Calls        []calls.State      `json:"calls,omitempty"`
+	TrustedPeers []pki.PeerEntry    `json:"trusted_peers,omitempty"`
 }
 
 // statusWithDomains assembles the /api/status response by joining
@@ -742,6 +748,20 @@ func (s *Server) statusWithDomains() statusView {
 		v := peerStatusView{PeerStatusInfo: p}
 		if p.Self {
 			v.Domains = mine
+			// Self files come from the local torrent seed list; self
+			// firewall is user + builtin ports merged into one
+			// peer-shape array so the sidebar tree can iterate every
+			// peer uniformly.
+			if t := s.drop.Client(); t != nil {
+				for _, h := range t.ListSeeds() {
+					v.Files = append(v.Files, drop.PeerFile{
+						Name: h.Name, Size: h.Size,
+						InfoHash: h.InfoHash, Magnet: h.Magnet,
+					})
+				}
+			}
+			v.Firewall = append(v.Firewall, s.firewall.BuiltinPorts()...)
+			v.Firewall = append(v.Firewall, s.firewall.UserPorts()...)
 		} else if p.Pub != "" {
 			v.Domains = s.dns.PeerDomains(p.Pub)
 			v.Files = s.drop.PeerFiles(p.Pub)
@@ -785,6 +805,10 @@ func (s *Server) statusWithDomains() statusView {
 	if st.Running && campID != "" {
 		health = s.camp.HealthSnapshot()
 	}
+	var knownCamps []config.KnownCamp
+	if gs, err := s.engine.ListCamps(); err == nil && gs != nil {
+		knownCamps = gs.KnownCamps
+	}
 	return statusView{
 		Status:       st,
 		Peers:        peers,
@@ -797,6 +821,9 @@ func (s *Server) statusWithDomains() statusView {
 		CampActive:   s.camp.Active(),
 		CampReflex:   reflex,
 		CampHealth:   health,
+		KnownCamps:   knownCamps,
+		Calls:        s.calls.AllCalls(),
+		TrustedPeers: s.pki.ListPeerCAs(),
 	}
 }
 

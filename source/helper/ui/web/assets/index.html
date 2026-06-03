@@ -20,7 +20,34 @@
             background-size: 24px 24px;
         "
     >
-        <div class="h-screen flex flex-col">
+        <div class="h-screen flex">
+            <aside id="ax-sidebar" class="ax-sidebar">
+                <div class="ax-sidebar-inner">
+                    <div class="ax-sidebar-header">
+                        <button type="button" id="ax-sidebar-toggle"
+                                class="ax-sidebar-toggle"
+                                title="collapse / expand"
+                                aria-label="toggle sidebar">‹</button>
+                        <input
+                            type="search"
+                            id="ax-sidebar-search"
+                            class="ax-search"
+                            placeholder="search / filter"
+                            autocomplete="off"
+                            spellcheck="false"
+                        />
+                    </div>
+                    <div class="ax-sidebar-scroll">
+                        <!-- Tree is populated from /api/status in applyStatus -> renderTree.
+                             Each category renders as <div.ax-tree-category data-cat>
+                             followed by an adjacent <div.ax-tree-children> the
+                             category's .collapsed class hides via CSS. -->
+                        <div class="ax-tree" id="ax-tree"></div>
+                    </div>
+                </div>
+                <div class="ax-sidebar-resize" id="ax-sidebar-resize" title="drag to resize"></div>
+            </aside>
+            <div class="ax-main-col flex flex-col flex-1 min-w-0">
             <div class="ax-frame ax-tabbar">
                 <div class="ax-header">
                     <div class="ax-tabs">
@@ -1041,7 +1068,32 @@
                 </div>
             </div>
             <!-- /#tab-diagnostics -->
+            </div>
+            <!-- /.ax-main-col -->
+            <aside id="ax-notifications" class="ax-sidebar ax-sidebar-right">
+                <div class="ax-sidebar-resize" id="ax-notifications-resize" title="drag to resize"></div>
+                <div class="ax-sidebar-inner">
+                    <div class="ax-sidebar-header">
+                        <input
+                            type="search"
+                            id="ax-notifications-search"
+                            class="ax-search"
+                            placeholder="filter notifications"
+                            autocomplete="off"
+                            spellcheck="false"
+                        />
+                        <button type="button" id="ax-notifications-toggle"
+                                class="ax-sidebar-toggle"
+                                title="collapse / expand"
+                                aria-label="toggle notifications">›</button>
+                    </div>
+                    <div class="ax-sidebar-scroll">
+                        <div class="ax-tree" id="ax-notifications-list"></div>
+                    </div>
+                </div>
+            </aside>
         </div>
+        <!-- /.h-screen flex -->
 
         <script src="/app.js"></script>
         <script src="/audio.js"></script>
