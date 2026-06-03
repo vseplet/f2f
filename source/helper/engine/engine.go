@@ -27,7 +27,7 @@ import (
 	
 	
 	"github.com/vseplet/f2f/source/helper/engine/pair"
-	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
+	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 	"github.com/vseplet/f2f/source/helper/engine/route"
 	"github.com/vseplet/f2f/source/helper/engine/utun"
 	"github.com/vseplet/f2f/source/helper/identity"

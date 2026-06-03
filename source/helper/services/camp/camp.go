@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/engine"
-	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
+	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
 // Health aggregates UDP-announce and HTTP-poll liveness signals

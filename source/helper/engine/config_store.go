@@ -5,7 +5,7 @@ import (
 	"log"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
+	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
 // ensureStore returns nil when the engine was constructed with a
