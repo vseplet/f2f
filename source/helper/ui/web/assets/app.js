@@ -742,7 +742,9 @@ $(function () {
       + category('intercepts','intercepts',intercepts.length, interceptsBody)
       + category('domains',   'domains',   allDomains.length, domainsBody)
       + category('ports',     'ports',     allPorts.length, portsBody)
-      + category('files',     'files',     allFiles.length, filesBody)
+      + category('drop',      'drop',      allFiles.length, filesBody)
+      + category('oidc',      'OIDC',      null, empty('not configured'))
+      + category('apps',      'apps',      null, empty('coming soon'))
       + category('trusted',   'trusted CAs', trusted.length, trustedBody)
     );
   }
