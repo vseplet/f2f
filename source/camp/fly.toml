@@ -7,7 +7,7 @@ app = 'f2f-camp'
 primary_region = 'fra'
 
 [build]
-  dockerfile = 'camp/Dockerfile'
+  dockerfile = 'Dockerfile'
 
 [deploy]
   strategy = 'immediate'
