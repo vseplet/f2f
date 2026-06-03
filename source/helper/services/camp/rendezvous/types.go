@@ -45,10 +45,13 @@ type AnnounceReq struct {
 }
 
 // AnnouncedResp is what camp sends back on success. The client parses
-// the same shape inline in parseAnnounceReply.
+// the same shape inline in parseAnnounceReply. Peers carries the camp's
+// current roster so clients learn the list on the announce reply (no
+// separate HTTP poll).
 type AnnouncedResp struct {
-	T   string   `json:"t"` // "announced"
-	You PeerInfo `json:"you"`
+	T     string     `json:"t"` // "announced"
+	You   PeerInfo   `json:"you"`
+	Peers []PeerInfo `json:"peers,omitempty"`
 }
 
 // AnnounceErr is the error reply (bad_name, bad_camp_id, camp_full,

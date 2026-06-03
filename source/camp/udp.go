@@ -106,7 +106,8 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 			log.Printf("join: %s@%s pub=%s from %s", name, campID, short(pub), src)
 		}
 
-		if data, err := json.Marshal(rendezvous.AnnouncedResp{T: "announced", You: info}); err == nil {
+		reply := rendezvous.AnnouncedResp{T: "announced", You: info, Peers: hub.list(campID)}
+		if data, err := json.Marshal(reply); err == nil {
 			conn.WriteToUDP(data, src)
 		}
 	}

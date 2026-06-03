@@ -85,6 +85,11 @@ type Service struct {
 	self atomic.Pointer[rendezvous.PeerInfo]
 }
 
+// httpPollEnabled gates the legacy HTTP peer-list poller. Off since
+// the roster moved onto the announce reply (Phase 1). Flip to true to
+// fall back to polling; the whole poller path is slated for removal.
+const httpPollEnabled = false
+
 // New constructs a Service. The engine must outlive the service.
 func New(eng *engine.Engine) *Service {
 	return &Service{eng: eng}
@@ -117,6 +122,9 @@ func (s *Service) Start(c *config.Camp) error {
 		s.mu.Unlock()
 		return err
 	}
+	// Roster now arrives on the announce reply — same sink the HTTP
+	// poller used.
+	ac.OnPeers(s.onUpdate)
 	s.mu.Unlock()
 
 	// Register the UDP dispatch handler first so any reply from camp
@@ -145,12 +153,17 @@ func (s *Service) Start(c *config.Camp) error {
 		return claimed
 	})
 
-	base, perr := rendezvous.CampHTTPBase(c.ServerURL)
+	// Phase 1: the peer list now rides the announce reply (ac.OnPeers).
+	// HTTP poller disabled; remove the PeerListPoller path entirely once
+	// announce-delivered rosters are validated in the field.
 	var poller *rendezvous.PeerListPoller
-	if perr != nil {
-		log.Printf("camp: %v (peer list disabled)", perr)
-	} else {
-		poller = rendezvous.NewPeerListPoller(base, c.CampID, s.onUpdate)
+	if httpPollEnabled {
+		base, perr := rendezvous.CampHTTPBase(c.ServerURL)
+		if perr != nil {
+			log.Printf("camp: %v (peer list disabled)", perr)
+		} else {
+			poller = rendezvous.NewPeerListPoller(base, c.CampID, s.onUpdate)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
