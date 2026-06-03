@@ -935,35 +935,6 @@ $(function () {
       udpMeta = 'reply ' + Math.floor(udpReplyAge / 1000) + 's ago';
     }
     $('#camp-udp-meta').text(udpMeta);
-
-    // HTTP row. Poll cadence is 30s; healthy if last success < 90s.
-    const httpSuccessAge = h.http_last_success_ms ? (now - h.http_last_success_ms) : -1;
-    const httpPollAge = h.http_last_poll_ms ? (now - h.http_last_poll_ms) : -1;
-    const lastErr = h.http_last_err || '';
-    let httpDot = 'offline', httpTitle = 'no poll yet';
-    if (lastErr && httpSuccessAge < 0) {
-      httpDot = 'unreachable'; httpTitle = 'failing: ' + lastErr;
-    } else if (lastErr) {
-      httpDot = 'degraded'; httpTitle = 'last attempt failed: ' + lastErr;
-    } else if (httpSuccessAge >= 0 && httpSuccessAge < 90000) {
-      httpDot = 'reachable'; httpTitle = 'recent success';
-    } else if (httpSuccessAge >= 0) {
-      httpDot = 'degraded'; httpTitle = 'last success getting stale';
-    }
-    $('#camp-http-dot').attr('class', 'ax-dot ' + httpDot).attr('title', httpTitle);
-    $('#camp-http-rtt').text(h.http_rtt_ms ? h.http_rtt_ms + 'ms' : '—');
-    let httpMeta;
-    if (lastErr) {
-      httpMeta = 'err: ' + lastErr;
-    } else if (httpSuccessAge >= 0) {
-      const peers = h.http_peers_count || 0;
-      httpMeta = peers + ' peer' + (peers === 1 ? '' : 's') + ' · ' + Math.floor(httpSuccessAge / 1000) + 's ago';
-    } else if (httpPollAge >= 0) {
-      httpMeta = 'polled ' + Math.floor(httpPollAge / 1000) + 's ago, no data';
-    } else {
-      httpMeta = 'idle';
-    }
-    $('#camp-http-meta').text(httpMeta);
   }
 
   function renderIntercepts() {

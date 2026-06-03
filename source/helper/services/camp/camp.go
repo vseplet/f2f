@@ -1,20 +1,20 @@
 // Package camp is the user-facing service that talks to the
-// rendezvous server (camp): announces our presence on UDP, polls the
-// peer roster on HTTP, and pushes roster updates into the engine so
+// rendezvous server (camp): announces our presence on UDP and pushes
+// the peer roster (carried on each announce reply) into the engine so
 // pair-handshake / hole-punch have someone to dial.
 //
 // Layering:
 //
-//   - engine/rendezvous: wire protocol (UDP announce + HTTP roster).
-//   - this package: lifecycle, AnnounceClient ownership, periodic
-//     poll loop, UDP-dispatch hook registered with the engine, public
-//     getters for the UI (Self, Snapshot, stats).
+//   - engine/rendezvous: wire protocol (UDP announce + reply roster).
+//   - this package: lifecycle, AnnounceClient ownership, UDP-dispatch
+//     hook registered with the engine, public getters for the UI
+//     (Self, Snapshot, stats).
 //
 // Engine surface used:
 //
 //   - eng.UDPConn() / eng.IdentityPub() / eng.CampConfigSnapshot() for setup
 //   - eng.RegisterUDPHandler(fn) to receive camp-source packets
-//   - eng.ApplyCampRoster(peers) to push polled roster into peers map
+//   - eng.ApplyCampRoster(peers) to push the roster into peers map
 package camp
 
 import (
@@ -31,72 +31,47 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
-// Health aggregates UDP-announce and HTTP-poll liveness signals
-// against the camp server. The two halves travel different
-// transports, so split health makes asymmetric failures visible
-// (e.g. HTTP fine + UDP wedged after laptop sleep). Surfaced via
-// /api/status; computed from announce + poller stats.
+// Health reports UDP-announce liveness against the camp server,
+// surfaced via /api/status for the UI's camp-health card.
 type Health struct {
-	UDPLastSentMs     int64  `json:"udp_last_sent_ms,omitempty"`
-	UDPLastReplyMs    int64  `json:"udp_last_reply_ms,omitempty"`
-	UDPRTTMs          int64  `json:"udp_rtt_ms,omitempty"`
-	HTTPLastPollMs    int64  `json:"http_last_poll_ms,omitempty"`
-	HTTPLastSuccessMs int64  `json:"http_last_success_ms,omitempty"`
-	HTTPRTTMs         int64  `json:"http_rtt_ms,omitempty"`
-	HTTPLastErr       string `json:"http_last_err,omitempty"`
-	HTTPPeersCount    int    `json:"http_peers_count,omitempty"`
+	UDPLastSentMs  int64 `json:"udp_last_sent_ms,omitempty"`
+	UDPLastReplyMs int64 `json:"udp_last_reply_ms,omitempty"`
+	UDPRTTMs       int64 `json:"udp_rtt_ms,omitempty"`
 }
 
-// HealthSnapshot returns the current camp health based on announce +
-// poller counters. Zero value when nothing is running yet.
+// HealthSnapshot returns the current camp health from announce
+// counters. Zero value when nothing is running yet.
 func (s *Service) HealthSnapshot() *Health {
-	h := &Health{}
 	sent, reply, rtt := s.AnnounceStats()
-	h.UDPLastSentMs = sent
-	h.UDPLastReplyMs = reply
-	h.UDPRTTMs = rtt
-	ps := s.PollerStats()
-	h.HTTPLastPollMs = ps.LastPollMs
-	h.HTTPLastSuccessMs = ps.LastSuccessMs
-	h.HTTPRTTMs = ps.LastRTTMs
-	h.HTTPLastErr = ps.LastErr
-	h.HTTPPeersCount = ps.PeersCount
-	return h
+	return &Health{UDPLastSentMs: sent, UDPLastReplyMs: reply, UDPRTTMs: rtt}
 }
 
-// Service owns the AnnounceClient + HTTP poller. Constructed once in
-// main.go; Start runs on eng.OnStarted, Stop on eng.OnStopped.
+// Service owns the AnnounceClient. Constructed once in main.go; Start
+// runs on eng.OnStarted, Stop on eng.OnStopped.
 type Service struct {
 	eng *engine.Engine
 
-	mu             sync.Mutex
-	announce       *rendezvous.AnnounceClient
-	poller         *rendezvous.PeerListPoller
-	cancel         context.CancelFunc
-	announceDone   chan struct{}
-	pollDone       chan struct{}
-	unregisterUDP  func()
+	mu            sync.Mutex
+	announce      *rendezvous.AnnounceClient
+	cancel        context.CancelFunc
+	announceDone  chan struct{}
+	unregisterUDP func()
 
-	// snapshot holds the latest polled roster (defensive copy). Read
-	// lock-free via atomic for the /api/status hot path.
+	// snapshot holds the latest roster (defensive copy). Read lock-free
+	// via atomic for the /api/status hot path.
 	snapshot atomic.Pointer[[]rendezvous.PeerInfo]
 	// self holds the latest announce reply (our PeerInfo as camp sees
 	// us). Read by UI for the self peer-row endpoint display.
 	self atomic.Pointer[rendezvous.PeerInfo]
 }
 
-// httpPollEnabled gates the legacy HTTP peer-list poller. Off since
-// the roster moved onto the announce reply (Phase 1). Flip to true to
-// fall back to polling; the whole poller path is slated for removal.
-const httpPollEnabled = false
-
 // New constructs a Service. The engine must outlive the service.
 func New(eng *engine.Engine) *Service {
 	return &Service{eng: eng}
 }
 
-// Start brings up the announce client + HTTP poller for the given
-// camp config. Order matters: register the UDP dispatch handler
+// Start brings up the announce client for the given camp config.
+// Order matters: register the UDP dispatch handler
 // BEFORE the announce client touches the socket — engine's
 // peerToTunLoop is already reading from it, and synchronous reads
 // (the old AnnounceOnce path) would steal the announce reply and
@@ -153,40 +128,17 @@ func (s *Service) Start(c *config.Camp) error {
 		return claimed
 	})
 
-	// Phase 1: the peer list now rides the announce reply (ac.OnPeers).
-	// HTTP poller disabled; remove the PeerListPoller path entirely once
-	// announce-delivered rosters are validated in the field.
-	var poller *rendezvous.PeerListPoller
-	if httpPollEnabled {
-		base, perr := rendezvous.CampHTTPBase(c.ServerURL)
-		if perr != nil {
-			log.Printf("camp: %v (peer list disabled)", perr)
-		} else {
-			poller = rendezvous.NewPeerListPoller(base, c.CampID, s.onUpdate)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	announceDone := make(chan struct{})
 	go func() {
 		defer close(announceDone)
 		ac.Run(ctx, 20*time.Second) // sends immediately on entry, then every 20s
 	}()
-	var pollDone chan struct{}
-	if poller != nil {
-		pollDone = make(chan struct{})
-		go func() {
-			defer close(pollDone)
-			poller.Run(ctx, 30*time.Second)
-		}()
-	}
 
 	s.mu.Lock()
 	s.announce = ac
-	s.poller = poller
 	s.cancel = cancel
 	s.announceDone = announceDone
-	s.pollDone = pollDone
 	s.unregisterUDP = unreg
 	s.mu.Unlock()
 	// self is populated asynchronously by the UDP dispatch handler
@@ -200,13 +152,10 @@ func (s *Service) Stop() error {
 	s.mu.Lock()
 	cancel := s.cancel
 	announceDone := s.announceDone
-	pollDone := s.pollDone
 	unreg := s.unregisterUDP
 	s.announce = nil
-	s.poller = nil
 	s.cancel = nil
 	s.announceDone = nil
-	s.pollDone = nil
 	s.unregisterUDP = nil
 	s.mu.Unlock()
 	if unreg != nil {
@@ -215,14 +164,11 @@ func (s *Service) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
-	for _, done := range []chan struct{}{announceDone, pollDone} {
-		if done == nil {
-			continue
-		}
+	if announceDone != nil {
 		select {
-		case <-done:
+		case <-announceDone:
 		case <-time.After(2 * time.Second):
-			log.Printf("WARN: camp loop did not exit in 2s")
+			log.Printf("WARN: camp announce loop did not exit in 2s")
 		}
 	}
 	return nil
@@ -256,8 +202,8 @@ func (s *Service) Reflex() string {
 	return self.PublicIP
 }
 
-// Snapshot returns the latest polled roster (empty slice before the
-// first successful poll). Read lock-free.
+// Snapshot returns the latest roster from an announce reply (empty
+// slice before the first reply). Read lock-free.
 func (s *Service) Snapshot() []rendezvous.PeerInfo {
 	p := s.snapshot.Load()
 	if p == nil {
@@ -281,20 +227,9 @@ func (s *Service) AnnounceStats() (sentMs, replyMs, rttMs int64) {
 	return ac.LastSentMs(), ac.LastReplyMs(), ac.LastRTTMs()
 }
 
-// PollerStats returns the live HTTP-poll counters for the UI's
-// camp-health card. Zero value when the poller isn't running.
-func (s *Service) PollerStats() rendezvous.PollerStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.poller == nil {
-		return rendezvous.PollerStats{}
-	}
-	return s.poller.Stats()
-}
-
-// onUpdate is the poller's callback. Stores a snapshot for the UI
-// hot path and pushes the diff into the engine so peers map +
-// catalog reconcile.
+// onUpdate is the announce-reply roster callback. Stores a snapshot
+// for the UI hot path and pushes the diff into the engine so peers
+// map + catalog reconcile.
 func (s *Service) onUpdate(peers []rendezvous.PeerInfo) {
 	dup := append([]rendezvous.PeerInfo(nil), peers...)
 	s.snapshot.Store(&dup)

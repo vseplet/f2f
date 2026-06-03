@@ -1,7 +1,7 @@
 // Package rendezvous talks to the f2f-camp server using a UDP announce
-// protocol on the same socket as the tunnel, plus an HTTP peer-list
-// poller. There is no WebSocket — see TODO.md for the history of why
-// we moved off WS.
+// protocol on the same socket as the tunnel; the announce reply carries
+// the peer roster. There is no WebSocket — see TODO.md for the history
+// of why we moved off WS.
 //
 // Wire types here mirror source/camp/src — keep them in sync.
 package rendezvous

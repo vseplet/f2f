@@ -829,8 +829,8 @@ func (s *Server) statusWithDomains() statusView {
 
 // handleCampPeers serves the engine's view of the camp: peer list with
 // reachability flags and the active selection. Reads from local engine
-// state — no camp HTTP call here (the engine's poller refreshes the
-// cache every ~30s).
+// state — no camp HTTP call here (the announce reply refreshes the
+// cache every ~20s).
 func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 	view := s.statusWithDomains()
 	if !view.CampActive {
