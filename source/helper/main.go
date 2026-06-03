@@ -32,6 +32,19 @@ import (
 
 const defaultBind = "127.0.0.1:2202"
 
+// service is the uniform shape every f2f service is wrapped in inside
+// main.go — start on engine ready, stop on engine teardown, and
+// optionally one long-lived worker tied to the process root ctx.
+// Closures avoid touching individual service packages (their public
+// APIs are intentionally varied — drop wants a goroutine, calls has
+// no Start, etc.); main just dispatches.
+type service struct {
+	name  string
+	start func(localIP string, st engine.Status) error
+	stop  func() error
+	run   func(ctx context.Context) // nil = no worker
+}
+
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
@@ -63,6 +76,76 @@ func run(bind string) error {
 
 	srv := web.New(eng, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
 
+	// Service registry. Start order top-to-bottom, Stop reverse.
+	// Workers are spawned once and live for the whole process.
+	services := []service{
+		{
+			name:  "firewall",
+			start: func(localIP string, st engine.Status) error { return fwSvc.Start(st.UtunName, localIP, st.CampID) },
+			stop:  fwSvc.Stop,
+			run:   fwSvc.PollPeers,
+		},
+		{
+			name:  "dns",
+			start: func(_ string, st engine.Status) error { return dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)) },
+			stop:  dnsSvc.Stop,
+			run:   dnsSvc.PollPeers,
+		},
+		{
+			name: "dns-health",
+			run:  dnsSvc.HealthCheck,
+		},
+		{
+			name:  "pki",
+			start: func(_ string, st engine.Status) error { return pkiSvc.Start(st.CampID) },
+			stop:  pkiSvc.Stop,
+			run:   pkiSvc.PollPeers,
+		},
+		{
+			name:  "tunnel",
+			start: func(_ string, st engine.Status) error { tunnelSvc.Start(st.CampID); return nil },
+			stop:  func() error { tunnelSvc.Stop(); return nil },
+			run:   tunnelSvc.RefreshDomainRoutes,
+		},
+		{
+			name: "camp",
+			start: func(_ string, _ engine.Status) error {
+				cc := eng.CampConfigSnapshot()
+				if cc == nil {
+					return nil
+				}
+				return campSvc.Start(*cc)
+			},
+			stop: campSvc.Stop,
+		},
+		{
+			name: "drop",
+			start: func(localIP string, st engine.Status) error {
+				// anacrolix can take a moment to bind and has been
+				// known to panic during init — isolate.
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("drop: PANIC during startup: %v", r)
+						}
+					}()
+					log.Printf("drop: initialising torrent client …")
+					if err := dropSvc.Start(st.CampID, localIP); err != nil {
+						log.Printf("drop: %v (file sharing disabled)", err)
+					}
+				}()
+				return nil
+			},
+			stop: dropSvc.Stop,
+			run:  dropSvc.PollPeers,
+		},
+		{
+			name: "calls",
+			stop: func() error { callsSvc.Reset(); return nil },
+			run:  callsSvc.PollPeers,
+		},
+	}
+
 	eng.OnStarted = func(localIP string) {
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
@@ -71,56 +154,26 @@ func run(bind string) error {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
 		st := eng.Status()
-		if err := fwSvc.Start(st.UtunName, localIP, st.CampID); err != nil {
-			log.Printf("firewall: %v (input not filtered)", err)
-		} else {
-			log.Printf("firewall: installed on %s scoped to %s/32", st.UtunName, localIP)
-		}
-		if err := dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)); err != nil {
-			log.Printf("dns: %v (resolver disabled)", err)
-		}
-		if err := pkiSvc.Start(st.CampID); err != nil {
-			log.Printf("pki: %v", err)
-		}
-		tunnelSvc.Start(st.CampID)
-		if cc := eng.CampConfigSnapshot(); cc != nil {
-			if err := campSvc.Start(*cc); err != nil {
-				log.Printf("camp: %v (peer list disabled)", err)
+		for _, s := range services {
+			if s.start == nil {
+				continue
+			}
+			if err := s.start(localIP, st); err != nil {
+				log.Printf("%s: %v", s.name, err)
 			}
 		}
-		// Drop's anacrolix client can take a moment to bind and has
-		// been known to panic during init; isolate it in a goroutine.
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("drop: PANIC during startup: %v (file sharing disabled)", r)
-				}
-			}()
-			log.Printf("drop: initialising torrent client …")
-			if err := dropSvc.Start(st.CampID, localIP); err != nil {
-				log.Printf("drop: %v (file sharing disabled)", err)
-			}
-		}()
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
 		_ = srv.UnbindProxies()
-		if err := campSvc.Stop(); err != nil {
-			log.Printf("WARN: camp stop: %v", err)
-		}
-		tunnelSvc.Stop()
-		callsSvc.Reset()
-		if err := dropSvc.Stop(); err != nil {
-			log.Printf("WARN: drop stop: %v", err)
-		}
-		if err := pkiSvc.Stop(); err != nil {
-			log.Printf("WARN: pki stop: %v", err)
-		}
-		if err := dnsSvc.Stop(); err != nil {
-			log.Printf("WARN: dns stop: %v", err)
-		}
-		if err := fwSvc.Stop(); err != nil {
-			log.Printf("WARN: firewall stop: %v", err)
+		for i := len(services) - 1; i >= 0; i-- {
+			s := services[i]
+			if s.stop == nil {
+				continue
+			}
+			if err := s.stop(); err != nil {
+				log.Printf("WARN: %s stop: %v", s.name, err)
+			}
 		}
 	}
 	if _, port, err := net.SplitHostPort(bind); err == nil {
@@ -130,25 +183,19 @@ func run(bind string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Long-lived service workers. They survive engine restarts (each
-	// poll consults engine state and no-ops when down) and exit on
-	// ^C / SIGTERM along with the rest of the process.
-	workers := []func(context.Context){
-		pkiSvc.PollPeers,
-		dnsSvc.PollPeers,
-		dnsSvc.HealthCheck,
-		dropSvc.PollPeers,
-		fwSvc.PollPeers,
-		tunnelSvc.RefreshDomainRoutes,
-		callsSvc.PollPeers,
-	}
-	done := make([]chan struct{}, len(workers))
-	for i, w := range workers {
-		done[i] = make(chan struct{})
+	// Long-lived workers tied to the process root ctx. They survive
+	// engine restarts (each tick checks engine state, no-ops when down).
+	var workerDone []chan struct{}
+	for _, s := range services {
+		if s.run == nil {
+			continue
+		}
+		d := make(chan struct{})
+		workerDone = append(workerDone, d)
 		go func(fn func(context.Context), d chan struct{}) {
 			defer close(d)
 			fn(ctx)
-		}(w, done[i])
+		}(s.run, d)
 	}
 
 	go func() {
@@ -173,7 +220,7 @@ func run(bind string) error {
 	if err := eng.Stop(); err != nil {
 		log.Printf("WARN: engine stop: %v", err)
 	}
-	for _, d := range done {
+	for _, d := range workerDone {
 		select {
 		case <-d:
 		case <-time.After(2 * time.Second):
