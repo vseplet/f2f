@@ -30,6 +30,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/platform"
 	"github.com/vseplet/f2f/source/helper/services/calls"
+	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
@@ -53,6 +54,7 @@ type Server struct {
 	drop     *drop.Service
 	calls    *calls.Service
 	tunnel   *tunnel.Service
+	camp     *camp.Service
 	dns      *dns.Service
 	addr     string
 	srv      *http.Server
@@ -66,7 +68,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, addr string) *Server {
+func New(eng *engine.Engine, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		firewall:    fwSvc,
@@ -75,6 +77,7 @@ func New(eng *engine.Engine, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSv
 		drop:        dropSvc,
 		calls:       callsSvc,
 		tunnel:      tunnelSvc,
+		camp:        campSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -728,6 +731,18 @@ func (s *Server) statusWithDomains() statusView {
 			v.Firewall = s.firewall.PeerPorts(p.Pub)
 		}
 		peers = append(peers, v)
+	}
+	// engine.Status only carries the UDP-announce half of CampHealth
+	// (it owns the AnnounceClient still). The HTTP-poll half lives in
+	// services/camp now — splice its stats in so the UI's camp-health
+	// card stays whole.
+	if st.CampHealth != nil {
+		ps := s.camp.PollerStats()
+		st.CampHealth.HTTPLastPollMs = ps.LastPollMs
+		st.CampHealth.HTTPLastSuccessMs = ps.LastSuccessMs
+		st.CampHealth.HTTPRTTMs = ps.LastRTTMs
+		st.CampHealth.HTTPLastErr = ps.LastErr
+		st.CampHealth.HTTPPeersCount = ps.PeersCount
 	}
 	return statusView{
 		Status:     st,

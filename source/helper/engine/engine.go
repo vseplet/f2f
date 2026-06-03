@@ -343,7 +343,6 @@ type Engine struct {
 	udp      *net.UDPConn
 	routes   *route.Manager
 	announce *rendezvous.AnnounceClient // periodic UDP announce → camp
-	poller   *rendezvous.PeerListPoller // periodic HTTP peer-list poll
 	// obfenv carries the camp-wide obfuscation parameters (camp_key, magic
 	// header ranges H1..H8) derived deterministically from cfg.Camp.ID.
 	// Built once at Start in camp mode; nil in static --peer mode.
@@ -747,18 +746,8 @@ func (e *Engine) Start(cfg Config) error {
 			defer e.workers.Done()
 			e.announce.Run(ctx, 20*time.Second)
 		}()
-		// Peer list poller. onUpdate runs in the poller goroutine.
-		base, err := rendezvous.CampHTTPBase(cfg.Camp.URL)
-		if err != nil {
-			log.Printf("camp: %v (peer list disabled)", err)
-		} else {
-			e.poller = rendezvous.NewPeerListPoller(base, cfg.Camp.ID, e.applyPeerList)
-			e.workers.Add(1)
-			go func() {
-				defer e.workers.Done()
-				e.poller.Run(ctx, 30*time.Second)
-			}()
-		}
+		// HTTP peer-list poll lives in services/camp; main.go starts
+		// it off eng.OnStarted via campSvc.Start(cfg.Camp).
 	}
 	if e.udp != nil {
 		e.workers.Add(1)
@@ -905,6 +894,31 @@ func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
 		out = append(out, OnlinePeerHTTPInfo{Pub: p.Pub, Name: p.Name, Host: host})
 	}
 	return out
+}
+
+// ApplyCampRoster is called by services/camp every poll cycle (and
+// any other future producer of peer rosters) to push the latest list
+// into engine state. Updates e.peers (live state used by pair-
+// handshake + hole-punch + AWG sync) and the persisted catalog.
+//
+// Internally delegates to applyPeerList — public surface kept thin
+// so the engine import list in services/camp stays small.
+func (e *Engine) ApplyCampRoster(peers []rendezvous.PeerInfo) {
+	e.applyPeerList(peers)
+}
+
+// CampConfigSnapshot returns the camp config the engine is currently
+// running with (URL/Name/ID/...), or nil when running in static
+// --peer mode. Exposed for services/camp which needs URL+ID to spin
+// up the HTTP poller.
+func (e *Engine) CampConfigSnapshot() *CampConfig {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfg.Camp == nil {
+		return nil
+	}
+	c := *e.cfg.Camp
+	return &c
 }
 
 // applyPeerList reconciles our peers map with the camp's current view
@@ -1417,14 +1431,8 @@ func (e *Engine) campHealthLocked() *CampHealth {
 		h.UDPLastReplyMs = e.announce.LastReplyMs()
 		h.UDPRTTMs = e.announce.LastRTTMs()
 	}
-	if e.poller != nil {
-		s := e.poller.Stats()
-		h.HTTPLastPollMs = s.LastPollMs
-		h.HTTPLastSuccessMs = s.LastSuccessMs
-		h.HTTPRTTMs = s.LastRTTMs
-		h.HTTPLastErr = s.LastErr
-		h.HTTPPeersCount = s.PeersCount
-	}
+	// HTTP poller stats now live in services/camp; web statusView
+	// merges them in via Service.PollerStats().
 	return h
 }
 
@@ -1494,7 +1502,6 @@ func (e *Engine) Stop() error {
 	e.obfenv = nil
 	e.routes = nil
 	e.announce = nil
-	e.poller = nil
 	e.campAddr.Store(nil)
 	e.campPeers.Store(nil)
 	e.campReflex.Store(nil)
@@ -1982,7 +1989,6 @@ func (e *Engine) rollbackPartial() {
 		e.routes = nil
 	}
 	e.announce = nil
-	e.poller = nil
 	e.obfenv = nil
 }
 

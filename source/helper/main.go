@@ -24,6 +24,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/services/calls"
+	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
@@ -170,8 +171,9 @@ func uiCmd(args []string) error {
 	dropSvc := drop.New(eng)
 	callsSvc := calls.New(eng)
 	tunnelSvc := tunnel.New(store, eng)
+	campSvc := camp.New(eng)
 
-	srv := web.New(eng, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, *bind)
+	srv := web.New(eng, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, *bind)
 	// engine → web bridge: when the tunnel comes up, expose a tiny
 	// inbox listener on the tunnel_ip so the remote peer can deliver
 	// signalling through utun without us binding the UI to 0.0.0.0.
@@ -205,6 +207,14 @@ func uiCmd(args []string) error {
 		// allowed-ips hook. Must run AFTER engine ready so peers map
 		// is populated for HasPeerName checks.
 		tunnelSvc.Start(st.CampID)
+		// Camp HTTP roster poll. Engine already did the initial UDP
+		// announce in Start; this kicks off the periodic peer-list
+		// poll that drives engine.peers updates.
+		if cc := eng.CampConfigSnapshot(); cc != nil {
+			if err := campSvc.Start(*cc); err != nil {
+				log.Printf("camp: %v (peer list disabled)", err)
+			}
+		}
 		// BitTorrent client + rescan/restore. Non-fatal: file sharing
 		// just becomes unavailable until next Start if this fails.
 		go func() {
@@ -236,6 +246,9 @@ func uiCmd(args []string) error {
 		}
 		callsSvc.Reset()
 		tunnelSvc.Stop()
+		if err := campSvc.Stop(); err != nil {
+			log.Printf("WARN: camp stop: %v", err)
+		}
 	}
 	// Tell the engine which TCP port to use when polling peers'
 	// /api/domains over the tunnel — same one we host the UI on.
