@@ -416,8 +416,11 @@ $(function () {
       }
     }
 
-    // peers — every peer is its own sub-tree of domains/files/ports.
+    // peers — flat list. Each row: dot + name + ip/rtt meta.
     const peers = (s && s.peers) || [];
+    function peerLabel(p) {
+      return (p.name || (p.pub || '').slice(0, 12) || '?') + (p.self ? ' (you)' : '');
+    }
     let peersBody = '';
     if (!peers.length) {
       peersBody = empty('no peers');
@@ -425,67 +428,78 @@ $(function () {
       for (const p of peers) {
         const state = p.self ? 'online'
           : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
-        const label = (p.name || p.pub.slice(0, 12)) + (p.self ? ' (you)' : '');
-        const ip = p.tunnel_ip || '';
+        const ip = p.overlay_v4 || '';
         const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
           ? `${p.last_rtt_ms}ms` : '';
         const meta = [ip, rtt].filter(Boolean).join(' · ');
-        const peerKey = 'peer:' + (p.pub || p.name);
-        // Each peer is its own collapsible — domains/files/ports under it.
-        const collapsed = collapsedCats.has(peerKey) ? ' collapsed' : '';
-        const doms = (p.domains || []).map(d => row('', d.name, d.host ? d.host : '')).join('');
-        const files = (p.files || []).map(f => row('', f.name, fmtBytes(f.size || 0))).join('');
-        const fw = (p.firewall || []).filter(x => x.enabled).map(x =>
-          row('', `:${x.port} ${x.protocol || 'tcp'}`, x.description || '')
-        ).join('');
-        let subBody = '';
-        if (doms) subBody += `<div class="ax-tree-empty">— domains</div>` + doms;
-        if (files) subBody += `<div class="ax-tree-empty">— files</div>` + files;
-        if (fw) subBody += `<div class="ax-tree-empty">— ports</div>` + fw;
-        if (!subBody) subBody = empty('no resources');
-        peersBody += (
-          `<div class="ax-tree-category${collapsed}" data-cat="${esc(peerKey)}">`
-            + `<span class="ax-tree-caret">▾</span>`
-            + `<span class="ax-tree-dot ${state === 'online' ? 'on' : state === 'half' ? 'half' : 'off'}"></span>`
-            + `<span class="ax-tree-label">${esc(label)}</span>`
-            + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
-          + `</div>`
-          + `<div class="ax-tree-children" data-cat-children="${esc(peerKey)}">${subBody}</div>`
-        );
+        peersBody += row(state, peerLabel(p), meta);
       }
     }
 
-    // calls — both local and remote. Each row shows participant count.
+    // Flat aggregations across all peers: each (domain/port/file)
+    // gets a row, with the owning peer's name as the meta column.
+    const allDomains = [];
+    const allPorts = [];
+    const allFiles = [];
+    for (const p of peers) {
+      const owner = peerLabel(p);
+      (p.domains || []).forEach(d => allDomains.push({ d, owner, self: !!p.self }));
+      (p.firewall || []).filter(x => x.enabled).forEach(x => allPorts.push({ x, owner, self: !!p.self }));
+      (p.files || []).forEach(f => allFiles.push({ f, owner, self: !!p.self }));
+    }
+
+    const domainsBody = allDomains.length
+      ? allDomains.map(({ d, owner }) =>
+          row('', d.name, owner)).join('')
+      : empty('no domains');
+
+    const portsBody = allPorts.length
+      ? allPorts.map(({ x, owner }) =>
+          row('', `:${x.port} ${x.protocol || 'tcp'}`, owner)).join('')
+      : empty('no ports');
+
+    const filesBody = allFiles.length
+      ? allFiles.map(({ f, owner }) =>
+          row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`)).join('')
+      : empty('no files');
+
+    // calls — group calls hosted in the camp. Owner is the peer
+    // whose tunnel IP matches sfu_host (self if it's our LocalCall);
+    // children list participant names so the user sees who's in.
     const calls = (s && s.calls) || [];
-    const callsBody = calls.length
-      ? calls.map(c => {
-          const parts = (c.participants || []).length;
-          return row('online',
-            c.call_id || c.sfu_host || 'call',
-            parts ? `${parts} participants` : '');
-        }).join('')
-      : empty('no active calls');
+    function peerNameByIP(ip) {
+      if (!ip) return '';
+      const p = peers.find(p => p.overlay_v4 === ip);
+      return p ? (p.name || p.pub.slice(0, 12)) + (p.self ? ' (you)' : '') : ip;
+    }
+    let callsBody = '';
+    if (!calls.length) {
+      callsBody = empty('no active calls');
+    } else {
+      for (const c of calls) {
+        const owner = peerNameByIP(c.sfu_host);
+        const parts = c.participants || [];
+        const key = 'call:' + (c.sfu_host || c.call_id);
+        const collapsed = collapsedCats.has(key) ? ' collapsed' : '';
+        const partsBody = parts.length
+          ? parts.map(p => row('online', p.name || p.tunnel_ip, p.tunnel_ip)).join('')
+          : empty('no participants');
+        callsBody += (
+          `<div class="ax-tree-category${collapsed}" data-cat="${esc(key)}">`
+            + `<span class="ax-tree-caret">▾</span>`
+            + `<span class="ax-tree-dot on"></span>`
+            + `<span class="ax-tree-label">${esc(owner)}</span>`
+            + `<span class="ax-tree-badge">${parts.length}</span>`
+          + `</div>`
+          + `<div class="ax-tree-children" data-cat-children="${esc(key)}">${partsBody}</div>`
+        );
+      }
+    }
 
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
     const interceptsBody = intercepts.length
       ? intercepts.map(i => row('', i.spec, i.peer || '')).join('')
-      : empty('none');
-
-    // my domains/files/ports — pulled out of the self peer entry.
-    const self = peers.find(p => p.self) || {};
-    const myDoms = self.domains || [];
-    const myFiles = self.files || [];
-    const myPorts = (self.firewall || []).filter(x => x.enabled);
-
-    const myDomsBody = myDoms.length
-      ? myDoms.map(d => row('', d.name, d.host ? d.host : '')).join('')
-      : empty('none');
-    const myFilesBody = myFiles.length
-      ? myFiles.map(f => row('', f.name, fmtBytes(f.size || 0))).join('')
-      : empty('none');
-    const myPortsBody = myPorts.length
-      ? myPorts.map(p => row('', `:${p.port} ${p.protocol || 'tcp'}`, p.description || '')).join('')
       : empty('none');
 
     // trusted CAs.
@@ -501,9 +515,9 @@ $(function () {
       + category('peers',      'peers',      peers.length, peersBody)
       + category('calls',      'calls',      calls.length, callsBody)
       + category('intercepts', 'intercepts', intercepts.length, interceptsBody)
-      + category('my-domains', 'my domains', myDoms.length, myDomsBody)
-      + category('my-files',   'my files',   myFiles.length, myFilesBody)
-      + category('my-ports',   'my ports',   myPorts.length, myPortsBody)
+      + category('domains',    'domains',    allDomains.length, domainsBody)
+      + category('ports',      'ports',      allPorts.length, portsBody)
+      + category('files',      'files',      allFiles.length, filesBody)
       + category('trusted',    'trusted CAs', trusted.length, trustedBody)
     );
   }

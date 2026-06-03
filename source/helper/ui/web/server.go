@@ -748,6 +748,20 @@ func (s *Server) statusWithDomains() statusView {
 		v := peerStatusView{PeerStatusInfo: p}
 		if p.Self {
 			v.Domains = mine
+			// Self files come from the local torrent seed list; self
+			// firewall is user + builtin ports merged into one
+			// peer-shape array so the sidebar tree can iterate every
+			// peer uniformly.
+			if t := s.drop.Client(); t != nil {
+				for _, h := range t.ListSeeds() {
+					v.Files = append(v.Files, drop.PeerFile{
+						Name: h.Name, Size: h.Size,
+						InfoHash: h.InfoHash, Magnet: h.Magnet,
+					})
+				}
+			}
+			v.Firewall = append(v.Firewall, s.firewall.BuiltinPorts()...)
+			v.Firewall = append(v.Firewall, s.firewall.UserPorts()...)
 		} else if p.Pub != "" {
 			v.Domains = s.dns.PeerDomains(p.Pub)
 			v.Files = s.drop.PeerFiles(p.Pub)
