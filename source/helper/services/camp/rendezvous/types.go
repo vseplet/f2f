@@ -27,11 +27,15 @@ type PeerInfo struct {
 }
 
 // --- UDP wire types ---
+//
+// Shared between the client (this package) and the camp server
+// (source/camp), which imports them directly so the wire contract has
+// a single source of truth.
 
-// announceReq is what we send to camp every ~20s. The server reads our
-// (public_ip, udp_port) off the packet itself, so we don't put those
-// in the body.
-type announceReq struct {
+// AnnounceReq is what the client sends to camp every ~20s. The server
+// reads our (public_ip, udp_port) off the packet itself, so we don't
+// put those in the body.
+type AnnounceReq struct {
 	T      string `json:"t"` // "announce"
 	Name   string `json:"name"`
 	CampID string `json:"camp_id"`
@@ -40,20 +44,16 @@ type announceReq struct {
 	Pub string `json:"pub,omitempty"`
 }
 
-// announceResp is what camp sends back. Same shape parsed inline in
-// AnnounceClient.HandlePacket; this declaration documents the type.
-//
-//nolint:unused
-type announceResp struct {
+// AnnouncedResp is what camp sends back on success. The client parses
+// the same shape inline in parseAnnounceReply.
+type AnnouncedResp struct {
 	T   string   `json:"t"` // "announced"
 	You PeerInfo `json:"you"`
 }
 
-// announceErr is the error reply (bad_name, bad_camp_id, camp_full,
+// AnnounceErr is the error reply (bad_name, bad_camp_id, camp_full,
 // name_conflict, etc.).
-//
-//nolint:unused
-type announceErr struct {
+type AnnounceErr struct {
 	T       string `json:"t"` // "error"
 	Code    string `json:"code"`
 	Message string `json:"message"`

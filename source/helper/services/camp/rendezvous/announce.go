@@ -200,7 +200,7 @@ func parseAnnounceReply(pkt []byte) (info PeerInfo, perr error, isAnnounceReply 
 }
 
 func (a *AnnounceClient) sendAnnounce() error {
-	data, err := json.Marshal(announceReq{
+	data, err := json.Marshal(AnnounceReq{
 		T:      "announce",
 		Name:   a.name,
 		CampID: a.campID,
