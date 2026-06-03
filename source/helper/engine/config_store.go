@@ -3,25 +3,19 @@ package engine
 import (
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine/rendezvous"
-	"github.com/vseplet/f2f/source/helper/platform"
+	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
-// ensureStore lazily opens $HOME/.f2f/. Called from Start so test code
-// that just constructs an Engine doesn't touch the filesystem.
+// ensureStore returns nil when the engine was constructed with a
+// Store via engine.New, or an error otherwise — every code path that
+// touches persisted state goes through this so the engine never
+// silently no-ops a save.
 func (e *Engine) ensureStore() error {
-	if e.store != nil {
-		return nil
+	if e.store == nil {
+		return errors.New("engine: no config store (use engine.New(store))")
 	}
-	s, err := config.NewStore()
-	if err != nil {
-		return err
-	}
-	e.store = s
 	return nil
 }
 
@@ -98,8 +92,8 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 		return
 	}
 	var ourName string
-	if e.cfg.Camp != nil {
-		ourName = e.cfg.Camp.Name
+	if e.cfg.CampID != "" {
+		ourName = e.cfg.CampName
 	}
 	byPub := make(map[string]int, len(e.camp.PeerCatalog))
 	for i, p := range e.camp.PeerCatalog {
@@ -156,10 +150,10 @@ func (e *Engine) mergePeerSnapshotLocked(peers []rendezvous.PeerInfo) {
 // older builds (before we filtered self in mergePeerSnapshotLocked).
 // Called from Start under e.mu. Persists if anything changed.
 func (e *Engine) pruneSelfFromCatalogLocked() {
-	if e.camp == nil || e.cfg.Camp == nil {
+	if e.camp == nil || e.cfg.CampID == "" {
 		return
 	}
-	ourName := e.cfg.Camp.Name
+	ourName := e.cfg.CampName
 	ourPub := ""
 	if e.identity != nil {
 		ourPub = e.identity.PubHex()
@@ -189,8 +183,8 @@ func (e *Engine) hydratePeersFromCatalog() {
 		return
 	}
 	var ourName string
-	if e.cfg.Camp != nil {
-		ourName = e.cfg.Camp.Name
+	if e.cfg.CampID != "" {
+		ourName = e.cfg.CampName
 	}
 	for _, p := range e.camp.PeerCatalog {
 		if p.Name == ourName {
@@ -213,20 +207,6 @@ func (e *Engine) hydratePeersFromCatalog() {
 			// Online=false and UDPAddr=nil. The next camp poll either
 			// confirms the peer is back online (and we resolve a fresh
 			// UDPAddr) or leaves them dormant.
-		}
-		if len(p.Domains) > 0 {
-			dup := make([]DomainEntry, len(p.Domains))
-			for i, d := range p.Domains {
-				dup[i] = DomainEntry{Name: d.Name, Host: d.Host, Port: d.Port, Proto: d.Proto}
-			}
-			st.Domains = dup
-		}
-		if len(p.Firewall) > 0 {
-			dup := make([]FirewallPort, len(p.Firewall))
-			for i, f := range p.Firewall {
-				dup[i] = FirewallPort{Port: f.Port, Protocol: f.Protocol, Description: f.Description, Enabled: f.Enabled}
-			}
-			st.Firewall = dup
 		}
 		e.peers[p.Pub] = st
 	}
@@ -289,128 +269,13 @@ func (e *Engine) StartLastCamp() error {
 		listen = ":0"
 	}
 	cfg := Config{
-		LocalIP: "10.99.0.1", // placeholder; camp announce overrides
-		Listen:  listen,
-		Camp: &CampConfig{
-			URL:      "wss://f2f-camp.fly.dev/ws",
-			StunAddr: "f2f-camp.fly.dev:3478",
-			Name:     camp.Identity.Name,
-			ID:       camp.CampID,
-		},
+		LocalIP:  "10.99.0.1", // placeholder; camp announce overrides
+		Listen:   listen,
+		CampID:   camp.CampID,
+		CampName: camp.Identity.Name,
 	}
 	log.Printf("autostart: starting last camp %s as %s", camp.CampID, camp.Identity.Name)
 	return e.Start(cfg)
 }
 
-// RemovePeerDomain drops one (peer, domain) entry from the persisted
-// catalog AND from the live peer's Domains slice. If the peer is
-// currently online and still publishing that name, the next successful
-// poll will re-add it — that's intentional: removal is for stale
-// entries where the peer is offline or no longer publishes.
-func (e *Engine) RemovePeerDomain(peerName, domainName string) error {
-	if peerName == "" || domainName == "" {
-		return errors.New("peer_name and domain_name required")
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// In-memory: peers are keyed by tunnel_ip; find by name.
-	for _, p := range e.peers {
-		if p.Name != peerName {
-			continue
-		}
-		kept := p.Domains[:0]
-		for _, d := range p.Domains {
-			if d.Name == domainName {
-				continue
-			}
-			kept = append(kept, d)
-		}
-		p.Domains = kept
-	}
-	if e.camp == nil {
-		return nil
-	}
-	changed := false
-	for i := range e.camp.PeerCatalog {
-		if e.camp.PeerCatalog[i].Name != peerName {
-			continue
-		}
-		kept := e.camp.PeerCatalog[i].Domains[:0]
-		for _, d := range e.camp.PeerCatalog[i].Domains {
-			if d.Name == domainName {
-				changed = true
-				continue
-			}
-			kept = append(kept, d)
-		}
-		e.camp.PeerCatalog[i].Domains = kept
-	}
-	if changed {
-		e.persistCampLocked()
-	}
-	return nil
-}
-
-// RemoveTrustedPeer drops one peer CA — deletes the on-disk PEM, the
-// keychain entry, the in-memory cache, and the camp config entry.
-// Idempotent: missing pieces are skipped without error. Engine must
-// be running so we know which camp file to write.
-func (e *Engine) RemoveTrustedPeer(fingerprint string) error {
-	if fingerprint == "" {
-		return errors.New("empty fingerprint")
-	}
-	e.trustedPeerCAsMu.Lock()
-	entry, ok := e.trustedPeerCAs[fingerprint]
-	if ok {
-		delete(e.trustedPeerCAs, fingerprint)
-	}
-	e.trustedPeerCAsMu.Unlock()
-	if !ok {
-		return nil
-	}
-	certPath := filepath.Join(e.trustedPeersDir(), entry.PeerName+".crt")
-	if err := os.Remove(certPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("ca: remove %s: %v", certPath, err)
-	}
-	if err := platform.TrustStoreRemove(entry.CommonName); err != nil {
-		log.Printf("ca: trust store remove %s: %v", entry.CommonName, err)
-	}
-	e.mu.Lock()
-	if e.camp != nil {
-		kept := e.camp.TrustedPeers[:0]
-		for _, t := range e.camp.TrustedPeers {
-			if t.Fingerprint == fingerprint {
-				continue
-			}
-			kept = append(kept, t)
-		}
-		e.camp.TrustedPeers = kept
-		e.persistCampLocked()
-	}
-	e.mu.Unlock()
-	return nil
-}
-
-// restoreInterceptsFromCamp re-installs every (spec, peer) pair from
-// camp config. Called near the end of Start, after utun + routes are
-// up and e.peers is hydrated. Entries whose peer is no longer in the
-// camp catalog are logged and skipped; they'll be retried by the
-// next reconcile (currently driven by the frontend — that goes away
-// once the UI reads intercepts straight from camp config).
-func (e *Engine) restoreInterceptsFromCamp() {
-	if e.camp == nil {
-		return
-	}
-	for _, it := range e.camp.Intercepts {
-		if it.Spec == "" || it.Peer == "" {
-			continue
-		}
-		if !e.hasPeerNameLocked(it.Peer) {
-			log.Printf("config: intercept %q via %s skipped (peer not in catalog)", it.Spec, it.Peer)
-			continue
-		}
-		if _, err := e.addInterceptLocked(it.Spec, it.Peer); err != nil {
-			log.Printf("config: restore intercept %q via %s: %v", it.Spec, it.Peer, err)
-		}
-	}
-}
+// Intercept restoration moved to services/tunnel.
