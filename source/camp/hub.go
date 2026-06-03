@@ -112,31 +112,6 @@ func (h *Hub) evictStale(cutoff time.Time) {
 	}
 }
 
-type campStat struct {
-	ID    string   `json:"id"`
-	Peers []string `json:"peers"`
-}
-
-type stats struct {
-	Camps      []campStat `json:"camps"`
-	TotalPeers int        `json:"total_peers"`
-}
-
-func (h *Hub) stats() stats {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	s := stats{Camps: make([]campStat, 0, len(h.camps))}
-	for id, c := range h.camps {
-		names := make([]string, 0, len(c.peers))
-		for _, p := range c.peers {
-			names = append(names, p.info.Name)
-		}
-		s.Camps = append(s.Camps, campStat{ID: id, Peers: names})
-		s.TotalPeers += len(names)
-	}
-	return s
-}
-
 func short(pub string) string {
 	if len(pub) > 16 {
 		return pub[:16]

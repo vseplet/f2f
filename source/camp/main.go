@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html"
 	"log"
@@ -77,20 +76,6 @@ func main() {
 func rootHandler(hub *Hub, stunPort string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch p := r.URL.Path; {
-		case p == "/api/stats":
-			writeJSON(w, hub.stats())
-		case strings.HasPrefix(p, "/api/id/"):
-			id := strings.TrimPrefix(p, "/api/id/")
-			if !validCampID(id) {
-				w.WriteHeader(http.StatusBadRequest)
-				writeJSON(w, map[string]string{"error": "invalid camp id"})
-				return
-			}
-			writeJSON(w, map[string]any{
-				"camp_id": id,
-				"peers":   hub.list(id),
-				"now":     time.Now().UnixMilli(),
-			})
 		case strings.HasPrefix(p, "/id/"):
 			id := strings.TrimPrefix(p, "/id/")
 			if !validCampID(id) {
@@ -106,9 +91,8 @@ func rootHandler(hub *Hub, stunPort string) http.HandlerFunc {
 			fmt.Fprintf(w,
 				"f2f-camp — rendezvous for f2f peers\n"+
 					"Announce:  udp %s:%s\n"+
-					"Stats:     %s/api/stats\n"+
 					"Camp view: %s/id/<camp-id>\n",
-				hostOnly(r.Host), stunPort, origin(r), origin(r))
+				hostOnly(r.Host), stunPort, origin(r))
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
@@ -117,11 +101,6 @@ func rootHandler(hub *Hub, stunPort string) http.HandlerFunc {
 
 func validCampID(name string) bool {
 	return name != "" && len(name) <= maxCampIDLen && nameRE.MatchString(name)
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("content-type", "application/json")
-	json.NewEncoder(w).Encode(v)
 }
 
 func hostOnly(host string) string {
