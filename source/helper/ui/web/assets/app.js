@@ -562,8 +562,10 @@ $(function () {
 
   function row(state, label, extra, url) {
     const attrs = url ? ` data-url="${esc(url)}"` : '';
-    return `<div class="ax-tree-row ${state}"${attrs} title="${esc(url || extra || label)}">`
-      + `<span class="ax-tree-dot"></span>`
+    // state === null → render without a status dot (e.g. chat rows).
+    const dot = state === null ? '' : `<span class="ax-tree-dot"></span>`;
+    return `<div class="ax-tree-row ${state || ''}"${attrs} title="${esc(url || extra || label)}">`
+      + dot
       + `<span class="ax-tree-label">${esc(label)}</span>`
       + (extra ? `<span class="ax-tree-badge">${esc(extra)}</span>` : '')
       + `</div>`;
@@ -697,19 +699,17 @@ $(function () {
     ];
 
     const directsBody = MOCK_DIRECTS.map(d => {
-      const state = d.online ? 'online' : 'offline';
       const tags = [];
       if (d.unread) tags.push(`${d.unread} new`);
       if (d.inCall) tags.push('● in call');
-      return row(state, d.peer, tags.join(' · '));
+      return row(null, d.peer, tags.join(' · '));
     }).join('');
 
     const groupsBody = MOCK_GROUPS.map(g => {
-      const state = g.liveCall ? 'online' : '';
       const tags = [`${g.members} members`];
       if (g.unread) tags.push(`${g.unread} new`);
       if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
-      return row(state, g.name, tags.join(' · '));
+      return row(null, g.name, tags.join(' · '));
     }).join('');
 
     // intercepts — :port -> peer.
