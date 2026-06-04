@@ -754,9 +754,9 @@ $(function () {
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
           section('available') + peerFilesBody + section('sharing') + myFilesBody)
-      + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
       + category('domains',   'domains',   allDomains.length,
           domainsBody + section('certificates') + trustedBody)
+      + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
       + category('oidc',      'OIDC',      null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
