@@ -709,7 +709,7 @@ $(function () {
       const tags = [`${g.members} members`];
       if (g.unread) tags.push(`${g.unread} new`);
       if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
-      return row(null, g.name, tags.join(' · '));
+      return row(null, g.name.replace(/^#/, '# '), tags.join(' · '));
     }).join('');
 
     // intercepts — :port -> peer.
@@ -757,7 +757,7 @@ $(function () {
       + category('domains',   'domains',   allDomains.length,
           domainsBody + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
-      + category('oidc',      'OIDC',      null, empty('not configured'))
+      + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
   }

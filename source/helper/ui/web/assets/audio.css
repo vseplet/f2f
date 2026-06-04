@@ -344,7 +344,9 @@
     transform: rotate(-90deg);
 }
 .ax-tree-label {
-    flex: 1;
+    /* grow to push the meta right, but never shrink: the label stays
+       fully readable; the right-hand meta yields instead. */
+    flex: 1 0 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -352,6 +354,12 @@
 .ax-tree-badge {
     color: var(--muted);
     font-size: 11px;
+    /* Yields first: the meta truncates while the label stays full. */
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ax-tree-children {
     margin-left: 14px;
