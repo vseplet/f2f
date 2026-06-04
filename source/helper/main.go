@@ -26,6 +26,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/services/pki"
+	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
@@ -73,6 +74,7 @@ func run(bind string) error {
 	callsSvc := calls.New(store, eng)
 	tunnelSvc := tunnel.New(store, eng)
 	campSvc := camp.New(eng)
+	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
 	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
 
@@ -153,10 +155,10 @@ func run(bind string) error {
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
-		if err := srv.BindProxies(localIP); err != nil {
+		st := eng.Status()
+		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
-		st := eng.Status()
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -168,7 +170,7 @@ func run(bind string) error {
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
-		_ = srv.UnbindProxies()
+		_ = proxySvc.Stop()
 		for i := len(services) - 1; i >= 0; i-- {
 			s := services[i]
 			if s.stop == nil {

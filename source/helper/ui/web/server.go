@@ -5,7 +5,6 @@ package web
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -15,12 +14,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,8 +57,7 @@ type Server struct {
 	srv      *http.Server
 
 	mu        sync.Mutex
-	tunnelSrv *http.Server   // signal/domain listener on tunnel v4
-	proxySrvs []*http.Server // HTTP/HTTPS reverse proxies on :80/:443
+	tunnelSrv *http.Server // signal/domain listener on tunnel v4
 
 	signals     *signalHub
 	callSignals *signalHub // SSE hub for SFU signals → local browser
@@ -112,7 +107,6 @@ func (s *Server) ListenAndServe() error {
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	_ = s.UnbindTunnel()
-	_ = s.UnbindProxies()
 	if s.srv == nil {
 		return nil
 	}
@@ -170,192 +164,6 @@ func (s *Server) UnbindTunnel() error {
 	defer cancel()
 	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
 	return srv.Shutdown(ctx)
-}
-
-// BindProxies starts reverse-proxy listeners for the local published
-// domains on standard web ports — both tunnel_ip and 127.0.0.1:
-//
-//   - :80   plain HTTP
-//   - :443  HTTPS, terminated with leaf certs issued on demand by the
-//           local CA (engine.CA()). Only enabled when a CA is available.
-//
-// The proxy reads Host/SNI, looks up engine.MyDomains, and forwards
-// to 127.0.0.1:<configured port> over plain HTTP. Bind failures (port
-// busy, no CA) are logged but not fatal — users can keep typing
-// explicit ports.
-func (s *Server) BindProxies(tunnelIP string) error {
-	_ = s.UnbindProxies()
-	httpAddrs := []string{net.JoinHostPort("127.0.0.1", "80")}
-	if tunnelIP != "" {
-		httpAddrs = append(httpAddrs, net.JoinHostPort(tunnelIP, "80"))
-	}
-	for _, a := range httpAddrs {
-		s.startProxyListener(a, nil)
-	}
-	if ca := s.pki.MyCA(); ca != nil {
-		tlsCfg := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				host := strings.ToLower(strings.TrimSpace(hello.ServerName))
-				if host == "" {
-					return nil, fmt.Errorf("tls: empty SNI")
-				}
-				return ca.IssueLeaf(host)
-			},
-		}
-		tlsAddrs := []string{net.JoinHostPort("127.0.0.1", "443")}
-		if tunnelIP != "" {
-			tlsAddrs = append(tlsAddrs, net.JoinHostPort(tunnelIP, "443"))
-		}
-		for _, a := range tlsAddrs {
-			s.startProxyListener(a, tlsCfg)
-		}
-	}
-	return nil
-}
-
-// startProxyListener brings up one listener (HTTP if tlsCfg is nil,
-// HTTPS otherwise) and stashes it on s.proxySrvs for shutdown.
-func (s *Server) startProxyListener(addr string, tlsCfg *tls.Config) {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           http.HandlerFunc(s.handleProxy),
-		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         tlsCfg,
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		scheme := "HTTP"
-		if tlsCfg != nil {
-			scheme = "HTTPS"
-		}
-		log.Printf("proxy: bind %s %s: %v (skipping)", scheme, addr, err)
-		return
-	}
-	if tlsCfg != nil {
-		ln = tls.NewListener(ln, tlsCfg)
-	}
-	s.mu.Lock()
-	s.proxySrvs = append(s.proxySrvs, srv)
-	s.mu.Unlock()
-	go func() {
-		scheme := "HTTP"
-		if tlsCfg != nil {
-			scheme = "HTTPS"
-		}
-		log.Printf("proxy: %s listening on %s", scheme, addr)
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("WARN: proxy %s: %v", addr, err)
-		}
-	}()
-}
-
-// UnbindProxies stops every active proxy listener. Idempotent.
-func (s *Server) UnbindProxies() error {
-	s.mu.Lock()
-	srvs := s.proxySrvs
-	s.proxySrvs = nil
-	s.mu.Unlock()
-	for _, srv := range srvs {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = srv.Shutdown(ctx)
-		cancel()
-		log.Printf("proxy: stopped %s", srv.Addr)
-	}
-	return nil
-}
-
-// handleProxy is the single reverse-proxy handler shared between both
-// proxy listeners. Looks up the Host header's label in the local
-// published-domains list and forwards to <host>:<port> where host
-// defaults to 127.0.0.1 but the user can override per-domain (e.g.
-// "localhost" for IPv6-only dev servers, or a LAN IP). Anything
-// outside our zone or with no matching label returns 404.
-func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	campID := strings.ToLower(strings.TrimSpace(s.engine.Status().CampID))
-	if campID == "" {
-		http.Error(w, "engine not in a camp", http.StatusServiceUnavailable)
-		return
-	}
-	zone := identity.CampLabel(campID)
-	suffix := "." + zone + ".f2f"
-
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
-		host = h
-	}
-	host = strings.ToLower(host)
-	if !strings.HasSuffix(host, suffix) {
-		http.Error(w, "not in this camp's f2f zone", http.StatusNotFound)
-		return
-	}
-	label := strings.TrimSuffix(host, suffix)
-	if label == "" {
-		http.Error(w, "bad subdomain", http.StatusNotFound)
-		return
-	}
-
-	// Two-pass match against MyDomains: exact wins over wildcard.
-	var (
-		port   int
-		upHost string
-	)
-	mine := s.dns.MyDomains()
-	for _, d := range mine {
-		if !dns.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
-			port = d.Port
-			upHost = d.Host
-			break
-		}
-	}
-	if port == 0 {
-		for _, d := range mine {
-			if dns.IsWildcardLabel(d.Name) && dns.MatchesWildcard(d.Name, label) {
-				port = d.Port
-				upHost = d.Host
-				break
-			}
-		}
-	}
-	if upHost == "" {
-		upHost = "127.0.0.1"
-	}
-	if port == 0 {
-		http.Error(w, "no such domain published locally", http.StatusNotFound)
-		return
-	}
-
-	target, _ := url.Parse("http://" + net.JoinHostPort(upHost, strconv.Itoa(port)))
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	// Tell the backend the request reached us over HTTPS (we terminate TLS
-	// and forward plain HTTP). Without this, apps like Gitea generate
-	// http:// links. The proto is derived from which listener served the
-	// request: r.TLS is non-nil only on the :443 HTTPS listener.
-	fwdProto := "http"
-	if r.TLS != nil {
-		fwdProto = "https"
-	}
-	fwdHost := r.Host
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	origDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		origDirector(req)
-		req.Header.Set("X-Forwarded-Proto", fwdProto)
-		req.Header.Set("X-Forwarded-Host", fwdHost)
-		if clientIP != "" {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
-	}
-
-	// httputil's default ErrorHandler logs to stderr; replace with a
-	// 502 so the client gets a meaningful response instead of a half-open
-	// connection.
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy: %s → %s: %v", host, target, err)
-		http.Error(w, "upstream unreachable", http.StatusBadGateway)
-	}
-	proxy.ServeHTTP(w, r)
 }
 
 func (s *Server) routes(mux *http.ServeMux) {
