@@ -19,58 +19,24 @@
     --muted:  #69727c;
     --dim:    #565e67;
 
-    /* accent — turquoise */
+    --black:  #000;
+
+    /* accent — turquoise. Tints derived at call sites via color-mix. */
     --accent:        #00bcd4;
     --accent-bright: #4dd0e0;
     --accent-dim:    #0f8a9c;
-    --accent-soft:   rgba(0, 188, 212, 0.1);
-    --accent-t05:    rgba(0, 188, 212, 0.05);
-    --accent-t06:    rgba(0, 188, 212, 0.06);
-    --accent-strong: rgba(0, 188, 212, 0.85);
 
-    /* status — ok */
+    /* status */
     --ok:            #86b86b;
-    --ok-bright:     #a0d28a;
     --ok-mid:        #6b9b54;
-    --ok-dim:        #4a7c59;
     --ok-deep:       #3a5a30;
-    --ok-t06:        rgba(134, 184, 107, 0.06);
-    --ok-t08:        rgba(134, 184, 107, 0.08);
-    --ok-t14:        rgba(134, 184, 107, 0.14);
-    --ok-t15:        rgba(134, 184, 107, 0.15);
-    --ok-t50:        rgba(134, 184, 107, 0.5);
-
-    /* status — danger */
     --danger:        #c25656;
     --danger-bright: #d8a8a8;
-    --danger-light:  #e8b8b8;
     --danger-mid:    #c47070;
-    --danger-mute:   #a07474;
-    --danger-dim:    #8a3030;
     --danger-deep:   #6a3030;
-    --danger-t10:    rgba(194, 86, 86, 0.1);
-    --danger-t12:    rgba(194, 86, 86, 0.12);
-    --danger-t18:    rgba(194, 86, 86, 0.18);
-
-    /* status — info / warn */
     --info:          #4a6b8a;
-    --info-bright:   #8aa8c8;
-    --info-dim:      #355068;
     --info-bg:       #151a1d;
-    --info-t06:      rgba(138, 168, 200, 0.06);
     --warn:          #d97a3a;
-    --warn-t50:      rgba(217, 122, 58, 0.5);
-
-    /* neutrals & overlays */
-    --black:         #000;
-    --dim-bright:    #888;
-    --dim-2:         #555;
-    --shadow:        rgba(12, 10, 8, 0.7);
-    --overlay-60:    rgba(20, 18, 14, 0.6);
-    --overlay-90:    rgba(20, 18, 14, 0.9);
-    --hl-soft:       rgba(212, 200, 166, 0.03);
-    --hl-warm:       rgba(136, 128, 112, 0.06);
-    --hl-white:      rgba(255, 255, 255, 0.02);
 }
 
 .ax-frame {
@@ -531,10 +497,10 @@
 .ax-frame .ax-engine-btn.state-running {
     color: var(--ok);
     border-color: var(--ok-deep);
-    background: var(--ok-t06);
+    background: color-mix(in srgb, var(--ok) 6%, transparent);
 }
 .ax-frame .ax-engine-btn.state-running:hover {
-    background: var(--ok-t14);
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
 }
 
 .ax-frame .ax-engine-btn.state-loading {
@@ -545,10 +511,10 @@
 .ax-frame .ax-engine-btn.state-error {
     color: var(--danger);
     border-color: var(--danger-deep);
-    background: var(--danger-t10);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 .ax-frame .ax-engine-btn.state-error:hover {
-    background: var(--danger-t18);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
 .ax-frame .ax-sep {
     color: var(--border-2);
@@ -595,8 +561,8 @@
         45deg,
         transparent 0,
         transparent 8px,
-        var(--hl-white) 8px,
-        var(--hl-white) 9px
+        color-mix(in srgb, #fff 2%, transparent) 8px,
+        color-mix(in srgb, #fff 2%, transparent) 9px
     );
     border-radius: 4px;
     aspect-ratio: 4/3;
@@ -629,7 +595,7 @@
 }
 .ax-frame .ax-pane-fs {
     pointer-events: auto;
-    background: var(--overlay-60);
+    background: color-mix(in srgb, var(--bg) 60%, transparent);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -640,7 +606,7 @@
     cursor: pointer;
 }
 .ax-frame .ax-pane-fs:hover {
-    background: var(--overlay-90);
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
 }
 .ax-frame .ax-pane-label .ax-corner {
     color: var(--border-2);
@@ -819,7 +785,7 @@
     color: var(--ok);
 }
 .ax-frame .ax-btn-call.state-connecting {
-    background: var(--danger-t12);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     border-color: var(--danger-deep);
     color: var(--danger-bright);
 }
@@ -828,16 +794,16 @@
     animation: ax-rec-blink 1.4s infinite;
 }
 .ax-frame .ax-btn-call.state-connected {
-    background: var(--danger-t18);
-    border-color: var(--danger-dim);
-    color: var(--danger-light);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    border-color: var(--danger-deep);
+    color: var(--danger-bright);
 }
 .ax-frame .ax-btn-call.state-connected .ax-btn-state {
     color: var(--danger);
 }
 .ax-frame .ax-btn-call .ax-btn-meta {
     margin-left: 4px;
-    color: var(--danger-mute);
+    color: var(--danger-mid);
     font-size: 12px;
 }
 
@@ -869,10 +835,10 @@
     background-image:
         radial-gradient(
             circle at center,
-            var(--accent-strong) 1px,
+            color-mix(in srgb, var(--accent) 85%, transparent) 1px,
             transparent 1.2px
         ),
-        linear-gradient(90deg, var(--accent-soft), var(--accent-soft));
+        linear-gradient(90deg, color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--accent) 10%, transparent));
     background-size:
         4px 4px,
         100% 100%;
@@ -1069,7 +1035,7 @@ details.ax-advanced > .ax-advanced-body {
     font-size: 12px;
     color: var(--text-2);
     padding: 8px 10px;
-    background: var(--accent-t05);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
     border-left: 2px solid var(--accent);
     border-radius: 2px;
     display: none;
@@ -1148,11 +1114,11 @@ details.ax-advanced > .ax-advanced-body {
 }
 .ax-frame .ax-dot.reachable {
     background: var(--ok);
-    box-shadow: 0 0 4px var(--ok-t50);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--ok) 50%, transparent);
 }
 .ax-frame .ax-dot.degraded {
     background: var(--warn);
-    box-shadow: 0 0 4px var(--warn-t50);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--warn) 50%, transparent);
 }
 .ax-frame .ax-dot.unreachable {
     background: var(--danger);
@@ -1161,7 +1127,7 @@ details.ax-advanced > .ax-advanced-body {
     background: var(--accent);
 }
 .ax-frame .ax-dot.offline {
-    background: var(--dim-2);
+    background: var(--dim);
 }
 .ax-dot.unknown {
     background: var(--border-2);
@@ -1185,7 +1151,7 @@ details.ax-advanced > .ax-advanced-body {
     font-variant-numeric: tabular-nums;
 }
 .ax-frame .ax-health-meta {
-    color: var(--dim-bright);
+    color: var(--text-2);
 }
 
 /* drop-tab dropzone */
@@ -1202,11 +1168,11 @@ details.ax-advanced > .ax-advanced-body {
         border-color 80ms linear;
 }
 .ax-dropzone:hover {
-    background: var(--hl-soft);
+    background: color-mix(in srgb, #fff 3%, transparent);
     border-color: var(--border-2);
 }
 .ax-dropzone.is-drag {
-    background: var(--ok-t06);
+    background: color-mix(in srgb, var(--ok) 6%, transparent);
     border-color: var(--ok-deep);
     color: var(--ok);
 }
@@ -1218,20 +1184,20 @@ details.ax-advanced > .ax-advanced-body {
     color: var(--dim);
 }
 .ax-btn-primary {
-    background: var(--ok-t08);
+    background: color-mix(in srgb, var(--ok) 8%, transparent);
     border-color: var(--ok-deep);
     color: var(--ok);
 }
 .ax-btn-primary:hover {
-    background: var(--ok-t15);
+    background: color-mix(in srgb, var(--ok) 15%, transparent);
 }
 .ax-btn-danger {
-    background: var(--danger-t10);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-color: var(--danger-deep);
     color: var(--danger-bright);
 }
 .ax-btn-danger:hover {
-    background: var(--danger-t18);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
 
 /* List of intercepts */
@@ -1262,7 +1228,7 @@ details.ax-advanced > .ax-advanced-body {
     user-select: none;
 }
 .ax-intercept-head:hover {
-    background: var(--hl-soft);
+    background: color-mix(in srgb, #fff 3%, transparent);
 }
 .ax-intercept.is-expanded .ax-intercept-head {
     border-bottom: 1px dotted var(--panel-2);
@@ -1284,7 +1250,7 @@ a.ax-domain-link {
 }
 a.ax-domain-link:hover {
     text-decoration: underline;
-    color: var(--ok-bright);
+    color: var(--ok-mid);
 }
 .ax-intercept-meta {
     margin-left: auto;
@@ -1309,17 +1275,17 @@ a.ax-domain-link:hover {
 .ax-pill-active {
     color: var(--ok);
     border-color: var(--ok-deep);
-    background: var(--ok-t06);
+    background: color-mix(in srgb, var(--ok) 6%, transparent);
 }
 .ax-pill-pending {
     color: var(--accent);
     border-color: var(--muted);
-    background: var(--accent-t06);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 .ax-pill-peer {
-    color: var(--info-bright);
-    border-color: var(--info-dim);
-    background: var(--info-t06);
+    color: var(--info);
+    border-color: var(--info);
+    background: color-mix(in srgb, var(--info) 6%, transparent);
 }
 /* Fingerprint pill — used in the peers table next to nicknames. Has its
    own padding/border because the base .ax-pill rule is scoped to
@@ -1332,7 +1298,7 @@ a.ax-domain-link:hover {
     border-radius: 2px;
     border: 1px solid var(--border-2);
     color: var(--text-2);
-    background: var(--hl-warm);
+    background: color-mix(in srgb, #fff 6%, transparent);
 }
 
 .ax-intercept-body {
@@ -1542,8 +1508,8 @@ a.ax-domain-link:hover {
         45deg,
         transparent 0,
         transparent 8px,
-        var(--hl-white) 8px,
-        var(--hl-white) 9px
+        color-mix(in srgb, #fff 2%, transparent) 8px,
+        color-mix(in srgb, #fff 2%, transparent) 9px
     );
     border-radius: 4px;
     overflow: hidden;
@@ -1561,7 +1527,7 @@ a.ax-domain-link:hover {
 }
 
 .m2-tile-self {
-    border-color: var(--ok-dim);
+    border-color: var(--ok-deep);
 }
 
 /* Mirror only the self camera — matches what people are used to
@@ -1579,7 +1545,7 @@ a.ax-domain-link:hover {
     left: 6px;
     font-size: 11px;
     color: var(--text-2);
-    background: var(--shadow);
+    background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
     padding: 1px 6px;
     border-radius: 3px;
 }
@@ -1619,7 +1585,7 @@ a.ax-domain-link:hover {
     top: 4px;
     right: 4px;
     pointer-events: auto;
-    background: var(--overlay-60);
+    background: color-mix(in srgb, var(--bg) 60%, transparent);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -1635,7 +1601,7 @@ a.ax-domain-link:hover {
     opacity: 1;
 }
 .m2-tile-fs:hover {
-    background: var(--overlay-90);
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
 }
 
 #tab-meet2 > .ax-frame {
