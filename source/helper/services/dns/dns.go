@@ -247,6 +247,23 @@ func (s *Service) MyDomains() []Entry {
 	return out
 }
 
+// portalName is the built-in, local-only domain that points at this
+// node's own web UI (portal.<camp>.f2f → the loopback UI). It is never
+// in MyDomains, so it is neither shared with peers (/api/domains) nor
+// routable on the tunnel-facing proxy — only the loopback proxy and the
+// local resolver honour it via LocalRoutes.
+const (
+	portalName = "portal"
+	portalPort = 2202 // default web-UI bind; see main.go defaultBind
+)
+
+// LocalRoutes is MyDomains plus the built-in portal entry — the set the
+// LOCAL reverse-proxy (loopback listener) and the resolver should
+// honour. Kept separate from MyDomains so portal never leaks to peers.
+func (s *Service) LocalRoutes() []Entry {
+	return append(s.MyDomains(), Entry{Name: portalName, Host: "127.0.0.1", Port: portalPort})
+}
+
 // PeerDomains returns the in-memory mirror of one peer's published
 // catalog (empty slice when nothing's been polled yet).
 func (s *Service) PeerDomains(pub string) []Entry {
@@ -353,7 +370,9 @@ func (s *Service) RemovePeerDomain(peerName, domainName string) error {
 // peer we can't currently reach would just make apps stall. The set
 // of "online" peers comes from the engine via OnlinePeersWithDomains.
 func (s *Service) LookupHost(label string) (Host, bool) {
-	mine := s.MyDomains()
+	// LocalRoutes (not MyDomains) so the built-in portal resolves too;
+	// the resolver only answers local queries (127.0.0.1:5354).
+	mine := s.LocalRoutes()
 	for _, d := range mine {
 		if !IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
 			return Host{V4: "127.0.0.1"}, true

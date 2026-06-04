@@ -178,6 +178,9 @@ func run(bind string, console bool) error {
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
+		if st.CampID != "" {
+			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
+		}
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
