@@ -156,9 +156,6 @@ func run(bind string) error {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
 		st := eng.Status()
-		if err := proxySvc.Start(localIP, st.CampID); err != nil {
-			log.Printf("WARN: bind http proxies: %v", err)
-		}
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -166,6 +163,11 @@ func run(bind string) error {
 			if err := s.start(localIP, st); err != nil {
 				log.Printf("%s: %v", s.name, err)
 			}
+		}
+		// After services: pki has loaded the CA, so the proxy can bind
+		// :443 with on-demand leaf certs (not just :80).
+		if err := proxySvc.Start(localIP, st.CampID); err != nil {
+			log.Printf("WARN: bind http proxies: %v", err)
 		}
 	}
 	eng.OnStopped = func() {
