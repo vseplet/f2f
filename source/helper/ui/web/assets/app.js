@@ -228,6 +228,12 @@ $(function () {
     $(this).toggleClass('collapsed');
   });
 
+  // Rows carrying data-url (e.g. domains) open their target in a new tab.
+  $('#ax-tree').on('click', '.ax-tree-row[data-url]', function () {
+    const url = $(this).attr('data-url');
+    if (url) window.open(url, '_blank', 'noopener');
+  });
+
   const $btnEngine = $('#btn-engine');
   const $engineState = $btnEngine.find('.ax-engine-state');
   const $engineLabel = $btnEngine.find('.ax-engine-label');
@@ -554,8 +560,9 @@ $(function () {
     );
   }
 
-  function row(state, label, extra) {
-    return `<div class="ax-tree-row ${state}" title="${esc(extra || label)}">`
+  function row(state, label, extra, url) {
+    const attrs = url ? ` data-url="${esc(url)}"` : '';
+    return `<div class="ax-tree-row ${state}"${attrs} title="${esc(url || extra || label)}">`
       + `<span class="ax-tree-dot"></span>`
       + `<span class="ax-tree-label">${esc(label)}</span>`
       + (extra ? `<span class="ax-tree-badge">${esc(extra)}</span>` : '')
@@ -574,19 +581,7 @@ $(function () {
     // in its ID — that's what users actually call the camp ("xyz",
     // "test1"); KnownCamp.name is the local user's nickname inside
     // that camp, which we surface as a sub-line.
-    const knownCamps = (s && s.known_camps) || [];
     const activeID = (s && s.camp_id) || '';
-    let campsBody = '';
-    if (!knownCamps.length) {
-      campsBody = empty('no camps joined');
-    } else {
-      for (const c of knownCamps) {
-        const active = c.id === activeID;
-        const label = (c.id.split('_').pop() || c.id);
-        const meta = c.name ? `as ${c.name}` : '';
-        campsBody += row(active ? 'online' : 'offline', label, meta);
-      }
-    }
 
     // peers — flat list. Each row: dot + name + ip/rtt meta.
     const peers = (s && s.peers) || [];
@@ -615,14 +610,21 @@ $(function () {
     const allFiles = [];
     for (const p of peers) {
       const owner = peerLabel(p);
-      (p.domains || []).forEach(d => allDomains.push({ d, owner, self: !!p.self }));
+      const state = p.self ? 'online'
+        : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+      (p.domains || []).forEach(d => allDomains.push({ d, owner, state }));
       (p.firewall || []).filter(x => x.enabled).forEach(x => allPorts.push({ x, owner, self: !!p.self }));
       (p.files || []).forEach(f => allFiles.push({ f, owner, self: !!p.self }));
     }
 
+    // zone = camp label (<pub>_<label>); used to build openable URLs.
+    const zone = activeID.split('_').pop() || '';
     const domainsBody = allDomains.length
-      ? allDomains.map(({ d, owner }) =>
-          row('', d.name, owner)).join('')
+      ? allDomains.map(({ d, owner, state }) => {
+          // Wildcard domains (*.x) aren't directly openable.
+          const url = (zone && !d.name.includes('*')) ? `https://${d.name}.${zone}.f2f` : '';
+          return row(state, d.name, owner, url);
+        }).join('')
       : empty('no domains');
 
     const portsBody = allPorts.length
@@ -630,10 +632,16 @@ $(function () {
           row('', `:${x.port} ${x.protocol || 'tcp'}`, owner)).join('')
       : empty('no ports');
 
-    const filesBody = allFiles.length
-      ? allFiles.map(({ f, owner }) =>
+    // drop is split into two sections: files available from peers and
+    // files we share ourselves.
+    const peerFilesBody = allFiles.filter(x => !x.self).length
+      ? allFiles.filter(x => !x.self).map(({ f, owner }) =>
           row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`)).join('')
-      : empty('no files');
+      : empty('none');
+    const myFilesBody = allFiles.filter(x => x.self).length
+      ? allFiles.filter(x => x.self).map(({ f }) =>
+          row('', f.name, fmtBytes(f.size || 0))).join('')
+      : empty('none');
 
     // calls — group calls hosted in the camp. Owner is the peer
     // whose tunnel IP matches sfu_host (self if it's our LocalCall);
@@ -735,17 +743,22 @@ $(function () {
       + section('channels') + groupsBody
       + section('direct')   + directsBody;
 
+    // tunnel — outbound intercepts + inbound open ports under one group
+    // with section dividers (mirrors the app's "tunnel" tab).
+    const tunnelBody =
+      section('intercepts') + interceptsBody
+      + section('ports')      + portsBody;
+
     $tree.html(
-      category('camps',      'camps',      knownCamps.length, campsBody)
-      + category('peers',     'peers',     peers.length, peersBody)
+      category('peers',     'peers',     peers.length, peersBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
-      + category('intercepts','intercepts',intercepts.length, interceptsBody)
-      + category('domains',   'domains',   allDomains.length, domainsBody)
-      + category('ports',     'ports',     allPorts.length, portsBody)
-      + category('drop',      'drop',      allFiles.length, filesBody)
+      + category('drop',      'drop',      allFiles.length,
+          section('available') + peerFilesBody + section('sharing') + myFilesBody)
+      + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
+      + category('domains',   'domains',   allDomains.length,
+          domainsBody + section('certificates') + trustedBody)
       + category('oidc',      'OIDC',      null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
-      + category('trusted',   'trusted CAs', trusted.length, trustedBody)
     );
   }
 
