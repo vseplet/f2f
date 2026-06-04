@@ -6,6 +6,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <script src="/vendor/tailwind.min.js"></script>
         <script src="/vendor/jquery.min.js"></script>
+        <link rel="stylesheet" href="/vendor/bootstrap-icons/bootstrap-icons.min.css" />
         <link rel="stylesheet" href="/audio.css" />
     </head>
     <body
@@ -1045,6 +1046,39 @@
                 </div>
             </div>
             <!-- /#tab-diagnostics -->
+            <div id="tab-chat" class="tab-panel hidden">
+                <div class="ax-frame ax-chat">
+                    <div class="ax-section-title ax-chat-header">
+                        <span id="chat-title">— chat</span>
+                        <button
+                            type="button"
+                            id="chat-call"
+                            class="ax-engine-btn ax-chat-call"
+                            title="call"
+                            aria-label="call"
+                            style="display: none"
+                        ><i class="bi bi-telephone-fill"></i></button>
+                    </div>
+                    <div id="chat-messages" class="ax-chat-messages"></div>
+                    <form id="chat-form" class="ax-chat-input">
+                        <button
+                            type="button"
+                            id="chat-attach"
+                            class="ax-engine-btn ax-chat-attach"
+                            title="attach (coming soon)"
+                            aria-label="attach"
+                        ><i class="bi bi-plus-lg"></i></button>
+                        <input
+                            id="chat-input"
+                            type="text"
+                            autocomplete="off"
+                            placeholder="message…"
+                        />
+                        <button type="submit" class="ax-engine-btn ax-chat-send" title="send" aria-label="send"><i class="bi bi-arrow-up-short"></i></button>
+                    </form>
+                </div>
+            </div>
+            <!-- /#tab-chat -->
             </div>
             <!-- /.ax-main-col -->
             <aside id="ax-notifications" class="ax-sidebar ax-sidebar-right">

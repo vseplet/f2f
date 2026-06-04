@@ -57,7 +57,11 @@
    as one continuous box. Every tab-panel uses the same one-frame layout
    (see HTML). */
 .ax-tabbar {
-    padding: 14px 20px;
+    height: 52px;
+    box-sizing: border-box;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
     margin-bottom: 0;
     border-radius: 0;
     border-bottom: 1px solid var(--panel-2);
@@ -66,6 +70,7 @@
     border-top-style: none;
 }
 .ax-tabbar .ax-header {
+    flex: 1;
     margin-bottom: 0;
 }
 
@@ -100,7 +105,9 @@
     overflow: hidden;
 }
 .ax-sidebar-header {
-    padding: 10px 12px 8px;
+    height: 52px;
+    box-sizing: border-box;
+    padding: 0 12px;
     border-bottom: 1px dotted var(--border);
     flex-shrink: 0;
     display: flex;
@@ -362,9 +369,7 @@
     white-space: nowrap;
 }
 .ax-tree-children {
-    margin-left: 14px;
-    padding-left: 6px;
-    border-left: 1px dotted var(--border);
+    margin-left: 8px;
     margin-top: 2px;
     margin-bottom: 4px;
 }
@@ -375,9 +380,19 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 1px 0;
+    /* left border is always present (transparent) so the active accent
+       bar doesn't shift the row; padding keeps text clear of it. */
+    padding: 1px 0 1px 5px;
+    border-left: 2px solid transparent;
     cursor: pointer;
     color: var(--text-2);
+}
+.ax-tree-row.active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-left-color: var(--accent);
+}
+.ax-tree-row.active .ax-tree-label {
+    color: var(--accent);
 }
 .ax-tree-row:hover {
     color: var(--text);
@@ -433,7 +448,6 @@
     margin-top: 0;
     min-height: 100%;
     box-sizing: border-box;
-    padding-bottom: 40px;
 }
 
 /* Header row (used inside .ax-tabbar — no bottom margin since the
@@ -1447,7 +1461,6 @@ a.ax-domain-link:hover {
 /* Chat input row */
 .ax-frame .ax-chat-input {
     border-top: 1px solid var(--panel-2);
-    padding: 8px 12px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1694,4 +1707,110 @@ a.ax-domain-link:hover {
 .m2-bottombar .ax-vol {
     min-width: 200px;
     flex-shrink: 0;
+}
+
+/* ---- Chat (messages) — Slack-style, fills the panel ---- */
+#tab-chat {
+    overflow: hidden;
+}
+#tab-chat:not(.hidden) {
+    display: flex;
+    flex-direction: column;
+}
+.ax-chat {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    box-sizing: border-box;
+}
+.ax-chat-header {
+    flex-shrink: 0;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.ax-frame .ax-chat-call {
+    flex-shrink: 0;
+    width: 30px;
+    padding: 3px 0;
+    justify-content: center;
+    color: var(--ok);
+    font-size: 14px;
+}
+.ax-frame .ax-chat-call:hover {
+    color: var(--ok);
+    border-color: var(--ok-deep);
+    background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+.ax-chat-messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+.ax-msg {
+    padding: 1px 0;
+}
+.ax-msg-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 10px;
+}
+.ax-msg-author {
+    color: var(--accent);
+}
+.ax-msg-time {
+    color: var(--muted);
+    font-size: 11px;
+}
+.ax-msg-text {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.ax-chat-input {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 10px;
+    margin-top: 8px;
+    border-top: 1px dotted var(--border);
+}
+.ax-chat-input input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-deep);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 6px 8px;
+    font: inherit;
+    outline: none;
+}
+.ax-chat-input input:focus {
+    border-color: var(--accent-dim);
+}
+/* Chat buttons reuse the engine .ax-engine-btn chrome but are square
+   and accent-tinted. The .ax-frame scope outranks .ax-frame
+   .ax-engine-btn:hover so the whole button fills on hover (like the
+   engine start/stop button) instead of only the border changing. */
+.ax-frame .ax-chat-input .ax-engine-btn {
+    flex-shrink: 0;
+    width: 30px;
+    padding: 3px 0;
+    justify-content: center;
+    color: var(--accent);
+    font-size: 15px;
+}
+.ax-frame .ax-chat-input .ax-chat-attach {
+    color: var(--muted);
+}
+.ax-frame .ax-chat-input .ax-engine-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
 }

@@ -234,6 +234,98 @@ $(function () {
     if (url) window.open(url, '_blank', 'noopener');
   });
 
+  // Rows carrying data-route drive the main window via the URL hash:
+  // the sidebar only sets location.hash, the router below reacts. This
+  // is how sidebar selections (chats, …) open content in the main pane
+  // without the two being directly coupled.
+  $('#ax-tree').on('click', '.ax-tree-row[data-route]', function () {
+    const route = $(this).attr('data-route');
+    if (route) location.hash = route;
+  });
+
+  // Mock conversation — placeholder until messaging is wired to the
+  // engine. Same thread shown for every chat for now.
+  const MOCK_MESSAGES = [
+    { author: 'mac-mini-m4', time: '14:02', text: 'deployed the new camp build' },
+    { author: 'mac-mini-m4', time: '14:02', text: 'gitea should be reachable again' },
+    { author: 'sevapp',      time: '14:03', text: 'yep, opens now 🎉' },
+    { author: 'artpani',     time: '14:10', text: 'can someone drop the agents doc?' },
+    { author: 'mac-mini-m4', time: '14:11', text: 'AGENTS.md is in the drop tab' },
+  ];
+
+  // msgRow renders one Slack-style message. grouped=true omits the
+  // author/time header (consecutive message from the same author).
+  function msgRow(m, grouped) {
+    const head = grouped ? '' :
+      `<div class="ax-msg-head">`
+        + `<span class="ax-msg-author">${esc(m.author)}</span>`
+        + `<span class="ax-msg-time">${esc(m.time)}</span>`
+      + `</div>`;
+    return `<div class="ax-msg" data-author="${esc(m.author)}">`
+      + head
+      + `<div class="ax-msg-text">${esc(m.text)}</div>`
+      + `</div>`;
+  }
+
+  function renderChat() {
+    let html = '', prev = null;
+    for (const m of MOCK_MESSAGES) {
+      html += msgRow(m, m.author === prev);
+      prev = m.author;
+    }
+    const $m = $('#chat-messages');
+    $m.html(html);
+    $m.scrollTop($m[0].scrollHeight);
+  }
+
+  // Hash router. Currently handles chat routes (chat:channel:<id> /
+  // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
+  // keeps working.
+  function applyRoute() {
+    const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    const m = h.match(/^chat:(channel|dm):(.+)$/);
+    if (!m) return;
+    const [, kind, id] = m;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-chat').removeClass('hidden');
+    $('#chat-title').text(kind === 'channel' ? '# ' + id : id);
+    $('#chat-call').toggle(kind === 'dm'); // call only makes sense 1:1
+    renderChat();
+  }
+  // highlightActiveRoute marks the sidebar row matching the current hash
+  // so the user can see where they are. Re-run after every tree rebuild
+  // (the sidebar is regenerated from status each tick).
+  function highlightActiveRoute() {
+    const route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    $('#ax-tree .ax-tree-row').each(function () {
+      $(this).toggleClass('active', !!route && $(this).attr('data-route') === route);
+    });
+  }
+  window.addEventListener('hashchange', function () {
+    applyRoute();
+    highlightActiveRoute();
+  });
+  applyRoute();
+  highlightActiveRoute();
+
+  // Local-only send: appends the typed line as our own message. No
+  // backend yet — purely the layout interaction.
+  $('#chat-form').on('submit', function (e) {
+    e.preventDefault();
+    const $in = $('#chat-input');
+    const text = $in.val().trim();
+    if (!text) return;
+    const now = new Date();
+    const time = String(now.getHours()).padStart(2, '0') + ':'
+      + String(now.getMinutes()).padStart(2, '0');
+    const $m = $('#chat-messages');
+    const grouped = $m.children().last().attr('data-author') === 'you';
+    $m.append(msgRow({ author: 'you', time, text }, grouped));
+    $in.val('');
+    $m.scrollTop($m[0].scrollHeight);
+  });
+
   const $btnEngine = $('#btn-engine');
   const $engineState = $btnEngine.find('.ax-engine-state');
   const $engineLabel = $btnEngine.find('.ax-engine-label');
@@ -560,8 +652,9 @@ $(function () {
     );
   }
 
-  function row(state, label, extra, url) {
-    const attrs = url ? ` data-url="${esc(url)}"` : '';
+  function row(state, label, extra, url, route) {
+    let attrs = url ? ` data-url="${esc(url)}"` : '';
+    if (route) attrs += ` data-route="${esc(route)}"`;
     // state === null → render without a status dot (e.g. chat rows).
     const dot = state === null ? '' : `<span class="ax-tree-dot"></span>`;
     return `<div class="ax-tree-row ${state || ''}"${attrs} title="${esc(url || extra || label)}">`
@@ -702,14 +795,15 @@ $(function () {
       const tags = [];
       if (d.unread) tags.push(`${d.unread} new`);
       if (d.inCall) tags.push('● in call');
-      return row(null, d.peer, tags.join(' · '));
+      return row(null, d.peer, tags.join(' · '), null, 'chat:dm:' + d.peer);
     }).join('');
 
     const groupsBody = MOCK_GROUPS.map(g => {
       const tags = [`${g.members} members`];
       if (g.unread) tags.push(`${g.unread} new`);
       if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
-      return row(null, g.name.replace(/^#/, '# '), tags.join(' · '));
+      const id = g.name.replace(/^#/, '');
+      return row(null, '# ' + id, tags.join(' · '), null, 'chat:channel:' + id);
     }).join('');
 
     // intercepts — :port -> peer.
@@ -760,6 +854,7 @@ $(function () {
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
+    highlightActiveRoute();
   }
 
   // Persist category collapsed state. The handler defined earlier
