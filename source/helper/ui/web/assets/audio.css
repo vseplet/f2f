@@ -24,10 +24,53 @@
     --accent-bright: #4dd0e0;
     --accent-dim:    #0f8a9c;
     --accent-soft:   rgba(0, 188, 212, 0.1);
+    --accent-t05:    rgba(0, 188, 212, 0.05);
+    --accent-t06:    rgba(0, 188, 212, 0.06);
+    --accent-strong: rgba(0, 188, 212, 0.85);
 
-    /* status */
-    --ok:     #86b86b;
-    --danger: #c25656;
+    /* status — ok */
+    --ok:            #86b86b;
+    --ok-bright:     #a0d28a;
+    --ok-mid:        #6b9b54;
+    --ok-dim:        #4a7c59;
+    --ok-deep:       #3a5a30;
+    --ok-t06:        rgba(134, 184, 107, 0.06);
+    --ok-t08:        rgba(134, 184, 107, 0.08);
+    --ok-t14:        rgba(134, 184, 107, 0.14);
+    --ok-t15:        rgba(134, 184, 107, 0.15);
+    --ok-t50:        rgba(134, 184, 107, 0.5);
+
+    /* status — danger */
+    --danger:        #c25656;
+    --danger-bright: #d8a8a8;
+    --danger-light:  #e8b8b8;
+    --danger-mid:    #c47070;
+    --danger-mute:   #a07474;
+    --danger-dim:    #8a3030;
+    --danger-deep:   #6a3030;
+    --danger-t10:    rgba(194, 86, 86, 0.1);
+    --danger-t12:    rgba(194, 86, 86, 0.12);
+    --danger-t18:    rgba(194, 86, 86, 0.18);
+
+    /* status — info / warn */
+    --info:          #4a6b8a;
+    --info-bright:   #8aa8c8;
+    --info-dim:      #355068;
+    --info-bg:       #151a1d;
+    --info-t06:      rgba(138, 168, 200, 0.06);
+    --warn:          #d97a3a;
+    --warn-t50:      rgba(217, 122, 58, 0.5);
+
+    /* neutrals & overlays */
+    --black:         #000;
+    --dim-bright:    #888;
+    --dim-2:         #555;
+    --shadow:        rgba(12, 10, 8, 0.7);
+    --overlay-60:    rgba(20, 18, 14, 0.6);
+    --overlay-90:    rgba(20, 18, 14, 0.9);
+    --hl-soft:       rgba(212, 200, 166, 0.03);
+    --hl-warm:       rgba(136, 128, 112, 0.06);
+    --hl-white:      rgba(255, 255, 255, 0.02);
 }
 
 .ax-frame {
@@ -196,9 +239,9 @@
     background: var(--border-2);
     border-radius: 0;
 }
-.ax-notif.ok    .ax-notif-accent { background: #6b9b54; }
+.ax-notif.ok    .ax-notif-accent { background: var(--ok-mid); }
 .ax-notif.warn  .ax-notif-accent { background: var(--accent-bright); }
-.ax-notif.info  .ax-notif-accent { background: #4a6b8a; }
+.ax-notif.info  .ax-notif-accent { background: var(--info); }
 .ax-notif.muted .ax-notif-accent { background: var(--border); }
 .ax-notif-body { min-width: 0; }
 .ax-notif-title {
@@ -374,7 +417,7 @@
 }
 .ax-tree-row.online .ax-tree-dot,
 .ax-tree-dot.on {
-    background: #6b9b54;
+    background: var(--ok-mid);
 }
 .ax-tree-row.half .ax-tree-dot,
 .ax-tree-dot.half {
@@ -487,11 +530,11 @@
 
 .ax-frame .ax-engine-btn.state-running {
     color: var(--ok);
-    border-color: #3a5a30;
-    background: rgba(134, 184, 107, 0.06);
+    border-color: var(--ok-deep);
+    background: var(--ok-t06);
 }
 .ax-frame .ax-engine-btn.state-running:hover {
-    background: rgba(134, 184, 107, 0.14);
+    background: var(--ok-t14);
 }
 
 .ax-frame .ax-engine-btn.state-loading {
@@ -501,11 +544,11 @@
 
 .ax-frame .ax-engine-btn.state-error {
     color: var(--danger);
-    border-color: #6a3030;
-    background: rgba(194, 86, 86, 0.1);
+    border-color: var(--danger-deep);
+    background: var(--danger-t10);
 }
 .ax-frame .ax-engine-btn.state-error:hover {
-    background: rgba(194, 86, 86, 0.18);
+    background: var(--danger-t18);
 }
 .ax-frame .ax-sep {
     color: var(--border-2);
@@ -552,8 +595,8 @@
         45deg,
         transparent 0,
         transparent 8px,
-        rgba(255, 255, 255, 0.02) 8px,
-        rgba(255, 255, 255, 0.02) 9px
+        var(--hl-white) 8px,
+        var(--hl-white) 9px
     );
     border-radius: 4px;
     aspect-ratio: 4/3;
@@ -565,7 +608,7 @@
     display: none;
 }
 .ax-frame .ax-pane[data-pane="peer"] {
-    background-color: #151a1d;
+    background-color: var(--info-bg);
 }
 .ax-frame .ax-pane-screen {
     flex: 1 0 480px;
@@ -586,7 +629,7 @@
 }
 .ax-frame .ax-pane-fs {
     pointer-events: auto;
-    background: rgba(20, 18, 14, 0.6);
+    background: var(--overlay-60);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -597,7 +640,7 @@
     cursor: pointer;
 }
 .ax-frame .ax-pane-fs:hover {
-    background: rgba(20, 18, 14, 0.9);
+    background: var(--overlay-90);
 }
 .ax-frame .ax-pane-label .ax-corner {
     color: var(--border-2);
@@ -635,7 +678,7 @@
 }
 .ax-frame .ax-pane-screen video {
     object-fit: contain;
-    background: #000;
+    background: var(--black);
 }
 
 .ax-frame .ax-cam-off {
@@ -776,25 +819,25 @@
     color: var(--ok);
 }
 .ax-frame .ax-btn-call.state-connecting {
-    background: rgba(194, 86, 86, 0.12);
-    border-color: #6a3030;
-    color: #d8a8a8;
+    background: var(--danger-t12);
+    border-color: var(--danger-deep);
+    color: var(--danger-bright);
 }
 .ax-frame .ax-btn-call.state-connecting .ax-btn-state {
     color: var(--danger);
     animation: ax-rec-blink 1.4s infinite;
 }
 .ax-frame .ax-btn-call.state-connected {
-    background: rgba(194, 86, 86, 0.18);
-    border-color: #8a3030;
-    color: #e8b8b8;
+    background: var(--danger-t18);
+    border-color: var(--danger-dim);
+    color: var(--danger-light);
 }
 .ax-frame .ax-btn-call.state-connected .ax-btn-state {
     color: var(--danger);
 }
 .ax-frame .ax-btn-call .ax-btn-meta {
     margin-left: 4px;
-    color: #a07474;
+    color: var(--danger-mute);
     font-size: 12px;
 }
 
@@ -826,10 +869,10 @@
     background-image:
         radial-gradient(
             circle at center,
-            rgba(0, 188, 212, 0.85) 1px,
+            var(--accent-strong) 1px,
             transparent 1.2px
         ),
-        linear-gradient(90deg, rgba(0, 188, 212, 0.1), rgba(0, 188, 212, 0.1));
+        linear-gradient(90deg, var(--accent-soft), var(--accent-soft));
     background-size:
         4px 4px,
         100% 100%;
@@ -1026,7 +1069,7 @@ details.ax-advanced > .ax-advanced-body {
     font-size: 12px;
     color: var(--text-2);
     padding: 8px 10px;
-    background: rgba(0, 188, 212, 0.05);
+    background: var(--accent-t05);
     border-left: 2px solid var(--accent);
     border-radius: 2px;
     display: none;
@@ -1105,11 +1148,11 @@ details.ax-advanced > .ax-advanced-body {
 }
 .ax-frame .ax-dot.reachable {
     background: var(--ok);
-    box-shadow: 0 0 4px rgba(134, 184, 107, 0.5);
+    box-shadow: 0 0 4px var(--ok-t50);
 }
 .ax-frame .ax-dot.degraded {
-    background: #d97a3a;
-    box-shadow: 0 0 4px rgba(217, 122, 58, 0.5);
+    background: var(--warn);
+    box-shadow: 0 0 4px var(--warn-t50);
 }
 .ax-frame .ax-dot.unreachable {
     background: var(--danger);
@@ -1118,7 +1161,7 @@ details.ax-advanced > .ax-advanced-body {
     background: var(--accent);
 }
 .ax-frame .ax-dot.offline {
-    background: #555;
+    background: var(--dim-2);
 }
 .ax-dot.unknown {
     background: var(--border-2);
@@ -1142,7 +1185,7 @@ details.ax-advanced > .ax-advanced-body {
     font-variant-numeric: tabular-nums;
 }
 .ax-frame .ax-health-meta {
-    color: #888;
+    color: var(--dim-bright);
 }
 
 /* drop-tab dropzone */
@@ -1159,12 +1202,12 @@ details.ax-advanced > .ax-advanced-body {
         border-color 80ms linear;
 }
 .ax-dropzone:hover {
-    background: rgba(212, 200, 166, 0.03);
+    background: var(--hl-soft);
     border-color: var(--border-2);
 }
 .ax-dropzone.is-drag {
-    background: rgba(134, 184, 107, 0.06);
-    border-color: #3a5a30;
+    background: var(--ok-t06);
+    border-color: var(--ok-deep);
     color: var(--ok);
 }
 .ax-frame .ax-peers tbody tr.is-offline {
@@ -1175,20 +1218,20 @@ details.ax-advanced > .ax-advanced-body {
     color: var(--dim);
 }
 .ax-btn-primary {
-    background: rgba(134, 184, 107, 0.08);
-    border-color: #3a5a30;
+    background: var(--ok-t08);
+    border-color: var(--ok-deep);
     color: var(--ok);
 }
 .ax-btn-primary:hover {
-    background: rgba(134, 184, 107, 0.15);
+    background: var(--ok-t15);
 }
 .ax-btn-danger {
-    background: rgba(194, 86, 86, 0.1);
-    border-color: #6a3030;
-    color: #d8a8a8;
+    background: var(--danger-t10);
+    border-color: var(--danger-deep);
+    color: var(--danger-bright);
 }
 .ax-btn-danger:hover {
-    background: rgba(194, 86, 86, 0.18);
+    background: var(--danger-t18);
 }
 
 /* List of intercepts */
@@ -1219,7 +1262,7 @@ details.ax-advanced > .ax-advanced-body {
     user-select: none;
 }
 .ax-intercept-head:hover {
-    background: rgba(212, 200, 166, 0.03);
+    background: var(--hl-soft);
 }
 .ax-intercept.is-expanded .ax-intercept-head {
     border-bottom: 1px dotted var(--panel-2);
@@ -1241,7 +1284,7 @@ a.ax-domain-link {
 }
 a.ax-domain-link:hover {
     text-decoration: underline;
-    color: #a0d28a;
+    color: var(--ok-bright);
 }
 .ax-intercept-meta {
     margin-left: auto;
@@ -1253,7 +1296,7 @@ a.ax-domain-link:hover {
     color: var(--ok);
 }
 .ax-meta-reject {
-    color: #c47070;
+    color: var(--danger-mid);
 }
 
 .ax-intercept .ax-pill {
@@ -1265,18 +1308,18 @@ a.ax-domain-link:hover {
 }
 .ax-pill-active {
     color: var(--ok);
-    border-color: #3a5a30;
-    background: rgba(134, 184, 107, 0.06);
+    border-color: var(--ok-deep);
+    background: var(--ok-t06);
 }
 .ax-pill-pending {
     color: var(--accent);
     border-color: var(--muted);
-    background: rgba(0, 188, 212, 0.06);
+    background: var(--accent-t06);
 }
 .ax-pill-peer {
-    color: #8aa8c8;
-    border-color: #355068;
-    background: rgba(138, 168, 200, 0.06);
+    color: var(--info-bright);
+    border-color: var(--info-dim);
+    background: var(--info-t06);
 }
 /* Fingerprint pill — used in the peers table next to nicknames. Has its
    own padding/border because the base .ax-pill rule is scoped to
@@ -1289,7 +1332,7 @@ a.ax-domain-link:hover {
     border-radius: 2px;
     border: 1px solid var(--border-2);
     color: var(--text-2);
-    background: rgba(136, 128, 112, 0.06);
+    background: var(--hl-warm);
 }
 
 .ax-intercept-body {
@@ -1328,7 +1371,7 @@ a.ax-domain-link:hover {
     word-break: break-all;
 }
 .ax-intercept-table tr.v6 td.ax-resolved {
-    color: #c47070;
+    color: var(--danger-mid);
 }
 .ax-intercept-table td.ax-policy {
     color: var(--muted);
@@ -1336,7 +1379,7 @@ a.ax-domain-link:hover {
     white-space: nowrap;
 }
 .ax-intercept-table tr.v6 td.ax-policy {
-    color: #c47070;
+    color: var(--danger-mid);
 }
 
 .ax-list-remove {
@@ -1499,8 +1542,8 @@ a.ax-domain-link:hover {
         45deg,
         transparent 0,
         transparent 8px,
-        rgba(255, 255, 255, 0.02) 8px,
-        rgba(255, 255, 255, 0.02) 9px
+        var(--hl-white) 8px,
+        var(--hl-white) 9px
     );
     border-radius: 4px;
     overflow: hidden;
@@ -1518,7 +1561,7 @@ a.ax-domain-link:hover {
 }
 
 .m2-tile-self {
-    border-color: #4a7c59;
+    border-color: var(--ok-dim);
 }
 
 /* Mirror only the self camera — matches what people are used to
@@ -1536,7 +1579,7 @@ a.ax-domain-link:hover {
     left: 6px;
     font-size: 11px;
     color: var(--text-2);
-    background: rgba(12, 10, 8, 0.7);
+    background: var(--shadow);
     padding: 1px 6px;
     border-radius: 3px;
 }
@@ -1562,7 +1605,7 @@ a.ax-domain-link:hover {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: #151a1d;
+    background-color: var(--info-bg);
 }
 
 .m2-no-video {
@@ -1576,7 +1619,7 @@ a.ax-domain-link:hover {
     top: 4px;
     right: 4px;
     pointer-events: auto;
-    background: rgba(20, 18, 14, 0.6);
+    background: var(--overlay-60);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -1592,7 +1635,7 @@ a.ax-domain-link:hover {
     opacity: 1;
 }
 .m2-tile-fs:hover {
-    background: rgba(20, 18, 14, 0.9);
+    background: var(--overlay-90);
 }
 
 #tab-meet2 > .ax-frame {
