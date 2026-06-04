@@ -15,7 +15,7 @@ help:
 	@echo "  make dev                  run helper (cross-platform: works inside a linux VM too)"
 	@echo "  make build                build release binary at ./f2f-mac"
 	@echo "  make kill                 kill any running f2f-mac process"
-	@echo "  make camp-run             run camp server locally with bun"
+	@echo "  make camp-run             run camp server locally (go run)"
 	@echo "  make camp-deploy          deploy camp to fly.io"
 	@echo "  make camp-logs            tail fly.io logs for camp"
 dev:
@@ -29,10 +29,13 @@ kill:
 	-sudo pkill -f f2f-mac
 
 camp-run:
-	cd source/camp && bun run src/server.ts
+	cd source/camp && go run .
 
+# Build context must be source/ so the Docker build can see the helper
+# module (camp imports its wire types). The config lives in camp/, and
+# fly resolves `dockerfile` relative to the config dir.
 camp-deploy:
-	cd source/camp && flyctl deploy
+	flyctl deploy source --config camp/fly.toml -a f2f-camp
 
 camp-logs:
 	cd source/camp && flyctl logs

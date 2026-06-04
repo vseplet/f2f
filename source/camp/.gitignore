@@ -1,7 +1,6 @@
-node_modules/
+/camp
 *.log
 .DS_Store
 .env
 .env.local
 .env.*.local
-dist/

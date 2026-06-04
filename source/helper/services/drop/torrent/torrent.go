@@ -8,7 +8,7 @@
 //
 // The client binds on <tunnel_ip>:6881 so other peers in our overlay
 // can reach it through utun. Outgoing connections to peers also use
-// the tunnel automatically since destinations are in 10.99.0.0/24.
+// the tunnel automatically since destinations are in 100.64.0.0/10.
 package torrent
 
 import (
@@ -40,7 +40,7 @@ const (
 // Options configures a Client. All fields except ListenAddr have
 // sensible defaults.
 type Options struct {
-	// ListenAddr is host:port to bind on, e.g. "10.99.0.2:6881". For
+	// ListenAddr is host:port to bind on, e.g. "100.64.0.2:6881". For
 	// f2f this is <tunnel_ip>:6881 — only reachable through utun.
 	ListenAddr string
 	// SharedDir is the catalog where seeded files live. The torrent

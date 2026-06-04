@@ -829,8 +829,8 @@ func (s *Server) statusWithDomains() statusView {
 
 // handleCampPeers serves the engine's view of the camp: peer list with
 // reachability flags and the active selection. Reads from local engine
-// state — no camp HTTP call here (the engine's poller refreshes the
-// cache every ~30s).
+// state — no camp HTTP call here (the announce reply refreshes the
+// cache every ~20s).
 func (s *Server) handleCampPeers(w http.ResponseWriter, r *http.Request) {
 	view := s.statusWithDomains()
 	if !view.CampActive {
@@ -1407,7 +1407,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := engine.Config{
-		LocalIP:   "10.99.0.1", // placeholder; camp overrides with sticky tunnel_ip
+		LocalIP:   "100.64.0.1", // placeholder; engine derives the real overlay-IP from pub on Start
 		Listen:    ":9000",
 		CampID:    req.CampID,
 		CampName:  name,

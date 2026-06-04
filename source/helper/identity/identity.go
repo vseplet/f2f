@@ -163,7 +163,8 @@ func isHex64(s string) bool {
 }
 
 // PubHex returns the 64-char hex of the 32-byte Ed25519 public key.
-// This is the identifier the camp server uses for sticky bindings.
+// This is the peer's identity on the camp server and the seed the
+// overlay-IP derives from (see engine.PubToV4Addr).
 func (i *Identity) PubHex() string {
 	return hex.EncodeToString(i.pub)
 }

@@ -269,7 +269,7 @@ func (e *Engine) StartLastCamp() error {
 		listen = ":0"
 	}
 	cfg := Config{
-		LocalIP:  "10.99.0.1", // placeholder; camp announce overrides
+		LocalIP:  "100.64.0.1", // placeholder; engine derives the real overlay-IP from pub on Start
 		Listen:   listen,
 		CampID:   camp.CampID,
 		CampName: camp.Identity.Name,

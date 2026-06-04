@@ -27,6 +27,11 @@ type AnnounceClient struct {
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
+	// onPeers, if set, is called with the roster carried in each
+	// announce reply. Set once before Run (the announce-delivered peer
+	// list replaces the HTTP poll).
+	onPeers func([]PeerInfo)
+
 	// Liveness counters for the UI's camp-health section. lastSentMs is
 	// stamped right before WriteToUDP; lastReplyMs is stamped when a
 	// recognised reply arrives via HandlePacket. RTT = reply-time minus
@@ -62,6 +67,10 @@ func (a *AnnounceClient) CampAddr() *net.UDPAddr { return a.campAddr }
 // Self returns the latest PeerInfo camp gave us, or nil if we haven't
 // received any reply yet.
 func (a *AnnounceClient) Self() *PeerInfo { return a.self.Load() }
+
+// OnPeers registers the callback invoked with the roster carried in
+// announce replies. Set once before Run.
+func (a *AnnounceClient) OnPeers(fn func([]PeerInfo)) { a.onPeers = fn }
 
 // LastSentMs / LastReplyMs / LastRTTMs report the UDP-side liveness
 // timestamps. Zero means "never". Read concurrently from the UI.
@@ -103,7 +112,7 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 				}
 				return PeerInfo{}, fmt.Errorf("read: %w", err)
 			}
-			info, perr, isAnnounceReply := parseAnnounceReply(buf[:n])
+			info, _, perr, isAnnounceReply := parseAnnounceReply(buf[:n])
 			if !isAnnounceReply {
 				continue // some other UDP noise; keep reading until deadline
 			}
@@ -153,7 +162,7 @@ func (a *AnnounceClient) Run(ctx context.Context, every time.Duration) {
 // announce-protocol message (so the loop should not treat it as tunnel
 // data); false to fall through.
 func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
-	info, perr, isAnnounceReply := parseAnnounceReply(pkt)
+	info, peers, perr, isAnnounceReply := parseAnnounceReply(pkt)
 	if !isAnnounceReply {
 		return false
 	}
@@ -167,26 +176,30 @@ func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
 		a.lastRTTMs.Store(now - sent)
 	}
 	a.self.Store(&info)
+	if len(peers) > 0 && a.onPeers != nil {
+		a.onPeers(peers)
+	}
 	return true
 }
 
-func parseAnnounceReply(pkt []byte) (info PeerInfo, perr error, isAnnounceReply bool) {
+func parseAnnounceReply(pkt []byte) (info PeerInfo, peers []PeerInfo, perr error, isAnnounceReply bool) {
 	var head struct {
 		T string `json:"t"`
 	}
 	if err := json.Unmarshal(pkt, &head); err != nil {
-		return PeerInfo{}, nil, false
+		return PeerInfo{}, nil, nil, false
 	}
 	switch head.T {
 	case "announced":
 		var msg struct {
-			T   string   `json:"t"`
-			You PeerInfo `json:"you"`
+			T     string     `json:"t"`
+			You   PeerInfo   `json:"you"`
+			Peers []PeerInfo `json:"peers"`
 		}
 		if err := json.Unmarshal(pkt, &msg); err != nil {
-			return PeerInfo{}, fmt.Errorf("decode announced: %w", err), true
+			return PeerInfo{}, nil, fmt.Errorf("decode announced: %w", err), true
 		}
-		return msg.You, nil, true
+		return msg.You, msg.Peers, nil, true
 	case "error":
 		var msg struct {
 			T       string `json:"t"`
@@ -194,13 +207,13 @@ func parseAnnounceReply(pkt []byte) (info PeerInfo, perr error, isAnnounceReply 
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(pkt, &msg)
-		return PeerInfo{}, fmt.Errorf("camp: %s: %s", msg.Code, msg.Message), true
+		return PeerInfo{}, nil, fmt.Errorf("camp: %s: %s", msg.Code, msg.Message), true
 	}
-	return PeerInfo{}, nil, false
+	return PeerInfo{}, nil, nil, false
 }
 
 func (a *AnnounceClient) sendAnnounce() error {
-	data, err := json.Marshal(announceReq{
+	data, err := json.Marshal(AnnounceReq{
 		T:      "announce",
 		Name:   a.name,
 		CampID: a.campID,
