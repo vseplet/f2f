@@ -10,7 +10,7 @@
         <link rel="stylesheet" href="/audio.css" />
     </head>
     <body
-        class="min-h-screen"
+        class="h-screen flex flex-col"
         style="
             background: #0c0a08;
             background-image: radial-gradient(
@@ -21,7 +21,7 @@
             background-size: 24px 24px;
         "
     >
-        <div class="h-screen flex">
+        <div class="flex-1 flex min-h-0">
             <aside id="ax-sidebar" class="ax-sidebar">
                 <div class="ax-sidebar-inner">
                     <div class="ax-sidebar-header">
@@ -1105,6 +1105,17 @@
             </aside>
         </div>
         <!-- /.h-screen flex -->
+        <div class="ax-statusbar" id="ax-statusbar">
+            <span class="ax-status-item">
+                <span class="ax-status-dot"></span>
+                <span id="status-engine-text">—</span>
+            </span>
+            <span class="ax-status-item" id="status-camp">—</span>
+            <span class="ax-status-item" id="status-peers">—</span>
+            <span class="ax-status-item" id="status-io">—</span>
+            <span class="ax-status-spacer"></span>
+            <span class="ax-status-item" id="status-fp"></span>
+        </div>
 
         <script src="/app.js"></script>
         <script src="/audio.js"></script>

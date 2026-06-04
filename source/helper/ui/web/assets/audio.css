@@ -1709,6 +1709,48 @@ a.ax-domain-link:hover {
     flex-shrink: 0;
 }
 
+/* ---- IDE-style status bar (bottom, full width) ---- */
+.ax-statusbar {
+    flex-shrink: 0;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 12px;
+    border-top: 1px solid var(--panel-2);
+    background: var(--bg-deep);
+    color: var(--muted);
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
+        Consolas, monospace;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+}
+.ax-status-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.ax-status-item:empty {
+    display: none;
+}
+.ax-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border-2);
+    flex-shrink: 0;
+}
+.ax-statusbar.running .ax-status-dot {
+    background: var(--ok);
+}
+.ax-statusbar.running #status-engine-text {
+    color: var(--ok);
+}
+.ax-status-spacer {
+    flex: 1;
+}
+
 /* ---- Chat (messages) — Slack-style, fills the panel ---- */
 #tab-chat {
     overflow: hidden;

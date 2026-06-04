@@ -614,6 +614,7 @@ $(function () {
     renderCampHealth(s);
     renderDiagnostics(s);
     renderSidebarTree(s);
+    updateStatusBar(s);
   }
 
   // Sidebar tree. Rebuilt from /api/status every tick — cheap because
@@ -665,6 +666,21 @@ $(function () {
   }
 
   function empty(text) { return `<div class="ax-tree-empty">${esc(text)}</div>`; }
+
+  // Bottom IDE-style status bar — engine state, camp, peer counts, I/O.
+  function updateStatusBar(s) {
+    const running = !!(s && s.running);
+    $('#ax-statusbar').toggleClass('running', running);
+    $('#status-engine-text').text(running ? 'running · ' + (s.utun_name || 'utun') : 'stopped');
+    const label = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
+    $('#status-camp').text(running && label ? 'camp ' + label : '—');
+    const peers = (s && s.peers) || [];
+    const known = peers.filter(p => p && !p.self).length;
+    const online = peers.filter(p => p && !p.self && p.in_camp).length;
+    $('#status-peers').text(online + '/' + known + ' peers');
+    $('#status-io').text('↑ ' + fmtBytes((s && s.tx_bytes) || 0) + '  ↓ ' + fmtBytes((s && s.rx_bytes) || 0));
+    $('#status-fp').text((s && s.identity_fp) ? 'fp ' + s.identity_fp : '');
+  }
 
   function renderSidebarTree(s) {
     const $tree = $('#ax-tree');
