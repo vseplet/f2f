@@ -675,8 +675,8 @@ $(function () {
     const label = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
     $('#status-camp').text(running && label ? 'camp ' + label : '—');
     const peers = (s && s.peers) || [];
-    const known = peers.filter(p => p && !p.self).length;
-    const online = peers.filter(p => p && !p.self && p.in_camp).length;
+    const known = peers.length; // includes self, matching the sidebar count
+    const online = peers.filter(p => p && (p.self || p.in_camp)).length;
     $('#status-peers').text(online + '/' + known + ' peers');
     $('#status-io').text('↑ ' + fmtBytes((s && s.tx_bytes) || 0) + '  ↓ ' + fmtBytes((s && s.rx_bytes) || 0));
     $('#status-fp').text((s && s.identity_fp) ? 'fp ' + s.identity_fp : '');

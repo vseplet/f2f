@@ -160,6 +160,9 @@ func run(bind string, console bool) error {
 		},
 	}
 
+	// portal banner is printed once per camp, not on every (re)start —
+	// the wake-from-sleep detector can restart the engine repeatedly.
+	var lastPortalCamp string
 	eng.OnStarted = func(localIP string) {
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
@@ -178,8 +181,9 @@ func run(bind string, console bool) error {
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
-		if st.CampID != "" {
+		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
+			lastPortalCamp = st.CampID
 		}
 	}
 	eng.OnStopped = func() {

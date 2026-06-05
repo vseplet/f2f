@@ -1712,7 +1712,7 @@ a.ax-domain-link:hover {
 /* ---- IDE-style status bar (bottom, full width) ---- */
 .ax-statusbar {
     flex-shrink: 0;
-    height: 22px;
+    height: 32px;
     display: flex;
     align-items: center;
     gap: 16px;
