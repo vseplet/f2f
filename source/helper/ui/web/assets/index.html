@@ -111,16 +111,6 @@
                             diagnostics
                         </button>
                     </div>
-                    <button
-                        id="btn-engine"
-                        type="button"
-                        class="ax-engine-btn state-loading"
-                        title="loading…"
-                    >
-                        <span class="ax-engine-state">⋯</span>
-                        <span class="ax-engine-label">loading…</span>
-                        <span class="ax-engine-meta" id="ax-engine-meta"></span>
-                    </button>
                 </div>
             </div>
 
@@ -1185,10 +1175,16 @@
         </div>
         <!-- /.h-screen flex -->
         <div class="ax-statusbar" id="ax-statusbar">
-            <span class="ax-status-item">
-                <span class="ax-status-dot"></span>
-                <span id="status-engine-text">—</span>
-            </span>
+            <button
+                id="btn-engine"
+                type="button"
+                class="ax-engine-btn ax-engine-btn-sm state-loading"
+                title="loading…"
+            >
+                <span class="ax-engine-state">⋯</span>
+                <span class="ax-engine-label">loading…</span>
+                <span class="ax-engine-meta" id="ax-engine-meta"></span>
+            </button>
             <span class="ax-status-item" id="status-camp">—</span>
             <span class="ax-status-item" id="status-peers">—</span>
             <span class="ax-status-item" id="status-io">—</span>

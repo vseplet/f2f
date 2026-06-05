@@ -25,7 +25,6 @@ $(function () {
   let localStream = null;
   let isOfferer = false;
   let currentPeerPub = '';     // who we're signalling with
-  let pendingCandidates = [];  // ICE that arrived before remoteDescription
 
   // screen share + volume
   let screenStream = null;
@@ -97,6 +96,24 @@ $(function () {
     return localStream;
   }
 
+  // Wait until ICE gathering finishes so the local SDP carries every host
+  // candidate; we then send that full SDP instead of trickling candidates.
+  // Capped so a stuck gatherer can't hang the handshake forever.
+  function waitIceComplete(conn, ms = 2000) {
+    if (conn.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true;
+        conn.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      };
+      const check = () => { if (conn.iceGatheringState === 'complete') finish(); };
+      conn.addEventListener('icegatheringstatechange', check);
+      setTimeout(finish, ms);
+    });
+  }
+
   // ---- peer connection ----
   function newPC() {
     const conn = new RTCPeerConnection({ iceServers: [] }); // host candidates only
@@ -114,15 +131,17 @@ $(function () {
         stream.getVideoTracks().forEach(t => t.addEventListener('ended', clearRemoteScreen));
       }
     };
-    conn.onicecandidate = (e) => {
-      if (e.candidate) sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
-    };
+    // Non-trickle: candidates are embedded in the SDP we send after gathering
+    // completes (see waitIceComplete), so we don't trickle them separately —
+    // that avoids lost/out-of-order candidate messages over the SSE relay.
+    conn.onicecandidate = () => {};
     conn.onnegotiationneeded = async () => {
       if (!isOfferer || conn.signalingState !== 'stable') return;
       try {
         const offer = await conn.createOffer();
         await conn.setLocalDescription(offer);
-        sendSignal({ kind: 'offer', sdp: offer.sdp });
+        await waitIceComplete(conn);
+        sendSignal({ kind: 'offer', sdp: conn.localDescription.sdp });
       } catch (_) {}
     };
     conn.oniceconnectionstatechange = () => {
@@ -133,11 +152,6 @@ $(function () {
     return conn;
   }
 
-  async function flushCandidates() {
-    for (const c of pendingCandidates) { try { await pc.addIceCandidate(c); } catch (_) {} }
-    pendingCandidates = [];
-  }
-
   // Caller side: build the offer to currentPeerPub.
   async function offerTo() {
     await ensureLocalStream();
@@ -146,7 +160,8 @@ $(function () {
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
-    sendSignal({ kind: 'offer', sdp: offer.sdp, fresh: true }); // fresh = new session (vs renegotiation)
+    await waitIceComplete(pc);
+    sendSignal({ kind: 'offer', sdp: pc.localDescription.sdp, fresh: true }); // fresh = new session
   }
 
   async function handleSignal(msg) {
@@ -159,7 +174,8 @@ $(function () {
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
           const ans = await pc.createAnswer();
           await pc.setLocalDescription(ans);
-          sendSignal({ kind: 'answer', sdp: ans.sdp });
+          await waitIceComplete(pc);
+          sendSignal({ kind: 'answer', sdp: pc.localDescription.sdp });
         } catch (_) {}
         return;
       }
@@ -167,7 +183,7 @@ $(function () {
       // Drop any stale connection and answer cleanly.
       if (pc) {
         try { pc.close(); } catch (_) {}
-        pc = null; peerCamStreamId = ''; pendingCandidates = [];
+        pc = null; peerCamStreamId = '';
         videoPeer.srcObject = null; tilePeer.classList.remove('has-video');
         clearRemoteScreen();
       }
@@ -179,17 +195,17 @@ $(function () {
       isOfferer = false;
       if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
       await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-      await flushCandidates();
       const ans = await pc.createAnswer();
       await pc.setLocalDescription(ans);
-      sendSignal({ kind: 'answer', sdp: ans.sdp });
+      await waitIceComplete(pc);
+      sendSignal({ kind: 'answer', sdp: pc.localDescription.sdp });
     } else if (msg.kind === 'answer') {
       if (!pc) return;
       await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-      await flushCandidates();
     } else if (msg.kind === 'candidate') {
-      if (!pc || !pc.remoteDescription) { pendingCandidates.push(msg.candidate); return; }
-      try { await pc.addIceCandidate(msg.candidate); } catch (_) {}
+      // We're non-trickle (candidates ride in the SDP); only honour a stray
+      // trickled candidate if the connection is already up enough to take it.
+      if (pc && pc.remoteDescription) { try { await pc.addIceCandidate(msg.candidate); } catch (_) {} }
     } else if (msg.kind === 'hangup') {
       Call.endLocal(); // peer left → close window + indicator on our side too
     }
@@ -201,7 +217,6 @@ $(function () {
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     isOfferer = false;
-    pendingCandidates = [];
     currentPeerPub = '';
     peerCamStreamId = '';
     micEnabled = false;

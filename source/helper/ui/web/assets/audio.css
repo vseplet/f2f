@@ -2012,6 +2012,55 @@ a.ax-domain-link:hover {
 .ax-status-spacer {
     flex: 1;
 }
+/* Engine start/stop toggle lives in the status bar (bottom-left), compact.
+   The .ax-frame .ax-engine-btn rules don't reach here, so restate them small. */
+.ax-statusbar .ax-engine-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 20px;
+    padding: 0 8px;
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+}
+.ax-statusbar .ax-engine-btn:hover {
+    background: var(--panel);
+}
+.ax-statusbar .ax-engine-btn .ax-engine-state {
+    font-size: 10px;
+}
+.ax-statusbar .ax-engine-btn .ax-engine-meta:empty {
+    display: none;
+}
+.ax-statusbar .ax-engine-btn .ax-engine-meta {
+    opacity: 0.75;
+}
+.ax-statusbar .ax-engine-btn.state-running {
+    color: var(--ok);
+    border-color: var(--ok-deep);
+    background: color-mix(in srgb, var(--ok) 6%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-running:hover {
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-loading {
+    font-style: italic;
+    cursor: wait;
+}
+.ax-statusbar .ax-engine-btn.state-error {
+    color: var(--danger);
+    border-color: var(--danger-deep);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-error:hover {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
 
 /* ---- Chat (messages) — Slack-style, fills the panel ---- */
 #tab-chat {

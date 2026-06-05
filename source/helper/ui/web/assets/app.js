@@ -681,7 +681,6 @@ $(function () {
   function updateStatusBar(s) {
     const running = !!(s && s.running);
     $('#ax-statusbar').toggleClass('running', running);
-    $('#status-engine-text').text(running ? 'running · ' + (s.utun_name || 'utun') : 'stopped');
     const label = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
     $('#status-camp').text(running && label ? 'camp ' + label : '—');
     const peers = (s && s.peers) || [];
