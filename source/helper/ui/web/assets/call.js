@@ -73,10 +73,17 @@ $(function () {
     if (localStream) return localStream;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return null;
     const gum = async (c) => { try { return await navigator.mediaDevices.getUserMedia(c); } catch (_) { return null; } };
-    localStream =
+    const acquire = async () =>
       (await gum({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: { width: { ideal: 640 }, height: { ideal: 480 } } })) ||
       (await gum({ audio: true })) ||
       (await gum({ video: true }));
+    // After a reload the previous page may still hold the camera/mic for a
+    // moment (NotReadableError). Retry a few times before giving up — a
+    // media-less offer would make our streams vanish on the peer's side.
+    for (let i = 0; i < 5 && !localStream; i++) {
+      localStream = await acquire();
+      if (!localStream) await new Promise(r => setTimeout(r, 300));
+    }
     if (localStream) {
       videoSelf.srcObject = localStream;
       micEnabled = localStream.getAudioTracks().length > 0;
@@ -84,6 +91,8 @@ $(function () {
       if (camEnabled) tileSelf.classList.add('has-video');
       videoSelf.play().catch(() => {});
       updateMediaButtons();
+    } else {
+      console.warn('[f2f call] no local media (mic/cam busy or denied) — peer will not see/hear us');
     }
     return localStream;
   }
@@ -249,14 +258,11 @@ $(function () {
       }
     },
 
-    // hang up and notify the peer. Target is the active dm peer, or — if we
-    // reloaded into a frozen call where state was lost — the pub in the hash.
+    // hang up and notify the peer. Target is the active dm peer's pub (the
+    // route id is a nickname now, so we must use active.pub, not active.id).
     hangup(silent) {
-      let pub = (this.active && this.active.kind === 'dm') ? this.active.id : '';
-      if (!pub) {
-        const m = (location.hash || '').match(/^#call:dm:([0-9a-f]{64})/);
-        if (m) pub = m[1];
-      }
+      let pub = (this.active && this.active.kind === 'dm') ? (this.active.pub || '') : '';
+      if (!pub) pub = currentPeerPub; // fallback to the live signalling target
       if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
       this.endLocal(silent);
     },
@@ -315,42 +321,56 @@ $(function () {
       $btnCam.classList.toggle('active', camEnabled);
       $btnCam.querySelector('.ax-btn-state').textContent = camEnabled ? '■' : '□';
     }
-    // keep the compact callbar mic glyph in sync
+    // keep the compact callbar icons in sync
     $('#ax-callbar-mute i').attr('class', 'bi ' + (micEnabled ? 'bi-mic-fill' : 'bi-mic-mute-fill'));
+    $('#ax-callbar-cam i').attr('class', 'bi ' + (camEnabled ? 'bi-camera-video-fill' : 'bi-camera-video-off-fill'));
   }
 
-  // --- callbar (compact, above the tabs) ---
-  $('#ax-callbar-open').on('click', function () {
-    if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + encodeURIComponent(Call.active.id);
-  });
-  $('#ax-callbar-mute').on('click', function (e) {
-    e.stopPropagation();
+  // --- shared control actions (used by the call window AND the top bar) ---
+  function actMic() {
     if (!localStream) return;
     micEnabled = !micEnabled;
     localStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
     updateMediaButtons();
-  });
-  $('#ax-callbar-hangup').on('click', function (e) { e.stopPropagation(); Call.hangup(); });
-
-  // --- mic / cam ---
-  $(document).on('click', '#call-mic', function () {
-    if (!localStream) return;
-    micEnabled = !micEnabled;
-    localStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
-    updateMediaButtons();
-  });
-  $(document).on('click', '#call-cam', function () {
+  }
+  function actCam() {
     if (!localStream) return;
     camEnabled = !camEnabled;
     localStream.getVideoTracks().forEach(t => { t.enabled = camEnabled; });
     tileSelf.classList.toggle('has-video', camEnabled);
     updateMediaButtons();
-  });
+  }
+  function actShare() { if (screenStream) stopScreenShare(); else startScreenShare(); }
+  function actChat() {
+    const a = Call.active;
+    if (!a) return;
+    location.hash = (a.kind === 'group' ? 'chat:channel:' : 'chat:dm:') + encodeURIComponent(a.id);
+  }
+  function openCall() {
+    if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + encodeURIComponent(Call.active.id);
+  }
+  function setShareState(active) {
+    if ($btnShare) {
+      $btnShare.classList.toggle('active', active);
+      $btnShare.querySelector('.ax-btn-state').textContent = active ? '■' : '▢';
+    }
+    $('#ax-callbar-share').toggleClass('active', active);
+  }
 
-  // --- screen share ---
-  $(document).on('click', '#call-share', function () {
-    if (screenStream) stopScreenShare(); else startScreenShare();
-  });
+  // call-window controls
+  $('#call-mic').on('click', actMic);
+  $('#call-cam').on('click', actCam);
+  $('#call-share').on('click', actShare);
+
+  // top bar: clicking the background opens the call window; the buttons mirror
+  // the window controls and must stop propagation so they don't also open it.
+  $('#ax-callbar').on('click', openCall);
+  const stopAnd = (fn) => function (e) { e.stopPropagation(); fn(); };
+  $('#ax-callbar-mute').on('click', stopAnd(actMic));
+  $('#ax-callbar-cam').on('click', stopAnd(actCam));
+  $('#ax-callbar-share').on('click', stopAnd(actShare));
+  $('#ax-callbar-chat').on('click', stopAnd(actChat));
+  $('#ax-callbar-hangup').on('click', stopAnd(() => Call.hangup()));
   async function startScreenShare() {
     if (!pc || screenStream) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return;
@@ -364,7 +384,7 @@ $(function () {
       t.addEventListener('ended', () => stopScreenShare());
     });
     showSelfScreen(stream);
-    setBtnState($btnShare, '■', true);
+    setShareState(true);
   }
   function stopScreenShare(silent) {
     if (!screenStream) return;
@@ -375,7 +395,7 @@ $(function () {
     screenSenders = [];
     const t = document.getElementById('call-tile-screen-self');
     if (t) t.remove();
-    if (!silent) setBtnState($btnShare, '▢', false);
+    if (!silent) setShareState(false);
   }
 
   // --- screen tiles (local preview + remote) ---
@@ -437,6 +457,13 @@ $(function () {
   }
   setVolume(80);
 
+  // --- chat: jump to the DM/channel this call belongs to (call keeps running) ---
+  $(document).on('click', '#call-chat', function () {
+    const a = Call.active;
+    if (!a) return;
+    location.hash = (a.kind === 'group' ? 'chat:channel:' : 'chat:dm:') + encodeURIComponent(a.id);
+  });
+
   // --- hang up ---
   $(document).on('click', '#call-hangup', function () { Call.hangup(); });
 
@@ -489,6 +516,12 @@ $(function () {
   });
 
   startSignaling();
+
+  // Release the camera/mic the instant this page unloads (reload/close) so the
+  // freshly-loaded page can re-acquire them without hitting a busy device.
+  window.addEventListener('pagehide', function () {
+    if (localStream) { try { localStream.getTracks().forEach(t => t.stop()); } catch (_) {} }
+  });
 
   // ---- auto-rejoin after a tab reload ----
   // If we reloaded mid-call, re-offer to the saved peer with a fresh offer; the

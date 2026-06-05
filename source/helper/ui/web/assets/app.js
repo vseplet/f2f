@@ -298,8 +298,18 @@ $(function () {
   // (the sidebar is regenerated from status each tick).
   function highlightActiveRoute() {
     const route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // An ongoing call stays flagged in the sidebar even when we navigate
+    // away to a chat. Mark both its meet row and the peer's DM row.
+    const a = window.f2fCall && window.f2fCall.active;
+    const callRoutes = [];
+    if (a) {
+      callRoutes.push('call:' + a.kind + ':' + a.id);
+      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + a.id : 'chat:channel:' + a.id);
+    }
     $('#ax-tree .ax-tree-row').each(function () {
-      $(this).toggleClass('active', !!route && $(this).attr('data-route') === route);
+      const r = $(this).attr('data-route');
+      $(this).toggleClass('active', !!route && r === route);
+      $(this).toggleClass('in-call', !!r && callRoutes.indexOf(r) !== -1);
     });
   }
   window.addEventListener('hashchange', function () {

@@ -394,6 +394,29 @@
 .ax-tree-row.active .ax-tree-label {
     color: var(--accent);
 }
+/* An active call keeps its row flagged (green) regardless of where we've
+   navigated. A trailing pulsing pip makes it obvious at a glance. */
+.ax-tree-row.in-call {
+    border-left-color: var(--ok);
+}
+.ax-tree-row.in-call .ax-tree-label {
+    color: var(--ok);
+}
+.ax-tree-row.in-call::after {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+    margin-left: auto;
+    animation: ax-incall-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ax-incall-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
 .ax-tree-row:hover {
     color: var(--text);
 }
@@ -1729,6 +1752,10 @@ a.ax-domain-link:hover {
     background: color-mix(in srgb, var(--ok) 12%, var(--frame));
     color: var(--text);
     font-size: 12px;
+    cursor: pointer; /* whole bar opens the call window */
+}
+.ax-callbar:hover {
+    background: color-mix(in srgb, var(--ok) 18%, var(--frame));
 }
 .ax-callbar-main {
     display: inline-flex;
@@ -1772,6 +1799,11 @@ a.ax-domain-link:hover {
 .ax-callbar-btn:hover {
     border-color: var(--accent);
     color: var(--accent);
+}
+.ax-callbar-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .ax-callbar-hangup {
     color: var(--danger);
