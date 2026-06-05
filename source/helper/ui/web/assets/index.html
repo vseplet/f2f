@@ -49,6 +49,21 @@
                 <div class="ax-sidebar-resize" id="ax-sidebar-resize" title="drag to resize"></div>
             </aside>
             <div class="ax-main-col flex flex-col flex-1 min-w-0">
+            <div class="ax-callbar" id="ax-callbar" style="display: none">
+                <span class="ax-callbar-main" id="ax-callbar-open">
+                    <i class="bi bi-telephone-fill" id="ax-callbar-icon"></i>
+                    <span class="ax-callbar-title" id="ax-callbar-title">—</span>
+                    <span class="ax-callbar-time" id="ax-callbar-time">00:00</span>
+                </span>
+                <span class="ax-callbar-ctrls">
+                    <button type="button" class="ax-callbar-btn" id="ax-callbar-mute" title="mute">
+                        <i class="bi bi-mic-fill"></i>
+                    </button>
+                    <button type="button" class="ax-callbar-btn ax-callbar-hangup" id="ax-callbar-hangup" title="hang up">
+                        <i class="bi bi-telephone-x-fill"></i>
+                    </button>
+                </span>
+            </div>
             <div class="ax-frame ax-tabbar">
                 <div class="ax-header">
                     <div class="ax-tabs">
@@ -1079,6 +1094,32 @@
                 </div>
             </div>
             <!-- /#tab-chat -->
+            <div id="tab-call" class="tab-panel hidden">
+                <div class="ax-frame ax-call">
+                    <div class="ax-section-title ax-call-header">
+                        <span id="call-title">— call</span>
+                    </div>
+                    <div class="ax-call-stage" id="call-stage">
+                        <div class="ax-call-tile" id="call-tile-peer">
+                            <video id="call-video-peer" autoplay playsinline></video>
+                            <div class="ax-call-avatar"><i class="bi bi-person-fill"></i></div>
+                            <div class="ax-call-name" id="call-peer-name">peer</div>
+                        </div>
+                        <div class="ax-call-tile ax-call-tile-self" id="call-tile-self">
+                            <video id="call-video-self" autoplay playsinline muted></video>
+                            <div class="ax-call-avatar"><i class="bi bi-person-fill"></i></div>
+                            <div class="ax-call-name">you</div>
+                        </div>
+                    </div>
+                    <div class="ax-call-controls">
+                        <button type="button" class="ax-call-ctrl" title="mute"><i class="bi bi-mic-fill"></i></button>
+                        <button type="button" class="ax-call-ctrl" title="camera"><i class="bi bi-camera-video-fill"></i></button>
+                        <button type="button" class="ax-call-ctrl" title="screen share"><i class="bi bi-display-fill"></i></button>
+                        <button type="button" class="ax-call-ctrl ax-call-hangup" id="call-hangup" title="hang up"><i class="bi bi-telephone-x-fill"></i></button>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-call -->
             </div>
             <!-- /.ax-main-col -->
             <aside id="ax-notifications" class="ax-sidebar ax-sidebar-right">
@@ -1118,7 +1159,7 @@
         </div>
 
         <script src="/app.js"></script>
-        <script src="/audio.js"></script>
         <script src="/meet2.js"></script>
+        <script src="/call.js"></script>
     </body>
 </html>

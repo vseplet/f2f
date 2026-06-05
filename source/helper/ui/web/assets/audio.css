@@ -1709,6 +1709,191 @@ a.ax-domain-link:hover {
     flex-shrink: 0;
 }
 
+/* ---- Active-call indicator bar (above the tabs, = tabbar height) ---- */
+.ax-callbar {
+    flex-shrink: 0;
+    height: 52px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--panel-2);
+    background: color-mix(in srgb, var(--ok) 12%, var(--frame));
+    color: var(--text);
+    font-size: 12px;
+}
+.ax-callbar-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    cursor: pointer;
+}
+.ax-callbar-main .bi {
+    color: var(--ok);
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.ax-callbar-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-callbar-time {
+    color: var(--muted);
+    flex-shrink: 0;
+}
+.ax-callbar-ctrls {
+    display: inline-flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.ax-callbar-btn {
+    width: 30px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 13px;
+}
+.ax-callbar-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.ax-callbar-hangup {
+    color: var(--danger);
+}
+.ax-callbar-hangup:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* ---- Call window ---- */
+#tab-call {
+    overflow: hidden;
+}
+#tab-call:not(.hidden) {
+    display: flex;
+    flex-direction: column;
+}
+.ax-call {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    box-sizing: border-box;
+}
+.ax-call-header {
+    flex-shrink: 0;
+    margin-bottom: 8px;
+}
+.ax-call-stage {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    align-content: center;
+    overflow: auto;
+}
+.ax-call-tile {
+    aspect-ratio: 16 / 10;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    position: relative;
+    overflow: hidden;
+}
+.ax-call-tile video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: var(--bg-deep);
+    display: none;
+}
+.ax-call-tile.has-video video {
+    display: block;
+}
+.ax-call-tile.has-video .ax-call-avatar {
+    display: none;
+}
+.ax-call-tile-self video {
+    transform: scaleX(-1); /* mirror own camera */
+}
+.ax-call-tile .ax-call-name {
+    position: absolute;
+    left: 8px;
+    bottom: 6px;
+    z-index: 1;
+    background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
+    padding: 1px 6px;
+}
+.ax-call-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 26px;
+}
+.ax-call-name {
+    color: var(--text-2);
+    font-size: 12px;
+}
+.ax-call-controls {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding-top: 12px;
+    margin-top: 8px;
+    border-top: 1px dotted var(--border);
+}
+.ax-call-ctrl {
+    width: 40px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 15px;
+}
+.ax-call-ctrl:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ax-call-hangup {
+    color: var(--danger);
+}
+.ax-call-hangup:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
 /* ---- IDE-style status bar (bottom, full width) ---- */
 .ax-statusbar {
     flex-shrink: 0;

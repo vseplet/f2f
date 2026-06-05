@@ -290,7 +290,7 @@ $(function () {
     $('.tab-panel').addClass('hidden');
     $('#tab-chat').removeClass('hidden');
     $('#chat-title').text(kind === 'channel' ? '# ' + id : id);
-    $('#chat-call').toggle(kind === 'dm'); // call only makes sense 1:1
+    $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
     renderChat();
   }
   // highlightActiveRoute marks the sidebar row matching the current hash
@@ -763,28 +763,19 @@ $(function () {
       const p = peers.find(p => p.overlay_v4 === ip);
       return p ? (p.name || p.pub.slice(0, 12)) + (p.self ? ' (you)' : '') : ip;
     }
-    let callsBody = '';
-    if (!calls.length) {
-      callsBody = empty('no active calls');
-    } else {
-      for (const c of calls) {
-        const owner = peerNameByIP(c.sfu_host);
-        const parts = c.participants || [];
-        const key = 'call:' + (c.sfu_host || c.call_id);
-        const collapsed = collapsedCats.has(key) ? ' collapsed' : '';
-        const partsBody = parts.length
-          ? parts.map(p => row('online', p.name || p.tunnel_ip, p.tunnel_ip)).join('')
-          : empty('no participants');
-        callsBody += (
-          `<div class="ax-tree-category${collapsed}" data-cat="${esc(key)}">`
-            + `<span class="ax-tree-caret">▾</span>`
-            + `<span class="ax-tree-dot on"></span>`
-            + `<span class="ax-tree-label">${esc(owner)}</span>`
-            + `<span class="ax-tree-badge">${parts.length}</span>`
-          + `</div>`
-          + `<div class="ax-tree-children" data-cat-children="${esc(key)}">${partsBody}</div>`
-        );
-      }
+    // MEET — joinable/active calls: live group calls (from status) plus
+    // our current p2p call (from the CallManager). Routable + highlightable
+    // like chats, so the active call is marked and opens the call window.
+    let meetRows = '';
+    for (const c of calls) {
+      const owner = peerNameByIP(c.sfu_host) || 'group';
+      const id = c.call_id || c.sfu_host || owner;
+      const n = (c.participants || []).length;
+      meetRows += row('online', owner, n + ' in · group', null, 'call:group:' + id);
+    }
+    const activeCall = (window.f2fCall && window.f2fCall.active) || null;
+    if (activeCall && activeCall.kind === 'dm') {
+      meetRows += row('online', activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
     }
 
     // chats — visual mock until the chat service ships. Direct = 1-1
@@ -847,7 +838,7 @@ $(function () {
     function section(label) {
       return `<div class="ax-tree-section">${esc(label)}</div>`;
     }
-    const meetsBody = calls.length ? callsBody : '';
+    const meetsBody = meetRows || empty('no calls');
     const messagingBody =
       section('meets')    + meetsBody
       + section('channels') + groupsBody
