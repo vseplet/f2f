@@ -31,6 +31,7 @@ $(function () {
   let screenStream = null;
   let screenSenders = [];
   let peerCamStreamId = '';    // id of the peer's camera/mic stream (vs screen)
+  let peerScreenStreamId = ''; // id of the peer's screen stream (from its signal)
   let volume = 80;
 
   // local media toggles
@@ -121,15 +122,23 @@ $(function () {
     conn.ontrack = (e) => {
       const stream = e.streams[0];
       if (!stream) return;
+      // Screen is identified by the peer's screen-on signal (sid). Until that
+      // arrives, fall back to "first stream = camera" — and the signal handler
+      // re-routes if a camera-less peer's screen was mistaken for the camera.
+      const isScreen = peerScreenStreamId
+        ? stream.id === peerScreenStreamId
+        : (peerCamStreamId && stream.id !== peerCamStreamId);
+      if (isScreen) {
+        showRemoteScreen(stream);          // peer started screen share
+        stream.getVideoTracks().forEach(t => t.addEventListener('ended', clearRemoteScreen));
+        return;
+      }
       if (!peerCamStreamId) peerCamStreamId = stream.id;
       if (stream.id === peerCamStreamId) {
         videoPeer.srcObject = stream;
         if (e.track.kind === 'video') { tilePeer.classList.add('has-video'); reflowStage(); }
         videoPeer.volume = volume / 100;
         videoPeer.play().catch(() => {});
-      } else {
-        showRemoteScreen(stream);          // peer started screen share
-        stream.getVideoTracks().forEach(t => t.addEventListener('ended', clearRemoteScreen));
       }
     };
     // Non-trickle: candidates are embedded in the SDP we send after gathering
@@ -213,7 +222,7 @@ $(function () {
       // Drop any stale connection and answer cleanly.
       if (pc) {
         try { pc.close(); } catch (_) {}
-        pc = null; peerCamStreamId = '';
+        pc = null; peerCamStreamId = ''; peerScreenStreamId = '';
         videoPeer.srcObject = null; tilePeer.classList.remove('has-video');
         clearRemoteScreen();
       }
@@ -236,6 +245,23 @@ $(function () {
       // We're non-trickle (candidates ride in the SDP); only honour a stray
       // trickled candidate if the connection is already up enough to take it.
       if (pc && pc.remoteDescription) { try { await pc.addIceCandidate(msg.candidate); } catch (_) {} }
+    } else if (msg.kind === 'screen') {
+      if (msg.on) {
+        peerScreenStreamId = msg.sid || '';
+        // If the screen arrived before this signal and was mistaken for the
+        // camera (peer has no camera), move it from the camera tile to screen.
+        if (peerScreenStreamId && peerCamStreamId === peerScreenStreamId) {
+          const s = videoPeer.srcObject;
+          peerCamStreamId = '';
+          videoPeer.srcObject = null;
+          tilePeer.classList.remove('has-video');
+          reflowStage();
+          if (s) showRemoteScreen(s);
+        }
+      } else {
+        clearRemoteScreen();          // peer stopped sharing → drop the tile
+        peerScreenStreamId = '';
+      }
     } else if (msg.kind === 'hangup') {
       Call.endLocal(); // peer left → close window + indicator on our side too
     }
@@ -249,6 +275,7 @@ $(function () {
     isOfferer = false;
     currentPeerPub = '';
     peerCamStreamId = '';
+    peerScreenStreamId = '';
     micEnabled = false;
     camEnabled = false;
     videoPeer.srcObject = null;
@@ -430,6 +457,9 @@ $(function () {
     });
     showSelfScreen(stream);
     setShareState(true);
+    // Tell the peer which stream id is the screen, so it routes to the screen
+    // tile even when we have no camera (otherwise it looks like our camera).
+    try { sendSignal({ kind: 'screen', on: true, sid: stream.id }); } catch (_) {}
   }
   function stopScreenShare(silent) {
     if (!screenStream) return;
@@ -440,7 +470,12 @@ $(function () {
     screenSenders = [];
     const t = document.getElementById('call-tile-screen-self');
     if (t) { t.remove(); reflowStage(); }
-    if (!silent) setShareState(false);
+    if (!silent) {
+      setShareState(false);
+      // Tell the peer to drop our screen tile — a removed remote track doesn't
+      // reliably fire 'ended', so the explicit signal avoids a frozen tile.
+      try { sendSignal({ kind: 'screen', on: false }); } catch (_) {}
+    }
   }
 
   // --- screen tiles (local preview + remote) ---
