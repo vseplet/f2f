@@ -23,7 +23,8 @@ $(function () {
   // ---- WebRTC session state ----
   let pc = null;
   let localStream = null;
-  let isOfferer = false;
+  let isOfferer = false;       // also = the "impolite" peer for glare handling
+  let makingOffer = false;     // perfect-negotiation: a local offer is in flight
   let currentPeerPub = '';     // who we're signalling with
 
   // screen share + volume
@@ -123,7 +124,7 @@ $(function () {
       if (!peerCamStreamId) peerCamStreamId = stream.id;
       if (stream.id === peerCamStreamId) {
         videoPeer.srcObject = stream;
-        if (e.track.kind === 'video') tilePeer.classList.add('has-video');
+        if (e.track.kind === 'video') { tilePeer.classList.add('has-video'); reflowStage(); }
         videoPeer.volume = volume / 100;
         videoPeer.play().catch(() => {});
       } else {
@@ -134,22 +135,47 @@ $(function () {
     // Non-trickle: candidates are embedded in the SDP we send after gathering
     // completes (see waitIceComplete), so we don't trickle them separately —
     // that avoids lost/out-of-order candidate messages over the SSE relay.
-    conn.onicecandidate = () => {};
+    // We still log them so we can see whether an overlay (100.64.x) host
+    // candidate is actually gathered — if not, media can't flow over the tunnel.
+    conn.onicecandidate = (e) => {
+      if (e.candidate) console.log('[f2f call] cand', e.candidate.candidate);
+      else console.log('[f2f call] gathering complete');
+    };
+    // Either side may renegotiate (e.g. answerer starts a screen share). The
+    // stable guard prevents firing during the initial offer; collisions are
+    // resolved on the receiving side via perfect-negotiation politeness.
     conn.onnegotiationneeded = async () => {
-      if (!isOfferer || conn.signalingState !== 'stable') return;
+      if (conn.signalingState !== 'stable') return;
       try {
+        makingOffer = true;
         const offer = await conn.createOffer();
         await conn.setLocalDescription(offer);
         await waitIceComplete(conn);
         sendSignal({ kind: 'offer', sdp: conn.localDescription.sdp });
-      } catch (_) {}
+      } catch (_) {} finally { makingOffer = false; }
     };
     conn.oniceconnectionstatechange = () => {
       const st = conn.iceConnectionState;
-      if (st === 'failed' || st === 'disconnected') Call.setState('weak');
+      console.log('[f2f call] ice', st);
+      if (st === 'failed') { Call.setState('weak'); restartIce(); }
+      else if (st === 'disconnected') Call.setState('weak');
       else if (st === 'connected' || st === 'completed') Call.setState('active');
     };
     return conn;
+  }
+
+  // ICE restart: on a failed connection the offerer re-offers with fresh ICE
+  // (renegotiation on the same pc, so the peer just answers — no reset).
+  let iceRestarting = false;
+  async function restartIce() {
+    if (!pc || !isOfferer || iceRestarting) return;
+    iceRestarting = true;
+    try {
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      await waitIceComplete(pc);
+      sendSignal({ kind: 'offer', sdp: pc.localDescription.sdp });
+    } catch (_) {} finally { iceRestarting = false; }
   }
 
   // Caller side: build the offer to currentPeerPub.
@@ -169,7 +195,11 @@ $(function () {
     if (msg.kind === 'offer') {
       const renegotiation = pc && pc.signalingState !== 'closed' && !msg.fresh;
       if (renegotiation) {
-        // track change within the live session (e.g. screen share)
+        // track change within the live session (e.g. screen share). If both
+        // sides offered at once (glare), the impolite peer (the original
+        // offerer) ignores the incoming offer; the polite one rolls back.
+        const collision = makingOffer || pc.signalingState !== 'stable';
+        if (collision && isOfferer) return;
         try {
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
           const ans = await pc.createAnswer();
@@ -409,12 +439,45 @@ $(function () {
     if (pc) screenSenders.forEach(s => { try { pc.removeTrack(s); } catch (_) {} });
     screenSenders = [];
     const t = document.getElementById('call-tile-screen-self');
-    if (t) t.remove();
+    if (t) { t.remove(); reflowStage(); }
     if (!silent) setShareState(false);
   }
 
   // --- screen tiles (local preview + remote) ---
   const stage = document.getElementById('call-stage');
+
+  // reflowStage picks cols × rows that maximise tile area at 16:9 (Meet/meet2
+  // style) so tiles fill the window instead of sitting in fixed cells.
+  let reflowRAF = 0;
+  function reflowStage() {
+    cancelAnimationFrame(reflowRAF);
+    reflowRAF = requestAnimationFrame(function () {
+      const tiles = stage.children;
+      const n = tiles.length;
+      if (!n) return;
+      const W = stage.clientWidth, H = stage.clientHeight;
+      if (W <= 0 || H <= 0) return;
+      const ratio = 16 / 9, gap = 8;
+      let bestTileW = 0;
+      for (let cols = 1; cols <= n; cols++) {
+        const rows = Math.ceil(n / cols);
+        const cellW = (W - (cols - 1) * gap) / cols;
+        const cellH = (H - (rows - 1) * gap) / rows;
+        if (cellW <= 0 || cellH <= 0) continue;
+        const tileW = Math.min(cellW, cellH * ratio);
+        if (tileW > bestTileW) bestTileW = tileW;
+      }
+      bestTileW = Math.max(0, bestTileW - 1); // avoid sub-pixel early wrap
+      const tileH = bestTileW / ratio;
+      for (let i = 0; i < n; i++) {
+        tiles[i].style.width = bestTileW + 'px';
+        tiles[i].style.height = tileH + 'px';
+      }
+    });
+  }
+  if (window.ResizeObserver) new ResizeObserver(reflowStage).observe(stage);
+  window.addEventListener('resize', reflowStage);
+
   function screenTile(id, label) {
     let tile = document.getElementById(id);
     if (tile) return tile;
@@ -429,6 +492,7 @@ $(function () {
     tile.appendChild(v);
     tile.appendChild(name);
     stage.appendChild(tile);
+    reflowStage();
     return tile;
   }
   function showSelfScreen(stream) {
@@ -441,7 +505,7 @@ $(function () {
   }
   function clearRemoteScreen() {
     const t = document.getElementById('call-tile-screen-peer');
-    if (t) t.remove();
+    if (t) { t.remove(); reflowStage(); }
   }
 
   // --- volume (drag slider, applies to remote audio) ---
@@ -500,6 +564,7 @@ $(function () {
   function showStageView() {
     $('#call-ended').hide();
     $('#call-stage, #call-bottombar, .ax-call-header').show();
+    reflowStage(); // stage now has size → lay out tiles
   }
   function showEndedView(label) {
     activateCallTab();

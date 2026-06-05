@@ -784,7 +784,9 @@ $(function () {
     }
     const activeCall = (window.f2fCall && window.f2fCall.active) || null;
     if (activeCall && activeCall.kind === 'dm') {
-      meetRows += row('online', activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
+      // no state dot here — the in-call pulse pip already marks it (avoids a
+      // redundant second green dot on the left).
+      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
     }
 
     // chats — visual mock until the chat service ships. Direct = 1-1

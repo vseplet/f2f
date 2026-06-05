@@ -1836,14 +1836,18 @@ a.ax-domain-link:hover {
 .ax-call-stage {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
     align-content: center;
-    overflow: auto;
+    gap: 8px;
+    overflow: hidden;
+    /* tile width/height are set by reflowStage() in call.js (16:9, max area);
+       flex-wrap + justify-content:center lay them out and centre a short last
+       row — no margin hacks. */
 }
 .ax-call-tile {
-    aspect-ratio: 16 / 10;
+    flex: 0 0 auto;
     background: var(--bg-deep);
     border: 1px solid var(--border);
     display: flex;
