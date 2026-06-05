@@ -308,6 +308,8 @@ $(function () {
       return;
     }
     $('#status-diag').removeClass('active');
+    // invite ("add peer") → camp tab; the invite flow will live there.
+    if (h === 'invite') { activateTab('camp'); return; }
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
@@ -769,9 +771,10 @@ $(function () {
     function peerLabel(p) {
       return peerKey(p) + (p.self ? ' (you)' : '');
     }
-    let peersBody = '';
+    // "add peer" (invite) sits at the top; peers follow.
+    let peersBody = addRow('add peer', 'invite');
     if (!peers.length) {
-      peersBody = empty('no peers');
+      peersBody += empty('no peers');
     } else {
       for (const p of peers) {
         const state = p.self ? 'online'
