@@ -453,6 +453,20 @@
 .ax-tree-dot.off {
     background: var(--border-2);
 }
+/* Pairing-state dots — match the main window's peers table colours
+   (reachable/degraded/unreachable/self) so sidebar and window agree. */
+.ax-tree-row.reachable .ax-tree-dot {
+    background: var(--ok);
+}
+.ax-tree-row.degraded .ax-tree-dot {
+    background: var(--warn);
+}
+.ax-tree-row.unreachable .ax-tree-dot {
+    background: var(--danger);
+}
+.ax-tree-row.self .ax-tree-dot {
+    background: var(--accent);
+}
 /* In-group section divider (uncollapsible). Used inside .ax-tree-children
    to separate sibling lists without giving each its own caret — e.g.
    "channels / direct / active calls" inside the messages group. */

@@ -455,7 +455,10 @@ func sharedDirFor(campID string) string {
 }
 
 func downloadsDirFor(campID string) string {
-	return filepath.Join(userHome(), "Downloads", "f2f-drops", campUserVisibleSegment(campID))
+	// Under ~/.f2f (not ~/Downloads) so macOS TCC can't block the torrent
+	// piece-completion DB (.torrent.db) or file writes. The drop tab surfaces
+	// downloads in the UI, so they don't need to live in ~/Downloads.
+	return filepath.Join(userHome(), ".f2f", "drops", campUserVisibleSegment(campID))
 }
 
 func campStateDirSegment(campID string) string {

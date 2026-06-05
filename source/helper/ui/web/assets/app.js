@@ -737,6 +737,18 @@ $(function () {
   // for the sidebar label and the peer:<key> route.
   function peerKey(p) { return (p && (p.name || (p.pub || '').slice(0, 12))) || '?'; }
 
+  // peerDot maps a peer to a status-dot class — the SAME vocabulary the main
+  // window's peers table uses, so sidebar and window colours match:
+  //   self→accent, paired→green, half_paired→orange, in_camp(no pair)→red, else→grey.
+  function peerDot(p) {
+    if (!p) return 'offline';
+    if (p.self) return 'self';
+    if (p.paired) return 'reachable';
+    if (p.half_paired) return 'degraded';
+    if (p.in_camp) return 'unreachable';
+    return 'offline';
+  }
+
   // Bottom IDE-style status bar — engine state, camp, peer counts, I/O.
   function updateStatusBar(s) {
     const running = !!(s && s.running);
@@ -777,8 +789,7 @@ $(function () {
       peersBody += empty('no peers');
     } else {
       for (const p of peers) {
-        const state = p.self ? 'online'
-          : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+        const state = peerDot(p);
         const ip = p.overlay_v4 || '';
         const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
           ? `${p.last_rtt_ms}ms` : '';
@@ -795,8 +806,7 @@ $(function () {
     const allFiles = [];
     for (const p of peers) {
       const owner = peerLabel(p);
-      const state = p.self ? 'online'
-        : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+      const state = peerDot(p);
       (p.domains || []).forEach(d => allDomains.push({ d, owner, state }));
       (p.firewall || []).filter(x => x.enabled).forEach(x => allPorts.push({ x, owner, self: !!p.self }));
       (p.files || []).forEach(f => allFiles.push({ f, owner, self: !!p.self }));
