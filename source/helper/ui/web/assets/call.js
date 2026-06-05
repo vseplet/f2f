@@ -324,18 +324,21 @@ $(function () {
         location.hash = 'call:dm:' + encodeURIComponent(name);
         try { await offerTo(); } catch (_) { this.hangup(); }
       } else {
-        // group (SFU) — placeholder until wired.
+        // group (SFU) — create/join the camp's call and render in this window.
         this.adopt('group', idOrName, title || idOrName, '');
+        currentPeerPub = '';
         location.hash = 'call:group:' + encodeURIComponent(idOrName);
+        Group.start(idOrName, title || idOrName).catch(() => this.hangup());
       }
     },
 
-    // hang up and notify the peer. Target is the active dm peer's pub (the
-    // route id is a nickname now, so we must use active.pub, not active.id).
+    // hang up. For dm we notify the peer over the p2p channel; for group the
+    // SFU leave happens in Group.leave (via endLocal).
     hangup(silent) {
-      let pub = (this.active && this.active.kind === 'dm') ? (this.active.pub || '') : '';
-      if (!pub) pub = currentPeerPub; // fallback to the live signalling target
-      if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
+      if (this.active && this.active.kind === 'dm') {
+        let pub = this.active.pub || currentPeerPub;
+        if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
+      }
       this.endLocal(silent);
     },
 
@@ -343,7 +346,8 @@ $(function () {
     // silent = we're switching to another call, so skip the "ended" screen.
     endLocal(silent) {
       const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
-      teardown();
+      if (this.active && this.active.kind === 'group') Group.leave(true);
+      else teardown();
       clearCall();
       this.active = null;
       this.renderBar();
@@ -375,14 +379,314 @@ $(function () {
   };
   window.f2fCall = Call;
 
+  // ---- Group calls (SFU) — ported from meet2, rendered in this window.
+  // Host-based (no room binding yet): the channel call joins the camp's
+  // existing SFU call or creates one. Uses the separate /api/call/* signalling,
+  // so it never collides with the p2p path above.
+  const Group = {
+    pc: null, stream: null, signalES: null,
+    screenStream: null, screenSenders: [],
+    micEnabled: false, camEnabled: false, inCall: false,
+    sfuHost: '', myIP: '', myName: '',
+    remoteTiles: {},   // streamId → {tile, peerIP}
+    peerTiles: {},     // tunnelIP → tile (placeholder or video)
+    peersWithVideo: {},
+    pending: [], hasRemoteDesc: false, negotiating: false,
+    signalChain: Promise.resolve(),
+    reconnectAttempts: 0, reconnectTimer: null, pollTimer: null,
+
+    async jget(url, opts) {
+      const r = await fetch(url, opts);
+      if (r.status === 204) return null;
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    },
+
+    async start() {
+      try {
+        const s = await (await fetch('/api/status')).json();
+        this.myIP = (s && s.local_ip) || '';
+        this.myName = (s && s.camp_name) || 'you';
+      } catch (_) {}
+      let calls = [];
+      try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
+      const existing = calls.find(c => c.sfu_host);
+      if (existing) { this.sfuHost = existing.sfu_host; await this.join(); }
+      else { await this.create(); }
+    },
+
+    async create() {
+      if (this.inCall) await this.leave(true);
+      await this.jget('/api/call/create', { method: 'POST' });
+      this.sfuHost = this.myIP;
+      await this.joinSFU();
+    },
+    async join() {
+      if (!this.sfuHost) return;
+      const target = this.sfuHost;
+      if (this.inCall) await this.leave(true);
+      this.sfuHost = target;
+      await this.jget('/api/call/join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tunnel_ip: this.myIP, name: this.myName, sfu_host: this.sfuHost }),
+      });
+      await this.joinSFU();
+    },
+    async joinSFU() {
+      await this.acquireMedia();
+      this.pc = this.createPC();
+      if (this.stream) this.stream.getTracks().forEach(t => this.pc.addTrack(t, this.stream));
+      else { this.pc.addTransceiver('audio', { direction: 'recvonly' }); this.pc.addTransceiver('video', { direction: 'recvonly' }); }
+      this.startSignalStream();
+      this.inCall = true;
+      Call.setState('active');
+      this.refreshButtons();
+      this.startPolling();
+    },
+
+    async acquireMedia() {
+      const gum = async (c) => { try { return await navigator.mediaDevices.getUserMedia(c); } catch (_) { return null; } };
+      this.stream = (await gum({ audio: true, video: { width: { ideal: 640 }, height: { ideal: 480 } } })) || (await gum({ audio: true })) || (await gum({ video: true }));
+      if (this.stream) {
+        this.micEnabled = this.stream.getAudioTracks().length > 0;
+        this.camEnabled = this.stream.getVideoTracks().length > 0;
+        videoSelf.srcObject = this.stream;
+        tileSelf.classList.toggle('has-video', this.camEnabled);
+        videoSelf.play().catch(() => {});
+      }
+    },
+
+    createPC() {
+      const conn = new RTCPeerConnection({ iceServers: [] });
+      conn.onicecandidate = (e) => {
+        if (!e.candidate) return;
+        // remote SFU: only ship candidates that name the host's overlay IP.
+        if (this.sfuHost !== this.myIP && this.myIP && e.candidate.candidate.indexOf(this.myIP) === -1) return;
+        this.sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
+      };
+      conn.ontrack = (e) => { if (e.streams && e.streams[0]) this.addRemoteStream(e.streams[0]); };
+      conn.onconnectionstatechange = () => {
+        const st = conn.connectionState;
+        if (st === 'connected') this.reconnectAttempts = 0;
+        else if (st === 'failed') this.scheduleReconnect();
+        else if (st === 'closed') Call.hangup();
+      };
+      conn.onnegotiationneeded = async () => {
+        if (this.negotiating) return;
+        this.negotiating = true;
+        try {
+          const offer = await conn.createOffer();
+          await conn.setLocalDescription(offer);
+          const resp = await this.sendSignal({ kind: 'offer', sdp: offer.sdp });
+          if (resp && resp.kind === 'answer' && conn.signalingState === 'have-local-offer') {
+            await conn.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
+            this.hasRemoteDesc = true; await this.flush();
+          }
+        } catch (_) {} finally { this.negotiating = false; }
+      };
+      return conn;
+    },
+
+    async sendSignal(msg) {
+      try {
+        const r = await fetch('/api/call/signal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
+        if (r.status === 204 || !r.ok) return null;
+        return r.json();
+      } catch (_) { return null; }
+    },
+    startSignalStream() {
+      if (this.signalES) return;
+      this.signalES = new EventSource('/api/call/signal/stream');
+      this.signalES.onmessage = (e) => {
+        this.signalChain = this.signalChain.then(() => this.handleSignal(JSON.parse(e.data))).catch(() => {});
+      };
+    },
+    stopSignalStream() { if (this.signalES) { this.signalES.close(); this.signalES = null; } },
+    async flush() { while (this.pending.length) { try { await this.pc.addIceCandidate(this.pending.shift()); } catch (_) {} } },
+
+    async handleSignal(msg) {
+      const pc = this.pc;
+      if (!pc || msg.from !== 'sfu') return;
+      if (msg.kind === 'offer') {
+        if (pc.signalingState === 'have-local-offer') { try { await pc.setLocalDescription({ type: 'rollback' }); } catch (_) {} }
+        this.hasRemoteDesc = false;
+        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        this.hasRemoteDesc = true;
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        await this.sendSignal({ kind: 'answer', sdp: ans.sdp });
+        await this.flush();
+      } else if (msg.kind === 'answer') {
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        this.hasRemoteDesc = true; await this.flush();
+      } else if (msg.kind === 'renegotiate') {
+        const needed = msg.tracks || [];
+        this.negotiating = true;
+        try {
+          const need = {}; needed.forEach(t => need[t.kind] = (need[t.kind] || 0) + 1);
+          const have = {};
+          pc.getTransceivers().forEach(tr => {
+            if (tr.direction === 'recvonly' || tr.direction === 'sendrecv') { const k = tr.receiver.track.kind; have[k] = (have[k] || 0) + 1; }
+          });
+          for (const kind in need) { for (let d = 0; d < need[kind] - (have[kind] || 0); d++) pc.addTransceiver(kind, { direction: 'recvonly' }); }
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          const resp = await this.sendSignal({ kind: 'offer', sdp: offer.sdp });
+          if (resp && resp.kind === 'answer' && pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription({ type: 'answer', sdp: resp.sdp });
+            this.hasRemoteDesc = true; await this.flush();
+          }
+        } catch (_) {} finally { this.negotiating = false; }
+      } else if (msg.kind === 'candidate') {
+        if (this.hasRemoteDesc) { try { await pc.addIceCandidate(msg.candidate); } catch (_) {} }
+        else this.pending.push(msg.candidate);
+      }
+    },
+
+    // --- tiles ---
+    ipOf(streamId) { const m = (streamId || '').match(/^(\d+\.\d+\.\d+\.\d+)-/); return m ? m[1] : ''; },
+    makeTile(label, placeholder) {
+      const tile = document.createElement('div');
+      tile.className = 'ax-call-tile' + (placeholder ? '' : ' has-video');
+      const v = document.createElement('video');
+      v.autoplay = true; v.playsInline = true;
+      const av = document.createElement('div'); av.className = 'ax-call-avatar'; av.innerHTML = '<i class="bi bi-person-fill"></i>';
+      const name = document.createElement('div'); name.className = 'ax-call-name'; name.textContent = label;
+      const fs = document.createElement('button'); fs.type = 'button'; fs.className = 'ax-call-fs'; fs.title = 'fullscreen'; fs.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
+      tile.appendChild(v); tile.appendChild(av); tile.appendChild(name); tile.appendChild(fs);
+      return tile;
+    },
+    addRemoteStream(stream) {
+      if (this.remoteTiles[stream.id]) return;
+      const peerIP = this.ipOf(stream.id);
+      const tile = this.makeTile(peerIP || 'peer', false);
+      const v = tile.querySelector('video');
+      v.srcObject = stream; v.volume = volume / 100; v.play().catch(() => {});
+      if (this.peerTiles[peerIP] && !this.peersWithVideo[peerIP]) { this.peerTiles[peerIP].replaceWith(tile); this.peerTiles[peerIP] = tile; }
+      else if (!this.peerTiles[peerIP]) { stage.appendChild(tile); this.peerTiles[peerIP] = tile; }
+      else { stage.appendChild(tile); }
+      this.peersWithVideo[peerIP] = true;
+      this.remoteTiles[stream.id] = { tile, peerIP };
+      reflowStage();
+      stream.onremovetrack = () => { if (stream.getTracks().length === 0) this.removeRemoteStream(stream.id); };
+    },
+    removeRemoteStream(streamId) {
+      const e = this.remoteTiles[streamId];
+      if (!e) return;
+      e.tile.remove(); delete this.remoteTiles[streamId];
+      if (e.peerIP && this.peerTiles[e.peerIP] === e.tile) delete this.peerTiles[e.peerIP];
+      let other = false; for (const id in this.remoteTiles) if (this.remoteTiles[id].peerIP === e.peerIP) { other = true; break; }
+      if (!other) delete this.peersWithVideo[e.peerIP];
+      reflowStage();
+    },
+    syncPeerTiles(participants) {
+      if (!this.inCall || !participants) return;
+      const active = {};
+      participants.forEach(p => {
+        if (p.tunnel_ip === this.myIP) return;
+        active[p.tunnel_ip] = p.name;
+        if (this.peerTiles[p.tunnel_ip]) {
+          const lbl = this.peerTiles[p.tunnel_ip].querySelector('.ax-call-name');
+          if (lbl) lbl.textContent = p.name; return;
+        }
+        const tile = this.makeTile(p.name, true);
+        stage.appendChild(tile); this.peerTiles[p.tunnel_ip] = tile;
+      });
+      for (const ip in this.peerTiles) {
+        if (!active[ip]) { this.peerTiles[ip].remove(); delete this.peerTiles[ip]; delete this.peersWithVideo[ip]; }
+      }
+      reflowStage();
+    },
+    clearTiles() {
+      for (const id in this.remoteTiles) { this.remoteTiles[id].tile.remove(); delete this.remoteTiles[id]; }
+      for (const ip in this.peerTiles) { this.peerTiles[ip].remove(); delete this.peerTiles[ip]; }
+      this.peersWithVideo = {};
+    },
+
+    startPolling() {
+      if (this.pollTimer) return;
+      const poll = async () => {
+        let calls = [];
+        try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
+        if (!this.inCall) return;
+        const mine = calls.find(c => c.sfu_host === this.sfuHost);
+        if (mine) this.syncPeerTiles(mine.participants || []);
+        else Call.hangup(); // call ended on the host
+      };
+      poll();
+      this.pollTimer = setInterval(poll, 3000);
+    },
+    stopPolling() { if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; } },
+    scheduleReconnect() {
+      if (!this.inCall || this.reconnectTimer) return;
+      if (this.reconnectAttempts >= 5) { Call.hangup(); return; }
+      this.reconnectAttempts++;
+      const delay = Math.min(1000 * this.reconnectAttempts, 5000);
+      const host = this.sfuHost;
+      this.reconnectTimer = setTimeout(async () => {
+        this.reconnectTimer = null;
+        if (!this.inCall) return;
+        await this.leave(true); this.sfuHost = host; await this.join();
+      }, delay);
+    },
+
+    // --- controls (driven by the unified buttons via actMic/actCam/actShare) ---
+    toggleMic() { if (!this.stream) return; this.micEnabled = !this.micEnabled; this.stream.getAudioTracks().forEach(t => t.enabled = this.micEnabled); this.refreshButtons(); },
+    toggleCam() { if (!this.stream) return; this.camEnabled = !this.camEnabled; this.stream.getVideoTracks().forEach(t => t.enabled = this.camEnabled); tileSelf.classList.toggle('has-video', this.camEnabled); this.refreshButtons(); },
+    async toggleShare() {
+      if (this.screenStream) { this.stopShare(); return; }
+      if (!this.pc || !navigator.mediaDevices.getDisplayMedia) return;
+      let s; try { s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }); } catch (_) { return; }
+      this.screenStream = s; this.screenSenders = [];
+      s.getTracks().forEach(t => { this.screenSenders.push(this.pc.addTrack(t, s)); t.addEventListener('ended', () => this.stopShare()); });
+      showSelfScreen(s); // local preview tile (SFU forwards it to others separately)
+      setShareState(true);
+    },
+    stopShare() {
+      if (!this.screenStream) return;
+      const s = this.screenStream; this.screenStream = null;
+      s.getTracks().forEach(t => t.stop());
+      if (this.pc) this.screenSenders.forEach(sn => { try { this.pc.removeTrack(sn); } catch (_) {} });
+      this.screenSenders = [];
+      const t = document.getElementById('call-tile-screen-self');
+      if (t) { t.remove(); reflowStage(); }
+      setShareState(false);
+    },
+    refreshButtons() { micEnabled = this.micEnabled; camEnabled = this.camEnabled; updateMediaButtons(); },
+
+    async leave() {
+      if (!this.inCall && !this.pc) return;
+      this.inCall = false;
+      if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+      this.stopPolling();
+      if (this.screenStream) this.stopShare();
+      this.stopSignalStream();
+      if (this.pc) { try { this.pc.close(); } catch (_) {} this.pc = null; }
+      if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
+      this.clearTiles();
+      videoSelf.srcObject = null; tileSelf.classList.remove('has-video');
+      this.micEnabled = false; this.camEnabled = false;
+      this.pending = []; this.hasRemoteDesc = false; this.negotiating = false; this.sfuHost = '';
+      try { await fetch('/api/call/leave', { method: 'POST' }); } catch (_) {}
+    },
+  };
+  window.f2fGroup = Group;
+
   // ---- controls (meet2-style) ----
   const $btnMic = document.getElementById('call-mic');
   const $btnCam = document.getElementById('call-cam');
   const $btnShare = document.getElementById('call-share');
 
+  // The active media stream — group stream when in a group call, else p2p.
+  function activeStream() {
+    return (Call.active && Call.active.kind === 'group') ? Group.stream : localStream;
+  }
+  function inGroup() { return !!(Call.active && Call.active.kind === 'group'); }
+
   function updateMediaButtons() {
-    const hasMic = !!localStream && localStream.getAudioTracks().length > 0;
-    const hasCam = !!localStream && localStream.getVideoTracks().length > 0;
+    const ls = activeStream();
+    const hasMic = !!ls && ls.getAudioTracks().length > 0;
+    const hasCam = !!ls && ls.getVideoTracks().length > 0;
     if ($btnMic) {
       $btnMic.disabled = !hasMic;
       $btnMic.classList.toggle('active', micEnabled);
@@ -399,20 +703,26 @@ $(function () {
   }
 
   // --- shared control actions (used by the call window AND the top bar) ---
+  // They dispatch to the group SFU when a group call is active, else p2p.
   function actMic() {
+    if (inGroup()) { Group.toggleMic(); return; }
     if (!localStream) return;
     micEnabled = !micEnabled;
     localStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
     updateMediaButtons();
   }
   function actCam() {
+    if (inGroup()) { Group.toggleCam(); return; }
     if (!localStream) return;
     camEnabled = !camEnabled;
     localStream.getVideoTracks().forEach(t => { t.enabled = camEnabled; });
     tileSelf.classList.toggle('has-video', camEnabled);
     updateMediaButtons();
   }
-  function actShare() { if (screenStream) stopScreenShare(); else startScreenShare(); }
+  function actShare() {
+    if (inGroup()) { Group.toggleShare(); return; }
+    if (screenStream) stopScreenShare(); else startScreenShare();
+  }
   function actChat() {
     const a = Call.active;
     if (!a) return;
@@ -487,7 +797,8 @@ $(function () {
   function reflowStage() {
     cancelAnimationFrame(reflowRAF);
     reflowRAF = requestAnimationFrame(function () {
-      const tiles = stage.children;
+      // Only lay out visible tiles (the p2p peer tile is hidden in group mode).
+      const tiles = Array.from(stage.children).filter(el => el.style.display !== 'none');
       const n = tiles.length;
       if (!n) return;
       const W = stage.clientWidth, H = stage.clientHeight;
@@ -511,6 +822,9 @@ $(function () {
     });
   }
   if (window.ResizeObserver) new ResizeObserver(reflowStage).observe(stage);
+  // Auto-relayout on any tile add/remove (mirrors meet2) — belt-and-braces so a
+  // tile can never be added without being laid out.
+  new MutationObserver(reflowStage).observe(stage, { childList: true });
   window.addEventListener('resize', reflowStage);
 
   function screenTile(id, label) {
@@ -524,12 +838,24 @@ $(function () {
     const name = document.createElement('div');
     name.className = 'ax-call-name';
     name.textContent = label;
+    const fs = document.createElement('button');
+    fs.type = 'button';
+    fs.className = 'ax-call-fs';
+    fs.title = 'fullscreen';
+    fs.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
     tile.appendChild(v);
     tile.appendChild(name);
+    tile.appendChild(fs);
     stage.appendChild(tile);
     reflowStage();
     return tile;
   }
+  // Fullscreen a tile's video when its ⛶ button is clicked.
+  $(stage).on('click', '.ax-call-fs', function (e) {
+    e.stopPropagation();
+    const v = $(this).closest('.ax-call-tile').find('video')[0];
+    if (v && v.requestFullscreen) v.requestFullscreen().catch(() => {});
+  });
   function showSelfScreen(stream) {
     const v = screenTile('call-tile-screen-self', 'you · screen').querySelector('video');
     v.srcObject = stream; v.play().catch(() => {});
@@ -552,8 +878,8 @@ $(function () {
     if ($volFill) $volFill.style.width = volume + '%';
     if ($volValue) $volValue.textContent = String(volume);
     if (videoPeer) videoPeer.volume = volume / 100;
-    const rs = document.querySelector('#call-tile-screen-peer video');
-    if (rs) rs.volume = volume / 100;
+    // all remote tile videos (group participants + screen), but not our own.
+    stage.querySelectorAll('.ax-call-tile:not(#call-tile-self) video').forEach(v => { v.volume = volume / 100; });
   }
   if ($volTrack) {
     $volTrack.addEventListener('pointerdown', function (e) {
@@ -617,6 +943,8 @@ $(function () {
     const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
     activateCallTab();
     showStageView();
+    // The fixed p2p peer tile is dm-only; group renders dynamic participant tiles.
+    $('#call-tile-peer').toggle(kind === 'dm');
     $('#call-title').text((kind === 'group' ? '# ' : '') + title);
     $('#call-peer-name').text((kind === 'group' ? '# ' : '') + title);
   }
@@ -644,7 +972,9 @@ $(function () {
   (function autoRejoin() {
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null'); } catch (_) {}
-    if (!saved || saved.kind !== 'dm') return;
+    if (!saved) return;
+    if (saved.kind === 'group') { Call.start('group', saved.id, saved.title); return; }
+    if (saved.kind !== 'dm') return;
     const pub = PUB_RE.test(saved.pub || '') ? saved.pub : saved.id; // reconnect by pub
     Call.start('dm', pub, saved.title);
   })();

@@ -840,18 +840,24 @@ $(function () {
     // MEET — joinable/active calls: live group calls (from status) plus
     // our current p2p call (from the CallManager). Routable + highlightable
     // like chats, so the active call is marked and opens the call window.
+    const activeCall = (window.f2fCall && window.f2fCall.active) || null;
+    // The SFU call we're currently in is shown as the active row below, so skip
+    // its duplicate from the status list.
+    const myGroupHost = (activeCall && activeCall.kind === 'group' && window.f2fGroup) ? window.f2fGroup.sfuHost : '';
     let meetRows = '';
     for (const c of calls) {
+      if (myGroupHost && c.sfu_host === myGroupHost) continue;
       const owner = peerNameByIP(c.sfu_host) || 'group';
       const id = c.call_id || c.sfu_host || owner;
       const n = (c.participants || []).length;
       meetRows += row('online', owner, n + ' in · group', null, 'call:group:' + id);
     }
-    const activeCall = (window.f2fCall && window.f2fCall.active) || null;
+    // Our current call (p2p or group) — routable + highlightable like chats.
+    // No state dot: the in-call pulse pip already marks it.
     if (activeCall && activeCall.kind === 'dm') {
-      // no state dot here — the in-call pulse pip already marks it (avoids a
-      // redundant second green dot on the left).
       meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
+    } else if (activeCall && activeCall.kind === 'group') {
+      meetRows += row(null, '# ' + activeCall.title, 'group', null, 'call:group:' + activeCall.id);
     }
 
     // chats — visual mock until the chat service ships. Direct = 1-1

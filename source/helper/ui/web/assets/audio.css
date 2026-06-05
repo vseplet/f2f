@@ -45,7 +45,7 @@
     font-family:
         "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco, Consolas,
         monospace;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.6;
     padding: 18px 20px;
     border: 1px dotted var(--border);
@@ -93,7 +93,7 @@
     color: var(--text);
     font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
         Consolas, monospace;
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1.6;
     display: flex;
 }
@@ -1912,6 +1912,33 @@ a.ax-domain-link:hover {
 .ax-call-name {
     color: var(--text-2);
     font-size: 12px;
+}
+/* per-tile fullscreen button (mirrors meet2's ⛶), shown on tile hover */
+.ax-call-fs {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
+    background: color-mix(in srgb, var(--bg-deep) 60%, transparent);
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.ax-call-tile:hover .ax-call-fs {
+    opacity: 1;
+}
+.ax-call-fs:hover {
+    color: var(--accent);
+    border-color: var(--accent);
 }
 .ax-call-controls {
     flex-shrink: 0;
