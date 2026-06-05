@@ -25,10 +25,6 @@
             <aside id="ax-sidebar" class="ax-sidebar">
                 <div class="ax-sidebar-inner">
                     <div class="ax-sidebar-header">
-                        <button type="button" id="ax-sidebar-toggle"
-                                class="ax-sidebar-toggle"
-                                title="collapse / expand"
-                                aria-label="toggle sidebar">‹</button>
                         <input
                             type="search"
                             id="ax-sidebar-search"
@@ -80,10 +76,10 @@
                             type="button"
                             data-tab="camp"
                             class="ax-tab ax-tab-active"
+                            style="display: none"
                         >
                             camp
                         </button>
-                        <span class="ax-sep">·</span>
                         <button type="button" data-tab="tunnel" class="ax-tab">
                             tunnel
                         </button>
@@ -102,14 +98,6 @@
                         <button type="button" data-tab="drop" class="ax-tab">
                             drop
                         </button>
-                        <span class="ax-sep">·</span>
-                        <button
-                            type="button"
-                            data-tab="diagnostics"
-                            class="ax-tab"
-                        >
-                            diagnostics
-                        </button>
                     </div>
                 </div>
             </div>
@@ -118,7 +106,7 @@
                 <div class="ax-frame">
                     <div class="ax-section">
                         <div class="ax-section-title">
-                            <span>— identity</span>
+                            <span id="identity-title">— identity</span>
                         </div>
                         <!-- Running: key:value readout, no inputs. Hidden while
                stopped — see applyStatus. -->
@@ -128,21 +116,6 @@
                                     <tr>
                                         <td>name</td>
                                         <td id="identity-name"></td>
-                                    </tr>
-                                    <tr>
-                                        <td>camp id</td>
-                                        <td>
-                                            <code
-                                                id="identity-camp-id"
-                                                class="ax-mono"
-                                                title="click to copy"
-                                                style="
-                                                    cursor: pointer;
-                                                    font-size: 11px;
-                                                    word-break: break-all;
-                                                "
-                                            ></code>
-                                        </td>
                                     </tr>
                                     <tr>
                                         <td>tunnel ip</td>
@@ -1189,6 +1162,7 @@
             <span class="ax-status-item" id="status-peers">—</span>
             <span class="ax-status-item" id="status-io">—</span>
             <span class="ax-status-spacer"></span>
+            <span class="ax-status-item clickable" id="status-diag" title="open diagnostics">diagnostics</span>
             <span class="ax-status-item" id="status-fp"></span>
         </div>
 

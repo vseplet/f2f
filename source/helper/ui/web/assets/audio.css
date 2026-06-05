@@ -138,6 +138,13 @@
 .ax-sidebar.ax-collapsed {
     width: 32px !important;
 }
+/* Collapsed left strip is itself the expand affordance — click anywhere. */
+#ax-sidebar.ax-collapsed {
+    cursor: pointer;
+}
+#ax-sidebar.ax-collapsed:hover {
+    background: var(--panel);
+}
 .ax-sidebar.ax-collapsed .ax-search,
 .ax-sidebar.ax-collapsed .ax-sidebar-scroll {
     display: none;
@@ -1999,6 +2006,15 @@ a.ax-domain-link:hover {
 }
 .ax-status-item:empty {
     display: none;
+}
+.ax-status-item.clickable {
+    cursor: pointer;
+}
+.ax-status-item.clickable:hover {
+    color: var(--text-2);
+}
+.ax-status-item.active {
+    color: var(--accent);
 }
 .ax-status-dot {
     width: 6px;

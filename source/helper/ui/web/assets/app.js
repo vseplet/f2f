@@ -1,4 +1,9 @@
 $(function () {
+  // Selected-peer state for the identity panel + last status sample. Declared
+  // first because applyRoute() runs during init, before later code.
+  let selectedPeer = '';   // peerKey of the peer whose details fill the identity panel
+  let lastStatus = null;   // last /api/status sample, for re-rendering on route change
+
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
   $('.ax-tab').on('click', function () {
@@ -8,24 +13,38 @@ $(function () {
     $(this).addClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-' + tab).removeClass('hidden');
+    $('#status-diag').removeClass('active'); // leaving diagnostics
     $(document).trigger('f2f:tab-changed', [tab]);
   });
 
   // Left sidebar: width persists in localStorage, drag handle on the
-  // right edge resizes it. Below the collapse threshold the tree hides
-  // and only the handle stays visible — drag further right to restore.
+  // right edge resizes it. Drag below the collapse threshold and it
+  // becomes a thin strip — click that strip to expand it back. No button.
   const $sidebar = $('#ax-sidebar');
   const $sidebarResize = $('#ax-sidebar-resize');
   const SIDEBAR_KEY = 'f2f:sidebar-width';
+  const LAST_EXPANDED_KEY = 'f2f:sidebar-expanded-width';
   const SIDEBAR_COLLAPSE_THRESHOLD = 80; // px
   const SIDEBAR_MIN = 32;
   const SIDEBAR_MAX = 600;
   const sidebarDefault = 240;
 
+  // lastExpandedWidth survives reloads so clicking the strip restores the
+  // user's preferred width.
+  let lastExpandedWidth = parseInt(localStorage.getItem(LAST_EXPANDED_KEY) || '', 10);
+  if (!Number.isFinite(lastExpandedWidth) || lastExpandedWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
+    lastExpandedWidth = sidebarDefault;
+  }
+
   function applySidebarWidth(px) {
     const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px));
     $sidebar.css('width', clamped + 'px');
-    $sidebar.toggleClass('ax-collapsed', clamped < SIDEBAR_COLLAPSE_THRESHOLD);
+    const collapsed = clamped < SIDEBAR_COLLAPSE_THRESHOLD;
+    $sidebar.toggleClass('ax-collapsed', collapsed);
+    if (!collapsed) {
+      lastExpandedWidth = clamped;
+      try { localStorage.setItem(LAST_EXPANDED_KEY, String(clamped)); } catch (_) {}
+    }
   }
   try {
     const saved = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
@@ -50,32 +69,13 @@ $(function () {
     $(document).on('mousemove.sbres', onMove).on('mouseup.sbres', onUp);
   });
 
-  // Toggle button: collapse if expanded, restore to last non-collapsed
-  // width if currently collapsed. lastExpandedWidth survives reloads
-  // via localStorage so users always get back to their preferred size.
-  const LAST_EXPANDED_KEY = 'f2f:sidebar-expanded-width';
-  let lastExpandedWidth = parseInt(localStorage.getItem(LAST_EXPANDED_KEY) || '', 10);
-  if (!Number.isFinite(lastExpandedWidth) || lastExpandedWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
-    lastExpandedWidth = sidebarDefault;
-  }
-  $('#ax-sidebar-toggle').on('click', function () {
-    if ($sidebar.hasClass('ax-collapsed')) {
-      applySidebarWidth(lastExpandedWidth);
-    } else {
-      lastExpandedWidth = $sidebar.outerWidth();
-      try { localStorage.setItem(LAST_EXPANDED_KEY, String(lastExpandedWidth)); } catch (_) {}
-      applySidebarWidth(SIDEBAR_MIN);
-    }
+  // Click the collapsed strip (anywhere but the resize handle) to expand.
+  $sidebar.on('click', function (e) {
+    if (!$sidebar.hasClass('ax-collapsed')) return;
+    if ($(e.target).closest('#ax-sidebar-resize').length) return;
+    applySidebarWidth(lastExpandedWidth);
     try { localStorage.setItem(SIDEBAR_KEY, String($sidebar.outerWidth())); } catch (_) {}
   });
-  // Update the toggle glyph to match the current state. ‹ when open
-  // (click to collapse), › when collapsed (click to expand).
-  function updateToggleGlyph() {
-    $('#ax-sidebar-toggle').text($sidebar.hasClass('ax-collapsed') ? '›' : '‹');
-  }
-  new MutationObserver(updateToggleGlyph)
-    .observe($sidebar[0], { attributes: true, attributeFilter: ['class'] });
-  updateToggleGlyph();
 
   // ---- Right notifications sidebar ----
   // Symmetric to the left tree but feeds off a moving log of events.
@@ -243,6 +243,7 @@ $(function () {
     if (route) location.hash = route;
   });
 
+
   // Mock conversation — placeholder until messaging is wired to the
   // engine. Same thread shown for every chat for now.
   const MOCK_MESSAGES = [
@@ -281,8 +282,32 @@ $(function () {
   // Hash router. Currently handles chat routes (chat:channel:<id> /
   // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
   // keeps working.
+  function activateTab(tab) {
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.ax-tab[data-tab="' + tab + '"]').addClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-' + tab).removeClass('hidden');
+  }
   function applyRoute() {
     const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // peer:<key> → open the (hidden) camp tab with that peer's details.
+    const pm = h.match(/^peer:(.+)$/);
+    if (pm) {
+      selectedPeer = pm[1];
+      activateTab('camp');
+      renderIdentity(lastStatus);
+      $('#status-diag').removeClass('active');
+      return;
+    }
+    // leaving a peer route clears the selection so identity shows self again.
+    if (selectedPeer) { selectedPeer = ''; renderIdentity(lastStatus); }
+    // diag → open the (hidden) diagnostics tab.
+    if (h === 'diag') {
+      activateTab('diagnostics');
+      $('#status-diag').addClass('active');
+      return;
+    }
+    $('#status-diag').removeClass('active');
     const m = h.match(/^chat:(channel|dm):(.+)$/);
     if (!m) return;
     const [, kind, id] = m;
@@ -513,7 +538,11 @@ $(function () {
       setTimeout(() => $el.css('color', prev), 500);
     }).catch(() => {});
   });
-  $('#identity-camp-id').on('click', function () {
+  // Diagnostics tab is opened from the status bar via a route (tab is hidden).
+  $('#status-diag').on('click', function () { location.hash = 'diag'; });
+
+  // Camp id lives in the status bar now — click it to copy the full id.
+  $('#status-camp').on('click', function () {
     const $el = $(this);
     const id = $el.data('camp-id');
     if (!id) return;
@@ -577,7 +606,35 @@ $(function () {
     return currentCampLabel || campIDOrPlaceholder();
   }
 
+  // renderIdentity fills the identity panel — with the selected peer's details
+  // when a peer:<key> route is active, otherwise our own camp identity.
+  function renderIdentity(s) {
+    if (!s) return;
+    const peer = selectedPeer
+      ? (s.peers || []).find(p => !p.self && peerKey(p) === selectedPeer)
+      : null;
+    if (peer) {
+      $('#identity-title').text('— peer');
+      $('#identity-name').text(peerKey(peer));
+      $('#identity-ip').text(peer.overlay_v4 || '—');
+      $('#identity-reflex').text(peer.udp_endpoint || '—');
+      $('#identity-pub').text(peer.pub || '—').data('pub', peer.pub || '');
+      $('#identity-fp').text(peer.last_rtt_ms ? '· ' + peer.last_rtt_ms + 'ms' : '');
+      $('#identity-switch').hide();
+    } else {
+      $('#identity-title').text('— identity');
+      $('#identity-name').text(s.camp_name || '?');
+      $('#identity-ip').text(s.local_ip || '—');
+      $('#identity-reflex').text(s.camp_reflex || '—');
+      const pub = s.identity_pub || '', fp = s.identity_fp || '';
+      $('#identity-pub').text(pub || '—').data('pub', pub);
+      $('#identity-fp').text(fp ? '· fp ' + fp : '');
+      $('#identity-switch').show();
+    }
+  }
+
   function applyStatus(s) {
+    lastStatus = s;
     if (pendingOp) {
       $('#camp-name, #camp-id, #camp-picker').prop('disabled', true);
     } else if (s.running) {
@@ -587,14 +644,7 @@ $(function () {
       // Running: collapse the picker and form into a key:value readout.
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
-      $('#identity-name').text(s.camp_name || '?');
-      $('#identity-camp-id').text(s.camp_id || '').data('camp-id', s.camp_id || '');
-      $('#identity-ip').text(s.local_ip || '—');
-      $('#identity-reflex').text(s.camp_reflex || '—');
-      const pub = s.identity_pub || '';
-      const fp = s.identity_fp || '';
-      $('#identity-pub').text(pub || '—').data('pub', pub);
-      $('#identity-fp').text(fp ? '· fp ' + fp : '');
+      renderIdentity(s);
       $('#identity-status').removeClass('hidden');
       $('#identity-picker').addClass('hidden');
       $('#new-camp-form').addClass('hidden');
@@ -663,9 +713,10 @@ $(function () {
     );
   }
 
-  function row(state, label, extra, url, route) {
+  function row(state, label, extra, url, route, tab) {
     let attrs = url ? ` data-url="${esc(url)}"` : '';
     if (route) attrs += ` data-route="${esc(route)}"`;
+    if (tab) attrs += ` data-tab="${esc(tab)}"`;
     // state === null → render without a status dot (e.g. chat rows).
     const dot = state === null ? '' : `<span class="ax-tree-dot"></span>`;
     return `<div class="ax-tree-row ${state || ''}"${attrs} title="${esc(url || extra || label)}">`
@@ -677,12 +728,21 @@ $(function () {
 
   function empty(text) { return `<div class="ax-tree-empty">${esc(text)}</div>`; }
 
+  // peerKey is a peer's stable display id (name, else a pub prefix). Used both
+  // for the sidebar label and the peer:<key> route.
+  function peerKey(p) { return (p && (p.name || (p.pub || '').slice(0, 12))) || '?'; }
+
   // Bottom IDE-style status bar — engine state, camp, peer counts, I/O.
   function updateStatusBar(s) {
     const running = !!(s && s.running);
     $('#ax-statusbar').toggleClass('running', running);
     const label = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
-    $('#status-camp').text(running && label ? 'camp ' + label : '—');
+    const campID = (s && s.camp_id) || '';
+    $('#status-camp')
+      .text(running && label ? 'camp ' + label : '—')
+      .data('camp-id', running ? campID : '')
+      .attr('title', running && campID ? 'click to copy camp id' : '')
+      .toggleClass('clickable', !!(running && campID));
     const peers = (s && s.peers) || [];
     const known = peers.length; // includes self, matching the sidebar count
     const online = peers.filter(p => p && (p.self || p.in_camp)).length;
@@ -706,7 +766,7 @@ $(function () {
     // peers — flat list. Each row: dot + name + ip/rtt meta.
     const peers = (s && s.peers) || [];
     function peerLabel(p) {
-      return (p.name || (p.pub || '').slice(0, 12) || '?') + (p.self ? ' (you)' : '');
+      return peerKey(p) + (p.self ? ' (you)' : '');
     }
     let peersBody = '';
     if (!peers.length) {
@@ -719,7 +779,8 @@ $(function () {
         const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
           ? `${p.last_rtt_ms}ms` : '';
         const meta = [ip, rtt].filter(Boolean).join(' · ');
-        peersBody += row(state, peerLabel(p), meta);
+        // clicking a peer opens the (hidden) camp tab with this peer's details
+        peersBody += row(state, peerLabel(p), meta, null, 'peer:' + peerKey(p));
       }
     }
 
