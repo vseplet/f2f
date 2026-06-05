@@ -1111,11 +1111,30 @@
                             <div class="ax-call-name">you</div>
                         </div>
                     </div>
-                    <div class="ax-call-controls">
-                        <button type="button" class="ax-call-ctrl" title="mute"><i class="bi bi-mic-fill"></i></button>
-                        <button type="button" class="ax-call-ctrl" title="camera"><i class="bi bi-camera-video-fill"></i></button>
-                        <button type="button" class="ax-call-ctrl" title="screen share"><i class="bi bi-display-fill"></i></button>
-                        <button type="button" class="ax-call-ctrl ax-call-hangup" id="call-hangup" title="hang up"><i class="bi bi-telephone-x-fill"></i></button>
+                    <div class="m2-bottombar">
+                        <button id="call-mic" class="ax-btn ax-btn-mic" disabled>
+                            <span class="ax-btn-state">○</span>
+                            <span>mic</span>
+                        </button>
+                        <button id="call-cam" class="ax-btn ax-btn-cam" disabled>
+                            <span class="ax-btn-state">□</span>
+                            <span>cam</span>
+                        </button>
+                        <button id="call-share" class="ax-btn ax-btn-share">
+                            <span class="ax-btn-state">▢</span>
+                            <span>share</span>
+                        </button>
+                        <div class="ax-vol">
+                            <span class="ax-vol-label">vol</span>
+                            <div class="ax-vol-track" id="call-vol-track">
+                                <div class="ax-vol-fill" id="call-vol-fill"></div>
+                            </div>
+                            <span class="ax-vol-value" id="call-vol-value">80</span>
+                        </div>
+                        <button id="call-hangup" class="ax-btn ax-btn-call state-connected">
+                            <span class="ax-btn-state">■</span>
+                            <span>leave</span>
+                        </button>
                     </div>
                 </div>
             </div>

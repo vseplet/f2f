@@ -27,6 +27,16 @@ $(function () {
   let currentPeerPub = '';     // who we're signalling with
   let pendingCandidates = [];  // ICE that arrived before remoteDescription
 
+  // screen share + volume
+  let screenStream = null;
+  let screenSenders = [];
+  let peerCamStreamId = '';    // id of the peer's camera/mic stream (vs screen)
+  let volume = 80;
+
+  // local media toggles
+  let micEnabled = false;
+  let camEnabled = false;
+
   // ---- signalling ----
   let signalES = null;
   function startSignaling() {
@@ -69,8 +79,11 @@ $(function () {
       (await gum({ video: true }));
     if (localStream) {
       videoSelf.srcObject = localStream;
-      if (localStream.getVideoTracks().length) tileSelf.classList.add('has-video');
+      micEnabled = localStream.getAudioTracks().length > 0;
+      camEnabled = localStream.getVideoTracks().length > 0;
+      if (camEnabled) tileSelf.classList.add('has-video');
       videoSelf.play().catch(() => {});
+      updateMediaButtons();
     }
     return localStream;
   }
@@ -79,9 +92,18 @@ $(function () {
   function newPC() {
     const conn = new RTCPeerConnection({ iceServers: [] }); // host candidates only
     conn.ontrack = (e) => {
-      videoPeer.srcObject = e.streams[0];
-      if (e.track.kind === 'video') tilePeer.classList.add('has-video');
-      videoPeer.play().catch(() => {});
+      const stream = e.streams[0];
+      if (!stream) return;
+      if (!peerCamStreamId) peerCamStreamId = stream.id;
+      if (stream.id === peerCamStreamId) {
+        videoPeer.srcObject = stream;
+        if (e.track.kind === 'video') tilePeer.classList.add('has-video');
+        videoPeer.volume = volume / 100;
+        videoPeer.play().catch(() => {});
+      } else {
+        showRemoteScreen(stream);          // peer started screen share
+        stream.getVideoTracks().forEach(t => t.addEventListener('ended', clearRemoteScreen));
+      }
     };
     conn.onicecandidate = (e) => {
       if (e.candidate) sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
@@ -157,15 +179,21 @@ $(function () {
   }
 
   function teardown() {
+    stopScreenShare(true);
+    clearRemoteScreen();
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     isOfferer = false;
     pendingCandidates = [];
     currentPeerPub = '';
+    peerCamStreamId = '';
+    micEnabled = false;
+    camEnabled = false;
     videoPeer.srcObject = null;
     videoSelf.srcObject = null;
     tilePeer.classList.remove('has-video');
     tileSelf.classList.remove('has-video');
+    if (typeof updateMediaButtons === 'function') updateMediaButtons();
   }
 
   // ---- CallManager (state + indicator) ----
@@ -236,33 +264,148 @@ $(function () {
   };
   window.f2fCall = Call;
 
-  // ---- controls ----
-  function toggleTrack(kind) {
-    if (!localStream) return false;
-    const tracks = kind === 'audio' ? localStream.getAudioTracks() : localStream.getVideoTracks();
-    let on = false;
-    tracks.forEach(t => { t.enabled = !t.enabled; on = t.enabled; });
-    if (kind === 'video') tileSelf.classList.toggle('has-video', on);
-    return on;
+  // ---- controls (meet2-style) ----
+  const $btnMic = document.getElementById('call-mic');
+  const $btnCam = document.getElementById('call-cam');
+  const $btnShare = document.getElementById('call-share');
+
+  function updateMediaButtons() {
+    const hasMic = !!localStream && localStream.getAudioTracks().length > 0;
+    const hasCam = !!localStream && localStream.getVideoTracks().length > 0;
+    if ($btnMic) {
+      $btnMic.disabled = !hasMic;
+      $btnMic.classList.toggle('active', micEnabled);
+      $btnMic.querySelector('.ax-btn-state').textContent = micEnabled ? '●' : '○';
+    }
+    if ($btnCam) {
+      $btnCam.disabled = !hasCam;
+      $btnCam.classList.toggle('active', camEnabled);
+      $btnCam.querySelector('.ax-btn-state').textContent = camEnabled ? '■' : '□';
+    }
+    // keep the compact callbar mic glyph in sync
+    $('#ax-callbar-mute i').attr('class', 'bi ' + (micEnabled ? 'bi-mic-fill' : 'bi-mic-mute-fill'));
   }
+
+  // --- callbar (compact, above the tabs) ---
   $('#ax-callbar-open').on('click', function () {
     if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + Call.active.id;
   });
   $('#ax-callbar-mute').on('click', function (e) {
     e.stopPropagation();
-    const on = toggleTrack('audio');
-    $(this).find('i').attr('class', 'bi ' + (on ? 'bi-mic-fill' : 'bi-mic-mute-fill'));
+    if (!localStream) return;
+    micEnabled = !micEnabled;
+    localStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
+    updateMediaButtons();
   });
   $('#ax-callbar-hangup').on('click', function (e) { e.stopPropagation(); Call.hangup(); });
-  $('#call-hangup').on('click', function () { Call.hangup(); });
-  $('.ax-call-ctrl[title="mute"]').on('click', function () {
-    const on = toggleTrack('audio');
-    $(this).find('i').attr('class', 'bi ' + (on ? 'bi-mic-fill' : 'bi-mic-mute-fill'));
+
+  // --- mic / cam ---
+  $(document).on('click', '#call-mic', function () {
+    if (!localStream) return;
+    micEnabled = !micEnabled;
+    localStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
+    updateMediaButtons();
   });
-  $('.ax-call-ctrl[title="camera"]').on('click', function () {
-    const on = toggleTrack('video');
-    $(this).find('i').attr('class', 'bi ' + (on ? 'bi-camera-video-fill' : 'bi-camera-video-off-fill'));
+  $(document).on('click', '#call-cam', function () {
+    if (!localStream) return;
+    camEnabled = !camEnabled;
+    localStream.getVideoTracks().forEach(t => { t.enabled = camEnabled; });
+    tileSelf.classList.toggle('has-video', camEnabled);
+    updateMediaButtons();
   });
+
+  // --- screen share ---
+  $(document).on('click', '#call-share', function () {
+    if (screenStream) stopScreenShare(); else startScreenShare();
+  });
+  async function startScreenShare() {
+    if (!pc || screenStream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return;
+    let stream;
+    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }); }
+    catch (_) { return; }
+    screenStream = stream;
+    screenSenders = [];
+    stream.getTracks().forEach(t => {
+      screenSenders.push(pc.addTrack(t, stream)); // separate stream id → peer sees a new tile
+      t.addEventListener('ended', () => stopScreenShare());
+    });
+    showSelfScreen(stream);
+    setBtnState($btnShare, '■', true);
+  }
+  function stopScreenShare(silent) {
+    if (!screenStream) return;
+    const stream = screenStream;
+    screenStream = null;
+    stream.getTracks().forEach(t => t.stop());
+    if (pc) screenSenders.forEach(s => { try { pc.removeTrack(s); } catch (_) {} });
+    screenSenders = [];
+    const t = document.getElementById('call-tile-screen-self');
+    if (t) t.remove();
+    if (!silent) setBtnState($btnShare, '▢', false);
+  }
+
+  // --- screen tiles (local preview + remote) ---
+  const stage = document.getElementById('call-stage');
+  function screenTile(id, label) {
+    let tile = document.getElementById(id);
+    if (tile) return tile;
+    tile = document.createElement('div');
+    tile.className = 'ax-call-tile ax-call-tile-screen has-video';
+    tile.id = id;
+    const v = document.createElement('video');
+    v.autoplay = true; v.playsInline = true; v.muted = (id === 'call-tile-screen-self');
+    const name = document.createElement('div');
+    name.className = 'ax-call-name';
+    name.textContent = label;
+    tile.appendChild(v);
+    tile.appendChild(name);
+    stage.appendChild(tile);
+    return tile;
+  }
+  function showSelfScreen(stream) {
+    const v = screenTile('call-tile-screen-self', 'you · screen').querySelector('video');
+    v.srcObject = stream; v.play().catch(() => {});
+  }
+  function showRemoteScreen(stream) {
+    const v = screenTile('call-tile-screen-peer', 'peer · screen').querySelector('video');
+    v.srcObject = stream; v.volume = volume / 100; v.play().catch(() => {});
+  }
+  function clearRemoteScreen() {
+    const t = document.getElementById('call-tile-screen-peer');
+    if (t) t.remove();
+  }
+
+  // --- volume (drag slider, applies to remote audio) ---
+  const $volTrack = document.getElementById('call-vol-track');
+  const $volFill = document.getElementById('call-vol-fill');
+  const $volValue = document.getElementById('call-vol-value');
+  function setVolume(v) {
+    volume = Math.max(0, Math.min(100, v));
+    if ($volFill) $volFill.style.width = volume + '%';
+    if ($volValue) $volValue.textContent = String(volume);
+    if (videoPeer) videoPeer.volume = volume / 100;
+    const rs = document.querySelector('#call-tile-screen-peer video');
+    if (rs) rs.volume = volume / 100;
+  }
+  if ($volTrack) {
+    $volTrack.addEventListener('pointerdown', function (e) {
+      const drag = (ev) => {
+        const r = $volTrack.getBoundingClientRect();
+        const x = Math.max(0, Math.min(r.width, ev.clientX - r.left));
+        setVolume(Math.round((x / r.width) * 100));
+      };
+      drag(e);
+      const move = (ev) => drag(ev);
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+  }
+  setVolume(80);
+
+  // --- hang up ---
+  $(document).on('click', '#call-hangup', function () { Call.hangup(); });
 
   // The chat header call button starts a call for the chat we're in.
   $('#chat-call').on('click', function () {

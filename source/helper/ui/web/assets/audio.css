@@ -1696,13 +1696,19 @@ a.ax-domain-link:hover {
     min-height: 0;
 }
 
-#tab-meet2 .m2-bottombar {
+#tab-meet2 .m2-bottombar,
+#tab-call .m2-bottombar {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
     padding-top: 8px;
     flex: 0 0 auto;
+}
+#tab-call .m2-bottombar {
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px dotted var(--border);
 }
 .m2-bottombar .ax-vol {
     min-width: 200px;
