@@ -424,6 +424,13 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.25; }
 }
+.ax-tree-row.ax-tree-add {
+    color: var(--muted);
+    font-style: italic;
+}
+.ax-tree-row.ax-tree-add:hover {
+    color: var(--accent);
+}
 .ax-tree-row:hover {
     color: var(--text);
 }

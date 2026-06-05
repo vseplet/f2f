@@ -308,6 +308,9 @@ $(function () {
       return;
     }
     $('#status-diag').removeClass('active');
+    // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
+    const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
+    if (tm) { activateTab(tm[1]); return; }
     const m = h.match(/^chat:(channel|dm):(.+)$/);
     if (!m) return;
     const [, kind, id] = m;
@@ -761,8 +764,6 @@ $(function () {
     // in its ID — that's what users actually call the camp ("xyz",
     // "test1"); KnownCamp.name is the local user's nickname inside
     // that camp, which we surface as a sub-line.
-    const activeID = (s && s.camp_id) || '';
-
     // peers — flat list. Each row: dot + name + ip/rtt meta.
     const peers = (s && s.peers) || [];
     function peerLabel(p) {
@@ -798,11 +799,11 @@ $(function () {
       (p.files || []).forEach(f => allFiles.push({ f, owner, self: !!p.self }));
     }
 
-    // zone = camp label (<pub>_<label>); used to build openable URLs.
-    const zone = activeID.split('_').pop() || '';
+    // Clicking a domain opens its live page (as before). The dns tab is
+    // reached via the "+ add domain" row below the list.
+    const zone = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
     const domainsBody = allDomains.length
       ? allDomains.map(({ d, owner, state }) => {
-          // Wildcard domains (*.x) aren't directly openable.
           const url = (zone && !d.name.includes('*')) ? `https://${d.name}.${zone}.f2f` : '';
           return row(state, d.name, owner, url);
         }).join('')
@@ -810,18 +811,18 @@ $(function () {
 
     const portsBody = allPorts.length
       ? allPorts.map(({ x, owner }) =>
-          row('', `:${x.port} ${x.protocol || 'tcp'}`, owner)).join('')
+          row('', `:${x.port} ${x.protocol || 'tcp'}`, owner, null, 'tunnel:p:' + x.port)).join('')
       : empty('no ports');
 
     // drop is split into two sections: files available from peers and
-    // files we share ourselves.
+    // files we share ourselves. Any file row opens the drop tab.
     const peerFilesBody = allFiles.filter(x => !x.self).length
       ? allFiles.filter(x => !x.self).map(({ f, owner }) =>
-          row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`)).join('')
+          row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`, null, 'drop:' + f.name)).join('')
       : empty('none');
     const myFilesBody = allFiles.filter(x => x.self).length
       ? allFiles.filter(x => x.self).map(({ f }) =>
-          row('', f.name, fmtBytes(f.size || 0))).join('')
+          row('', f.name, fmtBytes(f.size || 0), null, 'drop:' + f.name)).join('')
       : empty('none');
 
     // calls — group calls hosted in the camp. Owner is the peer
@@ -885,15 +886,17 @@ $(function () {
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
     const interceptsBody = intercepts.length
-      ? intercepts.map(i => row('', i.spec, i.peer || '')).join('')
+      ? intercepts.map(i => row('', i.spec, i.peer || '', null, 'tunnel:i:' + i.spec)).join('')
       : empty('none');
 
     // trusted CAs.
     const trusted = (s && s.trusted_peers) || [];
     const trustedBody = trusted.length
-      ? trusted.map(t => row(t.installed ? 'online' : 'half',
-          t.peer_name || t.common_name || t.fingerprint.slice(0, 12),
-          t.installed ? 'installed' : 'pending')).join('')
+      ? trusted.map(t => {
+          const name = t.peer_name || t.common_name || t.fingerprint.slice(0, 12);
+          return row(t.installed ? 'online' : 'half', name,
+            t.installed ? 'installed' : 'pending', null, 'dns:cert:' + name);
+        }).join('')
       : empty('none');
 
     // All messaging lives under a single "messages" group with three
@@ -905,6 +908,12 @@ $(function () {
     function section(label) {
       return `<div class="ax-tree-section">${esc(label)}</div>`;
     }
+    // A manage affordance ("add/remove …") that opens a resource's tab — also
+    // the only entry point when the list is empty (nothing else to click).
+    function addRow(label, route) {
+      return `<div class="ax-tree-row ax-tree-add" data-route="${esc(route)}">`
+        + `<span class="ax-tree-label">${esc(label)}</span></div>`;
+    }
     const meetsBody = meetRows || empty('no calls');
     const messagingBody =
       section('meets')    + meetsBody
@@ -914,16 +923,18 @@ $(function () {
     // tunnel — outbound intercepts + inbound open ports under one group
     // with section dividers (mirrors the app's "tunnel" tab).
     const tunnelBody =
-      section('intercepts') + interceptsBody
+      section('intercepts') + addRow('add/remove intercept', 'tunnel') + interceptsBody
       + section('ports')      + portsBody;
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
-          section('available') + peerFilesBody + section('sharing') + myFilesBody)
+          section('available') + peerFilesBody
+          + section('sharing') + addRow('add/remove file', 'drop') + myFilesBody)
       + category('domains',   'domains',   allDomains.length,
-          domainsBody + section('certificates') + trustedBody)
+          addRow('add/remove domain', 'dns') + domainsBody
+          + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
