@@ -2,14 +2,15 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <title>f2f-mac</title>
+        <title>f2f</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <script src="/vendor/tailwind.min.js"></script>
         <script src="/vendor/jquery.min.js"></script>
+        <link rel="stylesheet" href="/vendor/bootstrap-icons/bootstrap-icons.min.css" />
         <link rel="stylesheet" href="/audio.css" />
     </head>
     <body
-        class="min-h-screen"
+        class="h-screen flex flex-col"
         style="
             background: #0c0a08;
             background-image: radial-gradient(
@@ -20,14 +21,10 @@
             background-size: 24px 24px;
         "
     >
-        <div class="h-screen flex">
+        <div class="flex-1 flex min-h-0">
             <aside id="ax-sidebar" class="ax-sidebar">
                 <div class="ax-sidebar-inner">
                     <div class="ax-sidebar-header">
-                        <button type="button" id="ax-sidebar-toggle"
-                                class="ax-sidebar-toggle"
-                                title="collapse / expand"
-                                aria-label="toggle sidebar">‹</button>
                         <input
                             type="search"
                             id="ax-sidebar-search"
@@ -48,17 +45,44 @@
                 <div class="ax-sidebar-resize" id="ax-sidebar-resize" title="drag to resize"></div>
             </aside>
             <div class="ax-main-col flex flex-col flex-1 min-w-0">
-            <div class="ax-frame ax-tabbar">
+            <div class="ax-callbar" id="ax-callbar" style="display: none">
+                <span class="ax-callbar-main" id="ax-callbar-open">
+                    <i class="bi bi-telephone-fill" id="ax-callbar-icon"></i>
+                    <span class="ax-callbar-title" id="ax-callbar-title">—</span>
+                    <span class="ax-callbar-time" id="ax-callbar-time">00:00</span>
+                </span>
+                <span class="ax-callbar-ctrls">
+                    <button type="button" class="ax-callbar-btn" id="ax-callbar-mute" title="mute">
+                        <i class="bi bi-mic-fill"></i>
+                    </button>
+                    <button type="button" class="ax-callbar-btn" id="ax-callbar-cam" title="camera">
+                        <i class="bi bi-camera-video-off-fill"></i>
+                    </button>
+                    <button type="button" class="ax-callbar-btn" id="ax-callbar-share" title="screen share">
+                        <i class="bi bi-display-fill"></i>
+                    </button>
+                    <button type="button" class="ax-callbar-btn" id="ax-callbar-chat" title="chat">
+                        <i class="bi bi-chat-fill"></i>
+                    </button>
+                    <button type="button" class="ax-callbar-btn ax-callbar-hangup" id="ax-callbar-hangup" title="hang up">
+                        <i class="bi bi-telephone-x-fill"></i>
+                    </button>
+                </span>
+            </div>
+            <!-- Tabbar hidden: every tab is now opened via routes (sidebar
+                 clicks + status-bar items). Buttons kept for the JS that
+                 toggles panels by triggering their click. -->
+            <div class="ax-frame ax-tabbar" style="display: none">
                 <div class="ax-header">
                     <div class="ax-tabs">
                         <button
                             type="button"
                             data-tab="camp"
                             class="ax-tab ax-tab-active"
+                            style="display: none"
                         >
                             camp
                         </button>
-                        <span class="ax-sep">·</span>
                         <button type="button" data-tab="tunnel" class="ax-tab">
                             tunnel
                         </button>
@@ -77,25 +101,7 @@
                         <button type="button" data-tab="drop" class="ax-tab">
                             drop
                         </button>
-                        <span class="ax-sep">·</span>
-                        <button
-                            type="button"
-                            data-tab="diagnostics"
-                            class="ax-tab"
-                        >
-                            diagnostics
-                        </button>
                     </div>
-                    <button
-                        id="btn-engine"
-                        type="button"
-                        class="ax-engine-btn state-loading"
-                        title="loading…"
-                    >
-                        <span class="ax-engine-state">⋯</span>
-                        <span class="ax-engine-label">loading…</span>
-                        <span class="ax-engine-meta" id="ax-engine-meta"></span>
-                    </button>
                 </div>
             </div>
 
@@ -103,7 +109,7 @@
                 <div class="ax-frame">
                     <div class="ax-section">
                         <div class="ax-section-title">
-                            <span>— identity</span>
+                            <span id="identity-title">— identity</span>
                         </div>
                         <!-- Running: key:value readout, no inputs. Hidden while
                stopped — see applyStatus. -->
@@ -113,21 +119,6 @@
                                     <tr>
                                         <td>name</td>
                                         <td id="identity-name"></td>
-                                    </tr>
-                                    <tr>
-                                        <td>camp id</td>
-                                        <td>
-                                            <code
-                                                id="identity-camp-id"
-                                                class="ax-mono"
-                                                title="click to copy"
-                                                style="
-                                                    cursor: pointer;
-                                                    font-size: 11px;
-                                                    word-break: break-all;
-                                                "
-                                            ></code>
-                                        </td>
                                     </tr>
                                     <tr>
                                         <td>tunnel ip</td>
@@ -1045,6 +1036,96 @@
                 </div>
             </div>
             <!-- /#tab-diagnostics -->
+            <div id="tab-chat" class="tab-panel hidden">
+                <div class="ax-frame ax-chat">
+                    <div class="ax-section-title ax-chat-header">
+                        <span id="chat-title">— chat</span>
+                        <button
+                            type="button"
+                            id="chat-call"
+                            class="ax-engine-btn ax-chat-call"
+                            title="call"
+                            aria-label="call"
+                            style="display: none"
+                        ><i class="bi bi-telephone-fill"></i></button>
+                    </div>
+                    <div id="chat-messages" class="ax-chat-messages"></div>
+                    <form id="chat-form" class="ax-chat-input">
+                        <button
+                            type="button"
+                            id="chat-attach"
+                            class="ax-engine-btn ax-chat-attach"
+                            title="attach (coming soon)"
+                            aria-label="attach"
+                        ><i class="bi bi-plus-lg"></i></button>
+                        <input
+                            id="chat-input"
+                            type="text"
+                            autocomplete="off"
+                            placeholder="message…"
+                        />
+                        <button type="submit" class="ax-engine-btn ax-chat-send" title="send" aria-label="send"><i class="bi bi-arrow-up-short"></i></button>
+                    </form>
+                </div>
+            </div>
+            <!-- /#tab-chat -->
+            <div id="tab-call" class="tab-panel hidden">
+                <div class="ax-frame ax-call">
+                    <div class="ax-section-title ax-call-header">
+                        <span id="call-title">— call</span>
+                    </div>
+                    <div class="ax-call-stage" id="call-stage">
+                        <div class="ax-call-tile" id="call-tile-peer">
+                            <video id="call-video-peer" autoplay playsinline></video>
+                            <div class="ax-call-avatar"><i class="bi bi-person-fill"></i></div>
+                            <div class="ax-call-name" id="call-peer-name">peer</div>
+                            <button type="button" class="ax-call-fs" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        </div>
+                        <div class="ax-call-tile ax-call-tile-self" id="call-tile-self">
+                            <video id="call-video-self" autoplay playsinline muted></video>
+                            <div class="ax-call-avatar"><i class="bi bi-person-fill"></i></div>
+                            <div class="ax-call-name">you</div>
+                            <button type="button" class="ax-call-fs" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        </div>
+                    </div>
+                    <div class="m2-bottombar" id="call-bottombar">
+                        <button id="call-mic" class="ax-btn ax-btn-mic" disabled>
+                            <span class="ax-btn-state">○</span>
+                            <span>mic</span>
+                        </button>
+                        <button id="call-cam" class="ax-btn ax-btn-cam" disabled>
+                            <span class="ax-btn-state">□</span>
+                            <span>cam</span>
+                        </button>
+                        <button id="call-share" class="ax-btn ax-btn-share">
+                            <span class="ax-btn-state">▢</span>
+                            <span>share</span>
+                        </button>
+                        <button id="call-chat" class="ax-btn ax-btn-chat">
+                            <span class="ax-btn-state">▢</span>
+                            <span>chat</span>
+                        </button>
+                        <div class="ax-vol">
+                            <span class="ax-vol-label">vol</span>
+                            <div class="ax-vol-track" id="call-vol-track">
+                                <div class="ax-vol-fill" id="call-vol-fill"></div>
+                            </div>
+                            <span class="ax-vol-value" id="call-vol-value">80</span>
+                        </div>
+                        <button id="call-hangup" class="ax-btn ax-btn-call state-connected">
+                            <span class="ax-btn-state">■</span>
+                            <span>leave</span>
+                        </button>
+                    </div>
+                    <div class="ax-call-ended hidden" id="call-ended">
+                        <div class="ax-call-ended-icon"><i class="bi bi-telephone-x"></i></div>
+                        <div class="ax-call-ended-title">звонок завершён</div>
+                        <div class="ax-call-ended-sub" id="call-ended-sub"></div>
+                        <button type="button" id="call-ended-close" class="ax-btn ax-btn-primary">закрыть</button>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-call -->
             </div>
             <!-- /.ax-main-col -->
             <aside id="ax-notifications" class="ax-sidebar ax-sidebar-right">
@@ -1071,9 +1152,27 @@
             </aside>
         </div>
         <!-- /.h-screen flex -->
+        <div class="ax-statusbar" id="ax-statusbar">
+            <button
+                id="btn-engine"
+                type="button"
+                class="ax-engine-btn ax-engine-btn-sm state-loading"
+                title="loading…"
+            >
+                <span class="ax-engine-state">⋯</span>
+                <span class="ax-engine-label">loading…</span>
+                <span class="ax-engine-meta" id="ax-engine-meta"></span>
+            </button>
+            <span class="ax-status-item" id="status-camp">—</span>
+            <span class="ax-status-item" id="status-peers">—</span>
+            <span class="ax-status-item" id="status-io">—</span>
+            <span class="ax-status-spacer"></span>
+            <span class="ax-status-item clickable" id="status-diag" title="open diagnostics">diagnostics</span>
+            <span class="ax-status-item" id="status-fp"></span>
+        </div>
 
         <script src="/app.js"></script>
-        <script src="/audio.js"></script>
         <script src="/meet2.js"></script>
+        <script src="/call.js"></script>
     </body>
 </html>

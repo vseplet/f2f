@@ -45,7 +45,7 @@
     font-family:
         "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco, Consolas,
         monospace;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.6;
     padding: 18px 20px;
     border: 1px dotted var(--border);
@@ -57,7 +57,11 @@
    as one continuous box. Every tab-panel uses the same one-frame layout
    (see HTML). */
 .ax-tabbar {
-    padding: 14px 20px;
+    height: 52px;
+    box-sizing: border-box;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
     margin-bottom: 0;
     border-radius: 0;
     border-bottom: 1px solid var(--panel-2);
@@ -66,6 +70,7 @@
     border-top-style: none;
 }
 .ax-tabbar .ax-header {
+    flex: 1;
     margin-bottom: 0;
 }
 
@@ -88,7 +93,7 @@
     color: var(--text);
     font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
         Consolas, monospace;
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1.6;
     display: flex;
 }
@@ -100,7 +105,9 @@
     overflow: hidden;
 }
 .ax-sidebar-header {
-    padding: 10px 12px 8px;
+    height: 52px;
+    box-sizing: border-box;
+    padding: 0 12px;
     border-bottom: 1px dotted var(--border);
     flex-shrink: 0;
     display: flex;
@@ -130,6 +137,13 @@
    the affordance for re-expanding. */
 .ax-sidebar.ax-collapsed {
     width: 32px !important;
+}
+/* Collapsed left strip is itself the expand affordance — click anywhere. */
+#ax-sidebar.ax-collapsed {
+    cursor: pointer;
+}
+#ax-sidebar.ax-collapsed:hover {
+    background: var(--panel);
 }
 .ax-sidebar.ax-collapsed .ax-search,
 .ax-sidebar.ax-collapsed .ax-sidebar-scroll {
@@ -344,7 +358,9 @@
     transform: rotate(-90deg);
 }
 .ax-tree-label {
-    flex: 1;
+    /* grow to push the meta right, but never shrink: the label stays
+       fully readable; the right-hand meta yields instead. */
+    flex: 1 0 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -352,11 +368,15 @@
 .ax-tree-badge {
     color: var(--muted);
     font-size: 11px;
+    /* Yields first: the meta truncates while the label stays full. */
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ax-tree-children {
-    margin-left: 14px;
-    padding-left: 6px;
-    border-left: 1px dotted var(--border);
+    margin-left: 8px;
     margin-top: 2px;
     margin-bottom: 4px;
 }
@@ -367,9 +387,49 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 1px 0;
+    /* left border is always present (transparent) so the active accent
+       bar doesn't shift the row; padding keeps text clear of it. */
+    padding: 1px 0 1px 5px;
+    border-left: 2px solid transparent;
     cursor: pointer;
     color: var(--text-2);
+}
+.ax-tree-row.active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-left-color: var(--accent);
+}
+.ax-tree-row.active .ax-tree-label {
+    color: var(--accent);
+}
+/* An active call keeps its row flagged (green) regardless of where we've
+   navigated. A trailing pulsing pip makes it obvious at a glance. */
+.ax-tree-row.in-call {
+    border-left-color: var(--ok);
+}
+.ax-tree-row.in-call .ax-tree-label {
+    color: var(--ok);
+}
+.ax-tree-row.in-call::after {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+    margin-left: auto;
+    animation: ax-incall-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ax-incall-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+.ax-tree-row.ax-tree-add {
+    color: var(--muted);
+    font-style: italic;
+}
+.ax-tree-row.ax-tree-add:hover {
+    color: var(--accent);
 }
 .ax-tree-row:hover {
     color: var(--text);
@@ -392,6 +452,20 @@
 .ax-tree-row.offline .ax-tree-dot,
 .ax-tree-dot.off {
     background: var(--border-2);
+}
+/* Pairing-state dots — match the main window's peers table colours
+   (reachable/degraded/unreachable/self) so sidebar and window agree. */
+.ax-tree-row.reachable .ax-tree-dot {
+    background: var(--ok);
+}
+.ax-tree-row.degraded .ax-tree-dot {
+    background: var(--warn);
+}
+.ax-tree-row.unreachable .ax-tree-dot {
+    background: var(--danger);
+}
+.ax-tree-row.self .ax-tree-dot {
+    background: var(--accent);
 }
 /* In-group section divider (uncollapsible). Used inside .ax-tree-children
    to separate sibling lists without giving each its own caret — e.g.
@@ -425,7 +499,6 @@
     margin-top: 0;
     min-height: 100%;
     box-sizing: border-box;
-    padding-bottom: 40px;
 }
 
 /* Header row (used inside .ax-tabbar — no bottom margin since the
@@ -1439,7 +1512,6 @@ a.ax-domain-link:hover {
 /* Chat input row */
 .ax-frame .ax-chat-input {
     border-top: 1px solid var(--panel-2);
-    padding: 8px 12px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1675,7 +1747,8 @@ a.ax-domain-link:hover {
     min-height: 0;
 }
 
-#tab-meet2 .m2-bottombar {
+#tab-meet2 .m2-bottombar,
+#tab-call .m2-bottombar {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1683,7 +1756,482 @@ a.ax-domain-link:hover {
     padding-top: 8px;
     flex: 0 0 auto;
 }
+#tab-call .m2-bottombar {
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px dotted var(--border);
+}
 .m2-bottombar .ax-vol {
     min-width: 200px;
     flex-shrink: 0;
+}
+
+/* ---- Active-call indicator bar (above the tabs, = tabbar height) ---- */
+.ax-callbar {
+    flex-shrink: 0;
+    height: 52px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--panel-2);
+    background: color-mix(in srgb, var(--ok) 12%, var(--frame));
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer; /* whole bar opens the call window */
+}
+.ax-callbar:hover {
+    background: color-mix(in srgb, var(--ok) 18%, var(--frame));
+}
+.ax-callbar-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    cursor: pointer;
+}
+.ax-callbar-main .bi {
+    color: var(--ok);
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.ax-callbar-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-callbar-time {
+    color: var(--muted);
+    flex-shrink: 0;
+}
+.ax-callbar-ctrls {
+    display: inline-flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.ax-callbar-btn {
+    width: 30px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 13px;
+}
+.ax-callbar-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.ax-callbar-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ax-callbar-hangup {
+    color: var(--danger);
+}
+.ax-callbar-hangup:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* ---- Call window ---- */
+#tab-call {
+    overflow: hidden;
+}
+#tab-call:not(.hidden) {
+    display: flex;
+    flex-direction: column;
+}
+.ax-call {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    box-sizing: border-box;
+}
+.ax-call-header {
+    flex-shrink: 0;
+    margin-bottom: 8px;
+}
+.ax-call-stage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-content: center;
+    gap: 8px;
+    overflow: hidden;
+    /* tile width/height are set by reflowStage() in call.js (16:9, max area);
+       flex-wrap + justify-content:center lay them out and centre a short last
+       row — no margin hacks. */
+}
+.ax-call-tile {
+    flex: 0 0 auto;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    position: relative;
+    overflow: hidden;
+}
+.ax-call-tile video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: var(--bg-deep);
+    display: none;
+}
+.ax-call-tile.has-video video {
+    display: block;
+}
+.ax-call-tile.has-video .ax-call-avatar {
+    display: none;
+}
+.ax-call-tile-self video {
+    transform: scaleX(-1); /* mirror own camera */
+}
+.ax-call-tile .ax-call-name {
+    position: absolute;
+    left: 8px;
+    bottom: 6px;
+    z-index: 1;
+    background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
+    padding: 1px 6px;
+}
+.ax-call-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 26px;
+}
+.ax-call-name {
+    color: var(--text-2);
+    font-size: 12px;
+}
+/* per-tile fullscreen button (mirrors meet2's ⛶), shown on tile hover */
+.ax-call-fs {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
+    background: color-mix(in srgb, var(--bg-deep) 60%, transparent);
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.ax-call-tile:hover .ax-call-fs {
+    opacity: 1;
+}
+.ax-call-fs:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.ax-call-controls {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding-top: 12px;
+    margin-top: 8px;
+    border-top: 1px dotted var(--border);
+}
+.ax-call-ctrl {
+    width: 40px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 15px;
+}
+.ax-call-ctrl:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ax-call-hangup {
+    color: var(--danger);
+}
+.ax-call-hangup:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* ---- "call ended" screen (replaces the stage once a call is over) ---- */
+.ax-call-ended {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: var(--muted);
+}
+.ax-call-ended.hidden {
+    display: none;
+}
+.ax-call-ended-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    color: var(--danger);
+}
+.ax-call-ended-title {
+    color: var(--text-2);
+    font-size: 15px;
+    letter-spacing: 0.04em;
+}
+.ax-call-ended-sub {
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 14px;
+}
+.ax-call-ended .ax-btn {
+    margin-top: 6px;
+}
+
+/* ---- IDE-style status bar (bottom, full width) ---- */
+.ax-statusbar {
+    flex-shrink: 0;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 12px;
+    border-top: 1px solid var(--panel-2);
+    background: var(--bg-deep);
+    color: var(--muted);
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
+        Consolas, monospace;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+}
+.ax-status-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.ax-status-item:empty {
+    display: none;
+}
+.ax-status-item.clickable {
+    cursor: pointer;
+}
+.ax-status-item.clickable:hover {
+    color: var(--text-2);
+}
+.ax-status-item.active {
+    color: var(--accent);
+}
+.ax-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border-2);
+    flex-shrink: 0;
+}
+.ax-statusbar.running .ax-status-dot {
+    background: var(--ok);
+}
+.ax-statusbar.running #status-engine-text {
+    color: var(--ok);
+}
+.ax-status-spacer {
+    flex: 1;
+}
+/* Engine start/stop toggle lives in the status bar (bottom-left), compact.
+   The .ax-frame .ax-engine-btn rules don't reach here, so restate them small. */
+.ax-statusbar .ax-engine-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 20px;
+    padding: 0 8px;
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+}
+.ax-statusbar .ax-engine-btn:hover {
+    background: var(--panel);
+}
+.ax-statusbar .ax-engine-btn .ax-engine-state {
+    font-size: 10px;
+}
+.ax-statusbar .ax-engine-btn .ax-engine-meta:empty {
+    display: none;
+}
+.ax-statusbar .ax-engine-btn .ax-engine-meta {
+    opacity: 0.75;
+}
+.ax-statusbar .ax-engine-btn.state-running {
+    color: var(--ok);
+    border-color: var(--ok-deep);
+    background: color-mix(in srgb, var(--ok) 6%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-running:hover {
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-loading {
+    font-style: italic;
+    cursor: wait;
+}
+.ax-statusbar .ax-engine-btn.state-error {
+    color: var(--danger);
+    border-color: var(--danger-deep);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.ax-statusbar .ax-engine-btn.state-error:hover {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+/* ---- Chat (messages) — Slack-style, fills the panel ---- */
+#tab-chat {
+    overflow: hidden;
+}
+#tab-chat:not(.hidden) {
+    display: flex;
+    flex-direction: column;
+}
+.ax-chat {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    box-sizing: border-box;
+}
+.ax-chat-header {
+    flex-shrink: 0;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.ax-frame .ax-chat-call {
+    flex-shrink: 0;
+    width: 30px;
+    padding: 3px 0;
+    justify-content: center;
+    color: var(--ok);
+    font-size: 14px;
+}
+.ax-frame .ax-chat-call:hover {
+    color: var(--ok);
+    border-color: var(--ok-deep);
+    background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+.ax-chat-messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+.ax-msg {
+    padding: 1px 0;
+}
+.ax-msg-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 10px;
+}
+.ax-msg-author {
+    color: var(--accent);
+}
+.ax-msg-time {
+    color: var(--muted);
+    font-size: 11px;
+}
+.ax-msg-text {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.ax-chat-input {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 10px;
+    margin-top: 8px;
+    border-top: 1px dotted var(--border);
+}
+.ax-chat-input input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-deep);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 6px 8px;
+    font: inherit;
+    outline: none;
+}
+.ax-chat-input input:focus {
+    border-color: var(--accent-dim);
+}
+/* Chat buttons reuse the engine .ax-engine-btn chrome but are square
+   and accent-tinted. The .ax-frame scope outranks .ax-frame
+   .ax-engine-btn:hover so the whole button fills on hover (like the
+   engine start/stop button) instead of only the border changing. */
+.ax-frame .ax-chat-input .ax-engine-btn {
+    flex-shrink: 0;
+    width: 30px;
+    padding: 3px 0;
+    justify-content: center;
+    color: var(--accent);
+    font-size: 15px;
+}
+.ax-frame .ax-chat-input .ax-chat-attach {
+    color: var(--muted);
+}
+.ax-frame .ax-chat-input .ax-engine-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
 }

@@ -105,11 +105,12 @@ func (s *Service) Start(c *config.Camp) error {
 	// Register the UDP dispatch handler first so any reply from camp
 	// reaches HandlePacket via the engine read loop without anyone
 	// else having to touch the socket.
-	campAddr := ac.CampAddr()
 	campName := c.Identity.Name
 	campID := c.CampID
 	unreg := s.eng.RegisterUDPHandler(func(pkt []byte, from *net.UDPAddr) bool {
-		if !sameUDPAddr(campAddr, from) {
+		// Read the camp address dynamically — it can change as the address
+		// re-resolves (DNS recovery / fly.io IP rotation).
+		if !sameUDPAddr(ac.CampAddr(), from) {
 			return false
 		}
 		claimed := ac.HandlePacket(pkt)

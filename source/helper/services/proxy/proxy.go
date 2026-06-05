@@ -91,9 +91,13 @@ func (s *Service) Start(tunnelIP, campID string) error {
 // startListener brings up one listener (HTTP if tlsCfg is nil, HTTPS
 // otherwise) and stashes it for shutdown.
 func (s *Service) startListener(addr string, tlsCfg *tls.Config) {
+	// Loopback listeners also serve local-only routes (the built-in
+	// portal → web UI); tunnel-facing listeners must not, so a peer can
+	// never reach our UI through the overlay.
+	loopback := strings.HasPrefix(addr, "127.0.0.1")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           http.HandlerFunc(s.handleProxy),
+		Handler:           s.proxyHandler(loopback),
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig:         tlsCfg,
 	}
@@ -139,11 +143,19 @@ func (s *Service) Stop() error {
 	return nil
 }
 
-// handleProxy is the shared reverse-proxy handler. It maps the Host
-// header's label within our <label>.f2f zone to a published domain and
-// forwards to its upstream (defaulting to 127.0.0.1). Anything outside
-// our zone or without a matching label is a 404.
-func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+// proxyHandler returns the reverse-proxy handler for one listener. It
+// maps the Host header's label within our <label>.f2f zone to a
+// published domain and forwards to its upstream (defaulting to
+// 127.0.0.1). Anything outside our zone or without a matching label is
+// a 404. loopback listeners additionally serve local-only routes (the
+// built-in portal); tunnel-facing listeners only see MyDomains.
+func (s *Service) proxyHandler(loopback bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.handleProxy(loopback, w, r)
+	}
+}
+
+func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Request) {
 	campID := ""
 	if p := s.campID.Load(); p != nil {
 		campID = strings.ToLower(strings.TrimSpace(*p))
@@ -170,12 +182,16 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Two-pass match against MyDomains: exact wins over wildcard.
+	// Two-pass match against our domains: exact wins over wildcard.
+	// Loopback also matches local-only routes (portal → web UI).
 	var (
 		port   int
 		upHost string
 	)
 	mine := s.dns.MyDomains()
+	if loopback {
+		mine = s.dns.LocalRoutes()
+	}
 	for _, d := range mine {
 		if !dns.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
 			port = d.Port

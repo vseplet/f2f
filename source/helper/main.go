@@ -8,15 +8,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -50,14 +51,15 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	bind := flag.String("bind", defaultBind, "HTTP bind address for the loopback UI")
+	console := flag.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
 	flag.Parse()
 
-	if err := run(*bind); err != nil {
-		log.Fatal(err)
+	if err := run(*bind, *console); err != nil {
+		clog.Fatal("%v", err)
 	}
 }
 
-func run(bind string) error {
+func run(bind string, console bool) error {
 	store, err := config.NewStore()
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
@@ -65,7 +67,14 @@ func run(bind string) error {
 
 	eng := engine.New(store)
 	eng.SetDefaultListen(":0") // ephemeral; camp learns reflex after NAT
-	log.SetOutput(io.MultiWriter(os.Stderr, eng.LogTap()))
+
+	// Centralised logging: log.* → file (+ UI tap), console only with
+	// --console. clog.Console() is the always-visible channel.
+	logCloser, err := clog.Init(filepath.Join(store.Dir(), "f2f.log"), console, eng.LogTap())
+	if err != nil {
+		return err
+	}
+	defer logCloser.Close()
 
 	fwSvc := firewall.New(store, eng)
 	pkiSvc := pki.New(store, eng)
@@ -151,6 +160,9 @@ func run(bind string) error {
 		},
 	}
 
+	// portal banner is printed once per camp, not on every (re)start —
+	// the wake-from-sleep detector can restart the engine repeatedly.
+	var lastPortalCamp string
 	eng.OnStarted = func(localIP string) {
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
@@ -168,6 +180,10 @@ func run(bind string) error {
 		// :443 with on-demand leaf certs (not just :80).
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
+		}
+		if st.CampID != "" && st.CampID != lastPortalCamp {
+			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
+			lastPortalCamp = st.CampID
 		}
 	}
 	eng.OnStopped = func() {
@@ -206,9 +222,9 @@ func run(bind string) error {
 	}
 
 	go func() {
-		log.Printf("UI listening on http://%s", bind)
+		clog.Console("f2f UI on http://%s", bind)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("UI server error: %v (engine continues; fix --bind and restart)", err)
+			clog.Console("UI server error: %v (engine continues; fix --bind and restart)", err)
 		}
 	}()
 

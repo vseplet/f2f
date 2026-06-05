@@ -19,7 +19,7 @@ help:
 	@echo "  make camp-deploy          deploy camp to fly.io"
 	@echo "  make camp-logs            tail fly.io logs for camp"
 dev:
-	-$(SUDO) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper $(ARGS)
+	-$(SUDO) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper --console $(ARGS)
 
 build:
 	go build -o f2f-mac ./source/mac

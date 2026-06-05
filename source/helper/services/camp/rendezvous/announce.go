@@ -19,11 +19,13 @@ import (
 // camp-facing path (which matters under endpoint-dependent NATs where
 // the peer-facing mapping doesn't help the camp-facing one).
 type AnnounceClient struct {
-	conn     *net.UDPConn
-	campAddr *net.UDPAddr // resolved camp UDP endpoint
-	name     string
-	campID   string
-	pub      string // local ed25519 pubkey in hex, "" in static --peer mode
+	conn          *net.UDPConn
+	campAddrStr   string                      // unresolved "host:port"; re-resolved on send
+	campAddr      atomic.Pointer[net.UDPAddr] // latest resolved endpoint (nil until resolved)
+	lastResolveMs atomic.Int64                // throttles re-resolution
+	name          string
+	campID        string
+	pub           string // local ed25519 pubkey in hex, "" in static --peer mode
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
@@ -42,27 +44,50 @@ type AnnounceClient struct {
 	lastRTTMs   atomic.Int64
 }
 
-// NewAnnounceClient resolves campAddrStr and prepares the client. The
-// underlying UDP socket is shared — no exclusive ownership beyond the
-// brief AnnounceOnce bootstrap. pub is the local ed25519 pubkey in hex,
-// empty if not available.
+// NewAnnounceClient prepares the client. The camp address is resolved
+// lazily (best-effort here, then re-resolved on every send) so a DNS
+// outage at startup — e.g. the machine just woke and the network isn't
+// up yet — self-heals instead of permanently failing. pub is the local
+// ed25519 pubkey in hex, empty if not available.
 func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub string) (*AnnounceClient, error) {
-	addr, err := net.ResolveUDPAddr("udp4", campAddrStr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve camp addr %q: %w", campAddrStr, err)
+	a := &AnnounceClient{
+		conn:        conn,
+		campAddrStr: campAddrStr,
+		name:        name,
+		campID:      campID,
+		pub:         pub,
 	}
-	return &AnnounceClient{
-		conn:     conn,
-		campAddr: addr,
-		name:     name,
-		campID:   campID,
-		pub:      pub,
-	}, nil
+	a.resolve() // best-effort; sendAnnounce keeps retrying if DNS isn't ready
+	return a, nil
 }
 
-// CampAddr returns the resolved camp UDP endpoint. The engine's read
-// loop uses this to identify incoming packets that belong to us.
-func (a *AnnounceClient) CampAddr() *net.UDPAddr { return a.campAddr }
+// resolve re-resolves the camp address. Throttled to ~30s unless we have
+// nothing yet, so DNS hiccups self-heal and fly.io IP changes are picked
+// up. The previous good address is kept on failure.
+func (a *AnnounceClient) resolve() {
+	cur := a.campAddr.Load()
+	now := time.Now().UnixMilli()
+	if cur != nil && now-a.lastResolveMs.Load() < 30_000 {
+		return
+	}
+	a.lastResolveMs.Store(now)
+	addr, err := net.ResolveUDPAddr("udp4", a.campAddrStr)
+	if err != nil {
+		if cur == nil {
+			log.Printf("camp: resolve %q failed (%v) — will retry", a.campAddrStr, err)
+		}
+		return
+	}
+	if cur == nil || cur.String() != addr.String() {
+		log.Printf("camp: resolved %q → %s", a.campAddrStr, addr)
+	}
+	a.campAddr.Store(addr)
+}
+
+// CampAddr returns the latest resolved camp UDP endpoint, or nil if it
+// hasn't resolved yet. The engine's read loop uses this to identify
+// incoming packets that belong to us, so it must read it dynamically.
+func (a *AnnounceClient) CampAddr() *net.UDPAddr { return a.campAddr.Load() }
 
 // Self returns the latest PeerInfo camp gave us, or nil if we haven't
 // received any reply yet.
@@ -213,6 +238,11 @@ func parseAnnounceReply(pkt []byte) (info PeerInfo, peers []PeerInfo, perr error
 }
 
 func (a *AnnounceClient) sendAnnounce() error {
+	a.resolve()
+	addr := a.campAddr.Load()
+	if addr == nil {
+		return fmt.Errorf("camp addr %q unresolved", a.campAddrStr)
+	}
 	data, err := json.Marshal(AnnounceReq{
 		T:      "announce",
 		Name:   a.name,
@@ -223,7 +253,7 @@ func (a *AnnounceClient) sendAnnounce() error {
 		return err
 	}
 	a.lastSentMs.Store(time.Now().UnixMilli())
-	if _, err := a.conn.WriteToUDP(data, a.campAddr); err != nil {
+	if _, err := a.conn.WriteToUDP(data, addr); err != nil {
 		return fmt.Errorf("send announce: %w", err)
 	}
 	return nil

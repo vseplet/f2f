@@ -1,4 +1,9 @@
 $(function () {
+  // Selected-peer state for the identity panel + last status sample. Declared
+  // first because applyRoute() runs during init, before later code.
+  let selectedPeer = '';   // peerKey of the peer whose details fill the identity panel
+  let lastStatus = null;   // last /api/status sample, for re-rendering on route change
+
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
   $('.ax-tab').on('click', function () {
@@ -8,24 +13,38 @@ $(function () {
     $(this).addClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-' + tab).removeClass('hidden');
+    $('#status-diag').removeClass('active'); // leaving diagnostics
     $(document).trigger('f2f:tab-changed', [tab]);
   });
 
   // Left sidebar: width persists in localStorage, drag handle on the
-  // right edge resizes it. Below the collapse threshold the tree hides
-  // and only the handle stays visible — drag further right to restore.
+  // right edge resizes it. Drag below the collapse threshold and it
+  // becomes a thin strip — click that strip to expand it back. No button.
   const $sidebar = $('#ax-sidebar');
   const $sidebarResize = $('#ax-sidebar-resize');
   const SIDEBAR_KEY = 'f2f:sidebar-width';
+  const LAST_EXPANDED_KEY = 'f2f:sidebar-expanded-width';
   const SIDEBAR_COLLAPSE_THRESHOLD = 80; // px
   const SIDEBAR_MIN = 32;
   const SIDEBAR_MAX = 600;
   const sidebarDefault = 240;
 
+  // lastExpandedWidth survives reloads so clicking the strip restores the
+  // user's preferred width.
+  let lastExpandedWidth = parseInt(localStorage.getItem(LAST_EXPANDED_KEY) || '', 10);
+  if (!Number.isFinite(lastExpandedWidth) || lastExpandedWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
+    lastExpandedWidth = sidebarDefault;
+  }
+
   function applySidebarWidth(px) {
     const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px));
     $sidebar.css('width', clamped + 'px');
-    $sidebar.toggleClass('ax-collapsed', clamped < SIDEBAR_COLLAPSE_THRESHOLD);
+    const collapsed = clamped < SIDEBAR_COLLAPSE_THRESHOLD;
+    $sidebar.toggleClass('ax-collapsed', collapsed);
+    if (!collapsed) {
+      lastExpandedWidth = clamped;
+      try { localStorage.setItem(LAST_EXPANDED_KEY, String(clamped)); } catch (_) {}
+    }
   }
   try {
     const saved = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
@@ -50,32 +69,13 @@ $(function () {
     $(document).on('mousemove.sbres', onMove).on('mouseup.sbres', onUp);
   });
 
-  // Toggle button: collapse if expanded, restore to last non-collapsed
-  // width if currently collapsed. lastExpandedWidth survives reloads
-  // via localStorage so users always get back to their preferred size.
-  const LAST_EXPANDED_KEY = 'f2f:sidebar-expanded-width';
-  let lastExpandedWidth = parseInt(localStorage.getItem(LAST_EXPANDED_KEY) || '', 10);
-  if (!Number.isFinite(lastExpandedWidth) || lastExpandedWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
-    lastExpandedWidth = sidebarDefault;
-  }
-  $('#ax-sidebar-toggle').on('click', function () {
-    if ($sidebar.hasClass('ax-collapsed')) {
-      applySidebarWidth(lastExpandedWidth);
-    } else {
-      lastExpandedWidth = $sidebar.outerWidth();
-      try { localStorage.setItem(LAST_EXPANDED_KEY, String(lastExpandedWidth)); } catch (_) {}
-      applySidebarWidth(SIDEBAR_MIN);
-    }
+  // Click the collapsed strip (anywhere but the resize handle) to expand.
+  $sidebar.on('click', function (e) {
+    if (!$sidebar.hasClass('ax-collapsed')) return;
+    if ($(e.target).closest('#ax-sidebar-resize').length) return;
+    applySidebarWidth(lastExpandedWidth);
     try { localStorage.setItem(SIDEBAR_KEY, String($sidebar.outerWidth())); } catch (_) {}
   });
-  // Update the toggle glyph to match the current state. ‹ when open
-  // (click to collapse), › when collapsed (click to expand).
-  function updateToggleGlyph() {
-    $('#ax-sidebar-toggle').text($sidebar.hasClass('ax-collapsed') ? '›' : '‹');
-  }
-  new MutationObserver(updateToggleGlyph)
-    .observe($sidebar[0], { attributes: true, attributeFilter: ['class'] });
-  updateToggleGlyph();
 
   // ---- Right notifications sidebar ----
   // Symmetric to the left tree but feeds off a moving log of events.
@@ -232,6 +232,138 @@ $(function () {
   $('#ax-tree').on('click', '.ax-tree-row[data-url]', function () {
     const url = $(this).attr('data-url');
     if (url) window.open(url, '_blank', 'noopener');
+  });
+
+  // Rows carrying data-route drive the main window via the URL hash:
+  // the sidebar only sets location.hash, the router below reacts. This
+  // is how sidebar selections (chats, …) open content in the main pane
+  // without the two being directly coupled.
+  $('#ax-tree').on('click', '.ax-tree-row[data-route]', function () {
+    const route = $(this).attr('data-route');
+    if (route) location.hash = route;
+  });
+
+
+  // Mock conversation — placeholder until messaging is wired to the
+  // engine. Same thread shown for every chat for now.
+  const MOCK_MESSAGES = [
+    { author: 'mac-mini-m4', time: '14:02', text: 'deployed the new camp build' },
+    { author: 'mac-mini-m4', time: '14:02', text: 'gitea should be reachable again' },
+    { author: 'sevapp',      time: '14:03', text: 'yep, opens now 🎉' },
+    { author: 'artpani',     time: '14:10', text: 'can someone drop the agents doc?' },
+    { author: 'mac-mini-m4', time: '14:11', text: 'AGENTS.md is in the drop tab' },
+  ];
+
+  // msgRow renders one Slack-style message. grouped=true omits the
+  // author/time header (consecutive message from the same author).
+  function msgRow(m, grouped) {
+    const head = grouped ? '' :
+      `<div class="ax-msg-head">`
+        + `<span class="ax-msg-author">${esc(m.author)}</span>`
+        + `<span class="ax-msg-time">${esc(m.time)}</span>`
+      + `</div>`;
+    return `<div class="ax-msg" data-author="${esc(m.author)}">`
+      + head
+      + `<div class="ax-msg-text">${esc(m.text)}</div>`
+      + `</div>`;
+  }
+
+  function renderChat() {
+    let html = '', prev = null;
+    for (const m of MOCK_MESSAGES) {
+      html += msgRow(m, m.author === prev);
+      prev = m.author;
+    }
+    const $m = $('#chat-messages');
+    $m.html(html);
+    $m.scrollTop($m[0].scrollHeight);
+  }
+
+  // Hash router. Currently handles chat routes (chat:channel:<id> /
+  // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
+  // keeps working.
+  function activateTab(tab) {
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.ax-tab[data-tab="' + tab + '"]').addClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-' + tab).removeClass('hidden');
+  }
+  function applyRoute() {
+    const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // peer:<key> → open the (hidden) camp tab with that peer's details.
+    const pm = h.match(/^peer:(.+)$/);
+    if (pm) {
+      selectedPeer = pm[1];
+      activateTab('camp');
+      renderIdentity(lastStatus);
+      $('#status-diag').removeClass('active');
+      return;
+    }
+    // leaving a peer route clears the selection so identity shows self again.
+    if (selectedPeer) { selectedPeer = ''; renderIdentity(lastStatus); }
+    // diag → open the (hidden) diagnostics tab.
+    if (h === 'diag') {
+      activateTab('diagnostics');
+      $('#status-diag').addClass('active');
+      return;
+    }
+    $('#status-diag').removeClass('active');
+    // invite ("add peer") → camp tab; the invite flow will live there.
+    if (h === 'invite') { activateTab('camp'); return; }
+    // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
+    const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
+    if (tm) { activateTab(tm[1]); return; }
+    const m = h.match(/^chat:(channel|dm):(.+)$/);
+    if (!m) return;
+    const [, kind, id] = m;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-chat').removeClass('hidden');
+    $('#chat-title').text(kind === 'channel' ? '# ' + id : id);
+    $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
+    renderChat();
+  }
+  // highlightActiveRoute marks the sidebar row matching the current hash
+  // so the user can see where they are. Re-run after every tree rebuild
+  // (the sidebar is regenerated from status each tick).
+  function highlightActiveRoute() {
+    const route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // An ongoing call stays flagged in the sidebar even when we navigate
+    // away to a chat. Mark both its meet row and the peer's DM row.
+    const a = window.f2fCall && window.f2fCall.active;
+    const callRoutes = [];
+    if (a) {
+      callRoutes.push('call:' + a.kind + ':' + a.id);
+      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + a.id : 'chat:channel:' + a.id);
+    }
+    $('#ax-tree .ax-tree-row').each(function () {
+      const r = $(this).attr('data-route');
+      $(this).toggleClass('active', !!route && r === route);
+      $(this).toggleClass('in-call', !!r && callRoutes.indexOf(r) !== -1);
+    });
+  }
+  window.addEventListener('hashchange', function () {
+    applyRoute();
+    highlightActiveRoute();
+  });
+  applyRoute();
+  highlightActiveRoute();
+
+  // Local-only send: appends the typed line as our own message. No
+  // backend yet — purely the layout interaction.
+  $('#chat-form').on('submit', function (e) {
+    e.preventDefault();
+    const $in = $('#chat-input');
+    const text = $in.val().trim();
+    if (!text) return;
+    const now = new Date();
+    const time = String(now.getHours()).padStart(2, '0') + ':'
+      + String(now.getMinutes()).padStart(2, '0');
+    const $m = $('#chat-messages');
+    const grouped = $m.children().last().attr('data-author') === 'you';
+    $m.append(msgRow({ author: 'you', time, text }, grouped));
+    $in.val('');
+    $m.scrollTop($m[0].scrollHeight);
   });
 
   const $btnEngine = $('#btn-engine');
@@ -411,7 +543,11 @@ $(function () {
       setTimeout(() => $el.css('color', prev), 500);
     }).catch(() => {});
   });
-  $('#identity-camp-id').on('click', function () {
+  // Diagnostics tab is opened from the status bar via a route (tab is hidden).
+  $('#status-diag').on('click', function () { location.hash = 'diag'; });
+
+  // Camp id lives in the status bar now — click it to copy the full id.
+  $('#status-camp').on('click', function () {
     const $el = $(this);
     const id = $el.data('camp-id');
     if (!id) return;
@@ -475,7 +611,35 @@ $(function () {
     return currentCampLabel || campIDOrPlaceholder();
   }
 
+  // renderIdentity fills the identity panel — with the selected peer's details
+  // when a peer:<key> route is active, otherwise our own camp identity.
+  function renderIdentity(s) {
+    if (!s) return;
+    const peer = selectedPeer
+      ? (s.peers || []).find(p => !p.self && peerKey(p) === selectedPeer)
+      : null;
+    if (peer) {
+      $('#identity-title').text('— peer');
+      $('#identity-name').text(peerKey(peer));
+      $('#identity-ip').text(peer.overlay_v4 || '—');
+      $('#identity-reflex').text(peer.udp_endpoint || '—');
+      $('#identity-pub').text(peer.pub || '—').data('pub', peer.pub || '');
+      $('#identity-fp').text(peer.last_rtt_ms ? '· ' + peer.last_rtt_ms + 'ms' : '');
+      $('#identity-switch').hide();
+    } else {
+      $('#identity-title').text('— identity');
+      $('#identity-name').text(s.camp_name || '?');
+      $('#identity-ip').text(s.local_ip || '—');
+      $('#identity-reflex').text(s.camp_reflex || '—');
+      const pub = s.identity_pub || '', fp = s.identity_fp || '';
+      $('#identity-pub').text(pub || '—').data('pub', pub);
+      $('#identity-fp').text(fp ? '· fp ' + fp : '');
+      $('#identity-switch').show();
+    }
+  }
+
   function applyStatus(s) {
+    lastStatus = s;
     if (pendingOp) {
       $('#camp-name, #camp-id, #camp-picker').prop('disabled', true);
     } else if (s.running) {
@@ -485,14 +649,7 @@ $(function () {
       // Running: collapse the picker and form into a key:value readout.
       // The "switch" link inside #identity-status re-exposes the picker
       // without forcing a manual stop first.
-      $('#identity-name').text(s.camp_name || '?');
-      $('#identity-camp-id').text(s.camp_id || '').data('camp-id', s.camp_id || '');
-      $('#identity-ip').text(s.local_ip || '—');
-      $('#identity-reflex').text(s.camp_reflex || '—');
-      const pub = s.identity_pub || '';
-      const fp = s.identity_fp || '';
-      $('#identity-pub').text(pub || '—').data('pub', pub);
-      $('#identity-fp').text(fp ? '· fp ' + fp : '');
+      renderIdentity(s);
       $('#identity-status').removeClass('hidden');
       $('#identity-picker').addClass('hidden');
       $('#new-camp-form').addClass('hidden');
@@ -522,6 +679,7 @@ $(function () {
     renderCampHealth(s);
     renderDiagnostics(s);
     renderSidebarTree(s);
+    updateStatusBar(s);
   }
 
   // Sidebar tree. Rebuilt from /api/status every tick — cheap because
@@ -560,16 +718,55 @@ $(function () {
     );
   }
 
-  function row(state, label, extra, url) {
-    const attrs = url ? ` data-url="${esc(url)}"` : '';
-    return `<div class="ax-tree-row ${state}"${attrs} title="${esc(url || extra || label)}">`
-      + `<span class="ax-tree-dot"></span>`
+  function row(state, label, extra, url, route, tab) {
+    let attrs = url ? ` data-url="${esc(url)}"` : '';
+    if (route) attrs += ` data-route="${esc(route)}"`;
+    if (tab) attrs += ` data-tab="${esc(tab)}"`;
+    // state === null → render without a status dot (e.g. chat rows).
+    const dot = state === null ? '' : `<span class="ax-tree-dot"></span>`;
+    return `<div class="ax-tree-row ${state || ''}"${attrs} title="${esc(url || extra || label)}">`
+      + dot
       + `<span class="ax-tree-label">${esc(label)}</span>`
       + (extra ? `<span class="ax-tree-badge">${esc(extra)}</span>` : '')
       + `</div>`;
   }
 
   function empty(text) { return `<div class="ax-tree-empty">${esc(text)}</div>`; }
+
+  // peerKey is a peer's stable display id (name, else a pub prefix). Used both
+  // for the sidebar label and the peer:<key> route.
+  function peerKey(p) { return (p && (p.name || (p.pub || '').slice(0, 12))) || '?'; }
+
+  // peerDot maps a peer to a status-dot class — the SAME vocabulary the main
+  // window's peers table uses, so sidebar and window colours match:
+  //   self→accent, paired→green, half_paired→orange, in_camp(no pair)→red, else→grey.
+  function peerDot(p) {
+    if (!p) return 'offline';
+    if (p.self) return 'self';
+    if (p.paired) return 'reachable';
+    if (p.half_paired) return 'degraded';
+    if (p.in_camp) return 'unreachable';
+    return 'offline';
+  }
+
+  // Bottom IDE-style status bar — engine state, camp, peer counts, I/O.
+  function updateStatusBar(s) {
+    const running = !!(s && s.running);
+    $('#ax-statusbar').toggleClass('running', running);
+    const label = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
+    const campID = (s && s.camp_id) || '';
+    $('#status-camp')
+      .text(running && label ? 'camp ' + label : '—')
+      .data('camp-id', running ? campID : '')
+      .attr('title', running && campID ? 'click to copy camp id' : '')
+      .toggleClass('clickable', !!(running && campID));
+    const peers = (s && s.peers) || [];
+    const known = peers.length; // includes self, matching the sidebar count
+    const online = peers.filter(p => p && (p.self || p.in_camp)).length;
+    $('#status-peers').text(online + '/' + known + ' peers');
+    $('#status-io').text('↑ ' + fmtBytes((s && s.tx_bytes) || 0) + '  ↓ ' + fmtBytes((s && s.rx_bytes) || 0));
+    $('#status-fp').text((s && s.identity_fp) ? 'fp ' + s.identity_fp : '');
+  }
 
   function renderSidebarTree(s) {
     const $tree = $('#ax-tree');
@@ -581,25 +778,24 @@ $(function () {
     // in its ID — that's what users actually call the camp ("xyz",
     // "test1"); KnownCamp.name is the local user's nickname inside
     // that camp, which we surface as a sub-line.
-    const activeID = (s && s.camp_id) || '';
-
     // peers — flat list. Each row: dot + name + ip/rtt meta.
     const peers = (s && s.peers) || [];
     function peerLabel(p) {
-      return (p.name || (p.pub || '').slice(0, 12) || '?') + (p.self ? ' (you)' : '');
+      return peerKey(p) + (p.self ? ' (you)' : '');
     }
-    let peersBody = '';
+    // "add peer" (invite) sits at the top; peers follow.
+    let peersBody = addRow('add peer', 'invite');
     if (!peers.length) {
-      peersBody = empty('no peers');
+      peersBody += empty('no peers');
     } else {
       for (const p of peers) {
-        const state = p.self ? 'online'
-          : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+        const state = peerDot(p);
         const ip = p.overlay_v4 || '';
         const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
           ? `${p.last_rtt_ms}ms` : '';
         const meta = [ip, rtt].filter(Boolean).join(' · ');
-        peersBody += row(state, peerLabel(p), meta);
+        // clicking a peer opens the (hidden) camp tab with this peer's details
+        peersBody += row(state, peerLabel(p), meta, null, 'peer:' + peerKey(p));
       }
     }
 
@@ -610,18 +806,17 @@ $(function () {
     const allFiles = [];
     for (const p of peers) {
       const owner = peerLabel(p);
-      const state = p.self ? 'online'
-        : (p.in_camp ? (p.udp_endpoint ? 'online' : 'half') : 'offline');
+      const state = peerDot(p);
       (p.domains || []).forEach(d => allDomains.push({ d, owner, state }));
       (p.firewall || []).filter(x => x.enabled).forEach(x => allPorts.push({ x, owner, self: !!p.self }));
       (p.files || []).forEach(f => allFiles.push({ f, owner, self: !!p.self }));
     }
 
-    // zone = camp label (<pub>_<label>); used to build openable URLs.
-    const zone = activeID.split('_').pop() || '';
+    // Clicking a domain opens its live page (as before). The dns tab is
+    // reached via the "+ add domain" row below the list.
+    const zone = (s && (s.camp_label || (s.camp_id || '').split('_').pop())) || '';
     const domainsBody = allDomains.length
       ? allDomains.map(({ d, owner, state }) => {
-          // Wildcard domains (*.x) aren't directly openable.
           const url = (zone && !d.name.includes('*')) ? `https://${d.name}.${zone}.f2f` : '';
           return row(state, d.name, owner, url);
         }).join('')
@@ -629,18 +824,18 @@ $(function () {
 
     const portsBody = allPorts.length
       ? allPorts.map(({ x, owner }) =>
-          row('', `:${x.port} ${x.protocol || 'tcp'}`, owner)).join('')
+          row('', `:${x.port} ${x.protocol || 'tcp'}`, owner, null, 'tunnel:p:' + x.port)).join('')
       : empty('no ports');
 
     // drop is split into two sections: files available from peers and
-    // files we share ourselves.
+    // files we share ourselves. Any file row opens the drop tab.
     const peerFilesBody = allFiles.filter(x => !x.self).length
       ? allFiles.filter(x => !x.self).map(({ f, owner }) =>
-          row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`)).join('')
+          row('', f.name, `${owner} · ${fmtBytes(f.size || 0)}`, null, 'drop:' + f.name)).join('')
       : empty('none');
     const myFilesBody = allFiles.filter(x => x.self).length
       ? allFiles.filter(x => x.self).map(({ f }) =>
-          row('', f.name, fmtBytes(f.size || 0))).join('')
+          row('', f.name, fmtBytes(f.size || 0), null, 'drop:' + f.name)).join('')
       : empty('none');
 
     // calls — group calls hosted in the camp. Owner is the peer
@@ -652,28 +847,27 @@ $(function () {
       const p = peers.find(p => p.overlay_v4 === ip);
       return p ? (p.name || p.pub.slice(0, 12)) + (p.self ? ' (you)' : '') : ip;
     }
-    let callsBody = '';
-    if (!calls.length) {
-      callsBody = empty('no active calls');
-    } else {
-      for (const c of calls) {
-        const owner = peerNameByIP(c.sfu_host);
-        const parts = c.participants || [];
-        const key = 'call:' + (c.sfu_host || c.call_id);
-        const collapsed = collapsedCats.has(key) ? ' collapsed' : '';
-        const partsBody = parts.length
-          ? parts.map(p => row('online', p.name || p.tunnel_ip, p.tunnel_ip)).join('')
-          : empty('no participants');
-        callsBody += (
-          `<div class="ax-tree-category${collapsed}" data-cat="${esc(key)}">`
-            + `<span class="ax-tree-caret">▾</span>`
-            + `<span class="ax-tree-dot on"></span>`
-            + `<span class="ax-tree-label">${esc(owner)}</span>`
-            + `<span class="ax-tree-badge">${parts.length}</span>`
-          + `</div>`
-          + `<div class="ax-tree-children" data-cat-children="${esc(key)}">${partsBody}</div>`
-        );
-      }
+    // MEET — joinable/active calls: live group calls (from status) plus
+    // our current p2p call (from the CallManager). Routable + highlightable
+    // like chats, so the active call is marked and opens the call window.
+    const activeCall = (window.f2fCall && window.f2fCall.active) || null;
+    // The SFU call we're currently in is shown as the active row below, so skip
+    // its duplicate from the status list.
+    const myGroupHost = (activeCall && activeCall.kind === 'group' && window.f2fGroup) ? window.f2fGroup.sfuHost : '';
+    let meetRows = '';
+    for (const c of calls) {
+      if (myGroupHost && c.sfu_host === myGroupHost) continue;
+      const owner = peerNameByIP(c.sfu_host) || 'group';
+      const id = c.call_id || c.sfu_host || owner;
+      const n = (c.participants || []).length;
+      meetRows += row('online', owner, n + ' in · group', null, 'call:group:' + id);
+    }
+    // Our current call (p2p or group) — routable + highlightable like chats.
+    // No state dot: the in-call pulse pip already marks it.
+    if (activeCall && activeCall.kind === 'dm') {
+      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
+    } else if (activeCall && activeCall.kind === 'group') {
+      meetRows += row(null, '# ' + activeCall.title, 'group', null, 'call:group:' + activeCall.id);
     }
 
     // chats — visual mock until the chat service ships. Direct = 1-1
@@ -683,12 +877,6 @@ $(function () {
     // where the talking is happening. Same data drives the standalone
     // `calls` category below — for now the calls list is computed off
     // these mocks too.
-    const MOCK_DIRECTS = [
-      { peer: 'mac-mini-m4', unread: 2, online: true },
-      { peer: 'artpani',     unread: 0, online: true,  inCall: true },
-      { peer: 'sevapp_vm_ubuntu', unread: 0, online: true },
-      { peer: 'dinar',       unread: 0, online: false },
-    ];
     const MOCK_GROUPS = [
       { name: '#general',    members: 5, unread: 3 },
       { name: '#dev',        members: 3, unread: 0, liveCall: { participants: 2 } },
@@ -696,34 +884,38 @@ $(function () {
       { name: '#sf-only',    members: 4, unread: 1 },
     ];
 
-    const directsBody = MOCK_DIRECTS.map(d => {
-      const state = d.online ? 'online' : 'offline';
-      const tags = [];
-      if (d.unread) tags.push(`${d.unread} new`);
-      if (d.inCall) tags.push('● in call');
-      return row(state, d.peer, tags.join(' · '));
-    }).join('');
+    // DIRECT = every peer except ourselves; one row each, routed to a DM.
+    const directs = peers.filter(p => !p.self);
+    const directsBody = directs.length
+      ? directs.map(p => {
+          const name = p.name || (p.pub || '').slice(0, 12);
+          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.id === name;
+          return row(null, name, inCall ? '● in call' : '', null, 'chat:dm:' + name);
+        }).join('')
+      : empty('no peers');
 
     const groupsBody = MOCK_GROUPS.map(g => {
-      const state = g.liveCall ? 'online' : '';
       const tags = [`${g.members} members`];
       if (g.unread) tags.push(`${g.unread} new`);
       if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
-      return row(state, g.name, tags.join(' · '));
+      const id = g.name.replace(/^#/, '');
+      return row(null, '# ' + id, tags.join(' · '), null, 'chat:channel:' + id);
     }).join('');
 
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
     const interceptsBody = intercepts.length
-      ? intercepts.map(i => row('', i.spec, i.peer || '')).join('')
+      ? intercepts.map(i => row('', i.spec, i.peer || '', null, 'tunnel:i:' + i.spec)).join('')
       : empty('none');
 
     // trusted CAs.
     const trusted = (s && s.trusted_peers) || [];
     const trustedBody = trusted.length
-      ? trusted.map(t => row(t.installed ? 'online' : 'half',
-          t.peer_name || t.common_name || t.fingerprint.slice(0, 12),
-          t.installed ? 'installed' : 'pending')).join('')
+      ? trusted.map(t => {
+          const name = t.peer_name || t.common_name || t.fingerprint.slice(0, 12);
+          return row(t.installed ? 'online' : 'half', name,
+            t.installed ? 'installed' : 'pending', null, 'dns:cert:' + name);
+        }).join('')
       : empty('none');
 
     // All messaging lives under a single "messages" group with three
@@ -731,13 +923,17 @@ $(function () {
     // separately collapsible. The unread badge on the outer "messages"
     // header sums new messages across both lists so a collapsed
     // sidebar still shows pending traffic.
-    const totalUnread =
-      MOCK_DIRECTS.reduce((n, d) => n + (d.unread || 0), 0)
-      + MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
+    const totalUnread = MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
     function section(label) {
       return `<div class="ax-tree-section">${esc(label)}</div>`;
     }
-    const meetsBody = calls.length ? callsBody : '';
+    // A manage affordance ("add/remove …") that opens a resource's tab — also
+    // the only entry point when the list is empty (nothing else to click).
+    function addRow(label, route) {
+      return `<div class="ax-tree-row ax-tree-add" data-route="${esc(route)}">`
+        + `<span class="ax-tree-label">${esc(label)}</span></div>`;
+    }
+    const meetsBody = meetRows || empty('no calls');
     const messagingBody =
       section('meets')    + meetsBody
       + section('channels') + groupsBody
@@ -746,20 +942,23 @@ $(function () {
     // tunnel — outbound intercepts + inbound open ports under one group
     // with section dividers (mirrors the app's "tunnel" tab).
     const tunnelBody =
-      section('intercepts') + interceptsBody
+      section('intercepts') + addRow('add/remove intercept', 'tunnel') + interceptsBody
       + section('ports')      + portsBody;
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
-          section('available') + peerFilesBody + section('sharing') + myFilesBody)
-      + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
+          section('available') + peerFilesBody
+          + section('sharing') + addRow('add/remove file', 'drop') + myFilesBody)
       + category('domains',   'domains',   allDomains.length,
-          domainsBody + section('certificates') + trustedBody)
-      + category('oidc',      'OIDC',      null, empty('not configured'))
+          addRow('add/remove domain', 'dns') + domainsBody
+          + section('certificates') + trustedBody)
+      + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
+      + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
+    highlightActiveRoute();
   }
 
   // Persist category collapsed state. The handler defined earlier

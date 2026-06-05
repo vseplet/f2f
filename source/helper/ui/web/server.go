@@ -316,16 +316,33 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("engine not running"))
 		return
 	}
-	// Find the active peer's pub-derived v4 and forward the signal there.
+	// A signal can target a specific peer by pub via {"to":"<pub>"} —
+	// preferred, no dependency on the active selection. Falls back to the
+	// active peer when "to" is absent (legacy 1:1). The sender's pub is
+	// tagged as "from" so the recipient can address replies back.
+	var sig map[string]any
+	_ = json.Unmarshal(body, &sig)
+	toPub, _ := sig["to"].(string)
 	var peerIP string
 	for _, p := range st.Peers {
-		if !p.Self && p.Pub != "" && p.Pub == st.ActivePeerPub {
+		if p.Self || p.Pub == "" {
+			continue
+		}
+		if (toPub != "" && p.Pub == toPub) || (toPub == "" && p.Pub == st.ActivePeerPub) {
 			peerIP = p.OverlayV4
+			break
 		}
 	}
 	if peerIP == "" {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no active peer (set one in /api/peers/active)"))
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no target peer (unknown 'to' pub, and no active peer)"))
 		return
+	}
+	if sig != nil {
+		sig["from"] = st.IdentityPub
+		delete(sig, "to")
+		if b, mErr := json.Marshal(sig); mErr == nil {
+			body = b
+		}
 	}
 	body = rewriteMDNS(body, st.LocalIP)
 	_, port, err := net.SplitHostPort(s.addr)
