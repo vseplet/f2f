@@ -137,14 +137,15 @@ $(function () {
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
-    sendSignal({ kind: 'offer', sdp: offer.sdp });
+    sendSignal({ kind: 'offer', sdp: offer.sdp, fresh: true }); // fresh = new session (vs renegotiation)
   }
 
   async function handleSignal(msg) {
     if (msg.from) currentPeerPub = msg.from; // reply path
     if (msg.kind === 'offer') {
-      if (pc && pc.signalingState !== 'closed') {
-        // renegotiation within an active call
+      const renegotiation = pc && pc.signalingState !== 'closed' && !msg.fresh;
+      if (renegotiation) {
+        // track change within the live session (e.g. screen share)
         try {
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
           const ans = await pc.createAnswer();
@@ -153,10 +154,17 @@ $(function () {
         } catch (_) {}
         return;
       }
-      // incoming call → adopt + answer
-      const title = await nameForPub(msg.from);
-      Call.adopt('dm', msg.from, title);
-      location.hash = 'call:dm:' + msg.from;
+      // fresh offer: a new call, or the other side reloaded and is reconnecting.
+      // Drop any stale connection and answer cleanly.
+      if (pc) {
+        try { pc.close(); } catch (_) {}
+        pc = null; peerCamStreamId = ''; pendingCandidates = [];
+        videoPeer.srcObject = null; tilePeer.classList.remove('has-video');
+        clearRemoteScreen();
+      }
+      const name = await nameForPub(msg.from);
+      Call.adopt('dm', name, name, msg.from);
+      location.hash = 'call:dm:' + encodeURIComponent(name);
       await ensureLocalStream();
       pc = newPC();
       isOfferer = false;
@@ -174,7 +182,7 @@ $(function () {
       if (!pc || !pc.remoteDescription) { pendingCandidates.push(msg.candidate); return; }
       try { await pc.addIceCandidate(msg.candidate); } catch (_) {}
     } else if (msg.kind === 'hangup') {
-      teardown();
+      Call.endLocal(); // peer left → close window + indicator on our side too
     }
   }
 
@@ -196,14 +204,23 @@ $(function () {
     if (typeof updateMediaButtons === 'function') updateMediaButtons();
   }
 
+  // ---- session persistence (survive a tab reload mid-call) ----
+  const CALL_KEY = 'f2f.call';
+  function saveCall(a) {
+    try { sessionStorage.setItem(CALL_KEY, JSON.stringify({ kind: a.kind, id: a.id, title: a.title, pub: a.pub || '' })); } catch (_) {}
+  }
+  function clearCall() { try { sessionStorage.removeItem(CALL_KEY); } catch (_) {} }
+
   // ---- CallManager (state + indicator) ----
   const Call = {
     active: null, // { kind, id, title, state, startedAt }
     timer: null,
 
     // adopt sets the active-call state + indicator without touching media.
-    adopt(kind, id, title) {
-      this.active = { kind, id, title: title || id, state: 'connecting', startedAt: Date.now() };
+    // id is the route label (nickname for dm); pub is kept for signalling/reconnect.
+    adopt(kind, id, title, pub) {
+      this.active = { kind, id, title: title || id, pub: pub || '', state: 'connecting', startedAt: Date.now() };
+      saveCall(this.active);
       this.renderBar();
     },
     setState(state) {
@@ -220,25 +237,41 @@ $(function () {
           title = title || idOrName;
         }
         if (!pub) { return; } // unknown / not a real peer
-        this.adopt('dm', pub, title || (await nameForPub(pub)));
+        const name = title || (await nameForPub(pub)); // nameForPub falls back to a pub slice
+        this.adopt('dm', name, name, pub);
         currentPeerPub = pub;
-        location.hash = 'call:dm:' + pub;
+        location.hash = 'call:dm:' + encodeURIComponent(name);
         try { await offerTo(); } catch (_) { this.hangup(); }
       } else {
         // group (SFU) — placeholder until wired.
-        this.adopt('group', idOrName, title || idOrName);
-        location.hash = 'call:group:' + idOrName;
+        this.adopt('group', idOrName, title || idOrName, '');
+        location.hash = 'call:group:' + encodeURIComponent(idOrName);
       }
     },
 
+    // hang up and notify the peer. Target is the active dm peer, or — if we
+    // reloaded into a frozen call where state was lost — the pub in the hash.
     hangup(silent) {
-      if (this.active && this.active.kind === 'dm') {
-        try { sendSignal({ kind: 'hangup' }); } catch (_) {}
+      let pub = (this.active && this.active.kind === 'dm') ? this.active.id : '';
+      if (!pub) {
+        const m = (location.hash || '').match(/^#call:dm:([0-9a-f]{64})/);
+        if (m) pub = m[1];
       }
+      if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
+      this.endLocal(silent);
+    },
+
+    // tear everything down locally without signalling (used on a remote hangup).
+    // silent = we're switching to another call, so skip the "ended" screen.
+    endLocal(silent) {
+      const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
       teardown();
+      clearCall();
       this.active = null;
       this.renderBar();
-      if (!silent && (location.hash || '').indexOf('#call:') === 0) location.hash = '';
+      if (!silent && (location.hash || '').indexOf('#call:') === 0) {
+        location.hash = 'call:ended' + (label ? ':' + encodeURIComponent(label) : '');
+      }
     },
 
     renderBar() {
@@ -288,7 +321,7 @@ $(function () {
 
   // --- callbar (compact, above the tabs) ---
   $('#ax-callbar-open').on('click', function () {
-    if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + Call.active.id;
+    if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + encodeURIComponent(Call.active.id);
   });
   $('#ax-callbar-mute').on('click', function (e) {
     e.stopPropagation();
@@ -417,20 +450,54 @@ $(function () {
   });
 
   // ---- router: #call:<kind>:<id> shows the call window ----
-  function applyCallRoute() {
-    const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
-    const m = h.match(/^call:(dm|group):(.+)$/);
-    if (!m) return;
-    const [, kind, id] = m;
-    const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
+  function activateCallTab() {
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-call').removeClass('hidden');
+  }
+  function showStageView() {
+    $('#call-ended').hide();
+    $('#call-stage, #call-bottombar, .ax-call-header').show();
+  }
+  function showEndedView(label) {
+    activateCallTab();
+    $('#call-stage, #call-bottombar, .ax-call-header').hide();
+    $('#call-ended').css('display', 'flex');
+    $('#call-ended-sub').text(label ? ('звонок с ' + label + ' завершён') : '');
+  }
+  function applyCallRoute() {
+    const raw = (location.hash || '').replace(/^#/, '');
+    const ended = raw.match(/^call:ended(?::(.+))?$/);
+    if (ended) { showEndedView(ended[1] ? decodeURIComponent(ended[1]) : ''); return; }
+    const m = decodeURIComponent(raw).match(/^call:(dm|group):(.+)$/);
+    if (!m) return;
+    const [, kind, id] = m;
+    const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
+    activateCallTab();
+    showStageView();
     $('#call-title').text((kind === 'group' ? '# ' : '') + title);
     $('#call-peer-name').text((kind === 'group' ? '# ' : '') + title);
   }
   window.addEventListener('hashchange', applyCallRoute);
   applyCallRoute();
 
+  // "close" on the ended screen → reset for next call and leave the call tab.
+  $('#call-ended-close').on('click', function () {
+    showStageView();
+    if ((location.hash || '').indexOf('#call:') === 0) location.hash = '';
+    $('.ax-tab').first().trigger('click'); // back to the default (first) tab
+  });
+
   startSignaling();
+
+  // ---- auto-rejoin after a tab reload ----
+  // If we reloaded mid-call, re-offer to the saved peer with a fresh offer; the
+  // other side drops its stale connection and answers, restoring the call.
+  (function autoRejoin() {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null'); } catch (_) {}
+    if (!saved || saved.kind !== 'dm') return;
+    const pub = PUB_RE.test(saved.pub || '') ? saved.pub : saved.id; // reconnect by pub
+    Call.start('dm', pub, saved.title);
+  })();
 });

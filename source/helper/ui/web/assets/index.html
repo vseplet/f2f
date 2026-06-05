@@ -1111,7 +1111,7 @@
                             <div class="ax-call-name">you</div>
                         </div>
                     </div>
-                    <div class="m2-bottombar">
+                    <div class="m2-bottombar" id="call-bottombar">
                         <button id="call-mic" class="ax-btn ax-btn-mic" disabled>
                             <span class="ax-btn-state">○</span>
                             <span>mic</span>
@@ -1135,6 +1135,12 @@
                             <span class="ax-btn-state">■</span>
                             <span>leave</span>
                         </button>
+                    </div>
+                    <div class="ax-call-ended hidden" id="call-ended">
+                        <div class="ax-call-ended-icon"><i class="bi bi-telephone-x"></i></div>
+                        <div class="ax-call-ended-title">звонок завершён</div>
+                        <div class="ax-call-ended-sub" id="call-ended-sub"></div>
+                        <button type="button" id="call-ended-close" class="ax-btn ax-btn-primary">закрыть</button>
                     </div>
                 </div>
             </div>

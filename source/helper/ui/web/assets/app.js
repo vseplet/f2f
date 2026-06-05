@@ -785,12 +785,6 @@ $(function () {
     // where the talking is happening. Same data drives the standalone
     // `calls` category below — for now the calls list is computed off
     // these mocks too.
-    const MOCK_DIRECTS = [
-      { peer: 'mac-mini-m4', unread: 2, online: true },
-      { peer: 'artpani',     unread: 0, online: true,  inCall: true },
-      { peer: 'sevapp_vm_ubuntu', unread: 0, online: true },
-      { peer: 'dinar',       unread: 0, online: false },
-    ];
     const MOCK_GROUPS = [
       { name: '#general',    members: 5, unread: 3 },
       { name: '#dev',        members: 3, unread: 0, liveCall: { participants: 2 } },
@@ -798,12 +792,15 @@ $(function () {
       { name: '#sf-only',    members: 4, unread: 1 },
     ];
 
-    const directsBody = MOCK_DIRECTS.map(d => {
-      const tags = [];
-      if (d.unread) tags.push(`${d.unread} new`);
-      if (d.inCall) tags.push('● in call');
-      return row(null, d.peer, tags.join(' · '), null, 'chat:dm:' + d.peer);
-    }).join('');
+    // DIRECT = every peer except ourselves; one row each, routed to a DM.
+    const directs = peers.filter(p => !p.self);
+    const directsBody = directs.length
+      ? directs.map(p => {
+          const name = p.name || (p.pub || '').slice(0, 12);
+          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.id === name;
+          return row(null, name, inCall ? '● in call' : '', null, 'chat:dm:' + name);
+        }).join('')
+      : empty('no peers');
 
     const groupsBody = MOCK_GROUPS.map(g => {
       const tags = [`${g.members} members`];
@@ -832,9 +829,7 @@ $(function () {
     // separately collapsible. The unread badge on the outer "messages"
     // header sums new messages across both lists so a collapsed
     // sidebar still shows pending traffic.
-    const totalUnread =
-      MOCK_DIRECTS.reduce((n, d) => n + (d.unread || 0), 0)
-      + MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
+    const totalUnread = MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
     function section(label) {
       return `<div class="ax-tree-section">${esc(label)}</div>`;
     }
