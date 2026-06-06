@@ -21,11 +21,14 @@ import (
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/services/bus"
 	"github.com/vseplet/f2f/source/helper/services/calls"
 	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/messenger"
+	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
@@ -85,7 +88,29 @@ func run(bind string, console bool) error {
 	campSvc := camp.New(eng)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
+	// Local message/channel store — one SQLite file per camp under ~/.f2f
+	// (<camp_id>.messenger.db), opened lazily.
+	msgSvc := messenger.New(store.Dir())
+	defer msgSvc.Close()
+
+	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
+	// comes up (OnStarted); it auto-meshes with every reachable peer.
+	busSvc, err := bus.New(busResolver{eng: eng})
+	if err != nil {
+		return fmt.Errorf("bus: %w", err)
+	}
+	defer busSvc.Stop()
+
+	// Notification hub — fans UI notifications out over SSE. Peers can push
+	// notifications to us over the bus ("notify" type); bus activity (pings)
+	// is surfaced too.
+	notifySvc := notify.New()
+	busSvc.Handle("notify", notifySvc.FromBus)
+	busSvc.Events = func(kind, peerPub, text string) {
+		notifySvc.Push(notify.Notification{Kind: kind, Title: text, From: peerPub})
+	}
+
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -181,6 +206,10 @@ func run(bind string, console bool) error {
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
+		// QUIC data bus on the overlay IP — auto-meshes with peers.
+		if err := busSvc.Start(localIP); err != nil {
+			log.Printf("WARN: start bus: %v", err)
+		}
 		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
@@ -188,6 +217,7 @@ func run(bind string, console bool) error {
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
+		_ = busSvc.Stop()
 		_ = proxySvc.Stop()
 		for i := len(services) - 1; i >= 0; i-- {
 			s := services[i]
@@ -251,4 +281,45 @@ func run(bind string, console bool) error {
 		}
 	}
 	return nil
+}
+
+// busResolver adapts the engine's peer roster to bus.Resolver. Identity is
+// the overlay IP (WireGuard-attested), so the bus needs no auth of its own.
+type busResolver struct{ eng *engine.Engine }
+
+func (r busResolver) AddrForPub(pub string) string {
+	for _, p := range r.eng.Status().Peers {
+		if !p.Self && p.Pub == pub {
+			return p.OverlayV4
+		}
+	}
+	return ""
+}
+
+func (r busResolver) PubForIP(ip string) string {
+	for _, p := range r.eng.Status().Peers {
+		if p.OverlayV4 == ip {
+			return p.Pub
+		}
+	}
+	return ""
+}
+
+func (r busResolver) SelfPub() string { return r.eng.Status().IdentityPub }
+
+func (r busResolver) Peers() []string {
+	st := r.eng.Status()
+	var out []string
+	for _, p := range st.Peers {
+		if p.Self || p.Pub == "" || p.OverlayV4 == "" || !p.InCamp {
+			continue
+		}
+		// Defensive self-exclusion: the camp-owner entry can appear without
+		// the Self flag set, which would make us ping ourselves.
+		if p.Pub == st.IdentityPub || p.OverlayV4 == st.LocalIP {
+			continue
+		}
+		out = append(out, p.Pub)
+	}
+	return out
 }

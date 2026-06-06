@@ -30,6 +30,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/messenger"
+	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 )
@@ -53,6 +55,8 @@ type Server struct {
 	tunnel   *tunnel.Service
 	camp     *camp.Service
 	dns      *dns.Service
+	msg      *messenger.Store
+	notify   *notify.Service
 	addr     string
 	srv      *http.Server
 
@@ -64,7 +68,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -75,6 +79,8 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		calls:       callsSvc,
 		tunnel:      tunnelSvc,
 		camp:        campSvc,
+		msg:         msgSvc,
+		notify:      notifySvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -233,6 +239,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
+
+	// Notifications: recent list + live SSE stream for the UI.
+	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
+	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
 
 	// Group calls (SFU-based). Browser-facing endpoints on the UI
 	// server; /api/call/signal also registered on the tunnel listener
@@ -433,6 +443,50 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+// handleNotifications returns the buffered notifications (oldest-first).
+func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.notify.Recent())
+}
+
+// handleNotificationsStream pushes new notifications to the browser over SSE.
+func (s *Server) handleNotificationsStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.notify.Subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case n, ok := <-ch:
+			if !ok {
+				return
+			}
+			if b, err := json.Marshal(n); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				flusher.Flush()
+			}
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()

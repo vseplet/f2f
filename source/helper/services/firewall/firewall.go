@@ -45,14 +45,16 @@ var ErrEngineNotRunning = errors.New("firewall: engine not running")
 //
 //   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer
 //     signal polling over utun.
+//   - 2203/udp — the QUIC peer-to-peer data bus (services/bus).
 //   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
 //     locally-registered domains.
 //   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the
 //     drop subsystem.
 //
-// Keep in sync with web.Server and the torrent client.
+// Keep in sync with web.Server, services/bus (Port) and the torrent client.
 var BuiltinRules = []PortRule{
 	{Port: 2202, Protocol: "tcp"},
+	{Port: 2203, Protocol: "udp"}, // QUIC data bus
 	{Port: 80, Protocol: "tcp"},
 	{Port: 443, Protocol: "tcp"},
 	{Port: 6881, Protocol: "tcp"},
@@ -66,6 +68,8 @@ func BuiltinLabel(port int, proto string) string {
 	switch {
 	case port == 2202 && proto == "tcp":
 		return "f2f HTTP API"
+	case port == 2203 && proto == "udp":
+		return "f2f data bus (QUIC)"
 	case port == 80 && proto == "tcp":
 		return "f2f HTTP proxy"
 	case port == 443 && proto == "tcp":
