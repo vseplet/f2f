@@ -75,6 +75,7 @@ type Service struct {
 	running  bool
 	conns    map[string]*quic.Conn // pub → outbound connection (reused)
 	handlers map[string]HandlerFunc
+	linkUp   map[string]bool // pub → last ping outcome (for up/down notifications)
 }
 
 // New builds the service. The self-signed cert is generated once.
@@ -91,6 +92,7 @@ func New(r Resolver) (*Service, error) {
 		quicConf:  qc,
 		conns:     make(map[string]*quic.Conn),
 		handlers:  make(map[string]HandlerFunc),
+		linkUp:    make(map[string]bool),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
 	s.handlers["ping"] = func(_ string, payload []byte) ([]byte, error) { return payload, nil }
@@ -151,15 +153,29 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	if _, err := s.Request(rctx, pub, "ping", nil); err != nil {
-		log.Printf("bus: ping %s failed: %v", short(pub), err)
-		s.emit("ping", pub, "QUIC ping failed")
-		s.dropConn(pub) // force a fresh dial next round
-		return
-	}
+	_, err := s.Request(rctx, pub, "ping", nil)
+	ok := err == nil
 	rtt := time.Since(start).Round(time.Millisecond)
-	log.Printf("bus: ping %s ok via QUIC (%s)", short(pub), rtt)
-	s.emit("ping", pub, "QUIC ping ok · "+rtt.String())
+	if ok {
+		log.Printf("bus: ping %s ok via QUIC (%s)", short(pub), rtt)
+	} else {
+		log.Printf("bus: ping %s failed: %v", short(pub), err)
+		s.dropConn(pub) // force a fresh dial next round
+	}
+
+	// Notify only on a link-state CHANGE, not every ping: "up" when it first
+	// connects or recovers, "down" only when a previously-up link drops.
+	// A never-reachable peer stays quiet until it actually comes up.
+	s.mu.Lock()
+	prev, had := s.linkUp[pub]
+	s.linkUp[pub] = ok
+	s.mu.Unlock()
+	switch {
+	case ok && (!had || !prev):
+		s.emit("ping", pub, "QUIC link up · "+rtt.String())
+	case !ok && had && prev:
+		s.emit("ping", pub, "QUIC link down")
+	}
 }
 
 func (s *Service) emit(kind, pub, text string) {
