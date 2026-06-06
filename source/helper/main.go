@@ -84,7 +84,7 @@ func run(bind string, console bool) error {
 	fwSvc := firewall.New(store, eng)
 	pkiSvc := pki.New(store, eng)
 	dnsSvc := dns.New(store, eng)
-	dropSvc := drop.New(eng)
+	dropSvc := drop.New(eng, store.CampDir)
 	callsSvc := calls.New(store, eng)
 	tunnelSvc := tunnel.New(store, eng)
 	campSvc := camp.New(eng)
@@ -92,7 +92,7 @@ func run(bind string, console bool) error {
 
 	// Local message/channel store — one SQLite file per camp under ~/.f2f
 	// (<camp_id>.messenger.db), opened lazily.
-	msgSvc := messenger.New(store.Dir())
+	msgSvc := messenger.New(store.CampDir)
 	defer msgSvc.Close()
 
 	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
@@ -106,7 +106,8 @@ func run(bind string, console bool) error {
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); bus activity (pings)
 	// is surfaced too.
-	notifySvc := notify.New()
+	notifySvc := notify.New(store.CampDir, func() string { return eng.Status().CampID })
+	defer notifySvc.Close()
 	busSvc.Handle("notify", notifySvc.FromBus)
 	busSvc.Events = func(kind, peerPub, text string) {
 		notifySvc.Push(notify.Notification{Kind: kind, Title: text, From: peerPub})
@@ -222,10 +223,16 @@ func run(bind string, console bool) error {
 	// the wake-from-sleep detector can restart the engine repeatedly.
 	var lastPortalCamp string
 	eng.OnStarted = func(localIP string) {
+		st := eng.Status()
+		// Route logs into the per-camp dir for the lifetime of this camp.
+		if st.CampID != "" {
+			if err := clog.SwitchTo(filepath.Join(store.CampDir(st.CampID), "f2f.log")); err != nil {
+				log.Printf("WARN: switch camp log: %v", err)
+			}
+		}
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
-		st := eng.Status()
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -263,6 +270,8 @@ func run(bind string, console bool) error {
 				log.Printf("WARN: %s stop: %v", s.name, err)
 			}
 		}
+		// Camp-less again — route logs back to the bootstrap file.
+		_ = clog.SwitchTo(filepath.Join(store.Dir(), "f2f.log"))
 	}
 	if _, port, err := net.SplitHostPort(bind); err == nil {
 		eng.SetTunnelHTTPPort(port)

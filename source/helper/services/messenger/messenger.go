@@ -1,6 +1,6 @@
 // Package messenger is the local persistence layer for messages, channels
 // and direct conversations. Each camp gets its own SQLite file under ~/.f2f
-// (<camp_id>.messenger.db), mirroring the per-camp config files, opened
+// (<camp_id>/messenger.db), mirroring the per-camp config files, opened
 // lazily and cached. Pure-Go modernc.org/sqlite driver (no cgo) keeps the
 // binary cross-platform.
 //
@@ -43,16 +43,17 @@ type Channel struct {
 // Store manages one SQLite database per camp under a base directory.
 // Construct once with New; safe for concurrent use.
 type Store struct {
-	dir string
+	campDir func(campID string) string // ~/.f2f/<camp_id>/ (creates it)
 
 	mu  sync.Mutex
 	dbs map[string]*sql.DB // camp_id → handle (lazily opened)
 }
 
-// New returns a Store rooted at dir (typically ~/.f2f). No file is touched
-// until a camp's database is first used.
-func New(dir string) *Store {
-	return &Store{dir: dir, dbs: make(map[string]*sql.DB)}
+// New returns a Store. campDir resolves (and creates) a camp's directory —
+// typically config.Store.CampDir. No file is touched until a camp's
+// database is first used.
+func New(campDir func(campID string) string) *Store {
+	return &Store{campDir: campDir, dbs: make(map[string]*sql.DB)}
 }
 
 // Close closes every open camp database.
@@ -80,7 +81,7 @@ func (s *Store) dbFor(campID string) (*sql.DB, error) {
 	if db := s.dbs[campID]; db != nil {
 		return db, nil
 	}
-	path := filepath.Join(s.dir, fileName(campID))
+	path := filepath.Join(s.campDir(campID), "messenger.db")
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -93,14 +94,6 @@ func (s *Store) dbFor(campID string) (*sql.DB, error) {
 	}
 	s.dbs[campID] = db
 	return db, nil
-}
-
-// fileName maps a camp_id to its database filename. The camp_id is already
-// validated upstream (config.validCampID), but we still strip path
-// separators defensively so a database file can never escape s.dir.
-func fileName(campID string) string {
-	clean := strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(campID)
-	return clean + ".messenger.db"
 }
 
 func migrate(db *sql.DB) error {

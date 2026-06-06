@@ -30,9 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
-	"github.com/vseplet/f2f/source/helper/platform"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
 )
 
@@ -49,7 +47,8 @@ type PeerFile struct {
 // polled from peers. Construct once in main.go and outlive camp
 // transitions; Start/Stop are driven by engine lifecycle hooks.
 type Service struct {
-	eng *engine.Engine
+	eng     *engine.Engine
+	campDir func(campID string) string // ~/.f2f/<camp_id>/ (creates it)
 
 	mu        sync.Mutex
 	client    *internaltorrent.Client
@@ -61,10 +60,12 @@ type Service struct {
 	peerFiles map[string][]PeerFile // pub → files
 }
 
-// New constructs a Service. The engine must outlive the service.
-func New(eng *engine.Engine) *Service {
+// New constructs a Service. campDir resolves a camp's directory
+// (config.Store.CampDir). The engine must outlive the service.
+func New(eng *engine.Engine, campDir func(campID string) string) *Service {
 	return &Service{
 		eng:       eng,
+		campDir:   campDir,
 		peerFiles: map[string][]PeerFile{},
 	}
 }
@@ -80,8 +81,8 @@ func (s *Service) Start(campID, localIP string) error {
 		return fmt.Errorf("drop: already started")
 	}
 	s.campID = campID
-	s.sharedDir = sharedDirFor(campID)
-	s.downloads = downloadsDirFor(campID)
+	s.sharedDir = filepath.Join(s.campDir(campID), "shared")
+	s.downloads = filepath.Join(s.campDir(campID), "drops")
 	t0 := time.Now()
 	opts := internaltorrent.Options{
 		ListenAddr:   net.JoinHostPort(localIP, fmt.Sprint(internaltorrent.DefaultPort)),
@@ -263,7 +264,7 @@ type savedDownload struct {
 }
 
 func (s *Service) downloadsStatePath() string {
-	return filepath.Join(userHome(), "Library", "Application Support", "f2f", campStateDirSegment(s.campID), "downloads.json")
+	return filepath.Join(s.campDir(s.campID), "downloads.json")
 }
 
 func (s *Service) loadSavedDownloads() []savedDownload {
@@ -446,37 +447,6 @@ func (s *Service) pruneOnce(c *internaltorrent.Client) {
 			_ = c.RemoveSeed(h.InfoHash)
 		}
 	}
-}
-
-// --- per-camp directory paths ---
-
-func sharedDirFor(campID string) string {
-	return filepath.Join(platform.AppSupportDir(userHome()), "f2f", campStateDirSegment(campID), "shared")
-}
-
-func downloadsDirFor(campID string) string {
-	// Under ~/.f2f (not ~/Downloads) so macOS TCC can't block the torrent
-	// piece-completion DB (.torrent.db) or file writes. The drop tab surfaces
-	// downloads in the UI, so they don't need to live in ~/Downloads.
-	return filepath.Join(userHome(), ".f2f", "drops", campUserVisibleSegment(campID))
-}
-
-func campStateDirSegment(campID string) string {
-	if campID == "" {
-		return "_root"
-	}
-	return campID
-}
-
-func campUserVisibleSegment(campID string) string {
-	if campID == "" {
-		return "_root"
-	}
-	label := identity.CampLabel(campID)
-	if label == campID {
-		return label
-	}
-	return label + "_" + campID[:8]
 }
 
 // --- root↔user helpers ---

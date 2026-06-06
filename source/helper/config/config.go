@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -216,7 +217,13 @@ func (s *Store) ensureLoadedLocked(id string) (*Camp, error) {
 	}
 	data, err := os.ReadFile(s.campPath(id))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		// migration: fall back to the legacy flat file. Next SaveCamp
+		// rewrites it under the per-camp dir.
+		if old, oerr := os.ReadFile(s.oldCampPath(id)); oerr == nil {
+			data, err = old, nil
+		} else {
+			return nil, nil
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -255,9 +262,40 @@ func deepCopyCamp(src *Camp) *Camp {
 // Dir is the on-disk directory backing this store.
 func (s *Store) Dir() string { return s.dir }
 
+// CampDir returns (creating + chowning) the per-camp directory
+// ~/.f2f/<camp_id>/ where ALL of a camp's state lives — config, the
+// messenger/notifications DBs, the per-camp log, shared/ and drops/.
+// Empty id maps to "_root". This is the single source of truth for the
+// per-camp layout; other packages build their paths under it.
+func (s *Store) CampDir(id string) string {
+	seg := id
+	if seg == "" {
+		seg = "_root"
+	}
+	// defensive: never let a camp_id escape s.dir (it's validated upstream,
+	// but this is the filesystem boundary for every per-camp artifact).
+	seg = strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(seg)
+	dir := filepath.Join(s.dir, seg)
+	_ = os.MkdirAll(dir, 0o755)
+	chownToUser(dir)
+	return dir
+}
+
 // statePath / campPath build the absolute paths under s.dir.
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
+
+// campPath is the per-camp config file: ~/.f2f/<camp_id>/config.json.
 func (s *Store) campPath(id string) string {
+	seg := id
+	if seg == "" {
+		seg = "_root"
+	}
+	return filepath.Join(s.dir, seg, "config.json")
+}
+
+// oldCampPath is the legacy flat location (~/.f2f/<camp_id>.config.json),
+// read as a one-time fallback so existing camps migrate without loss.
+func (s *Store) oldCampPath(id string) string {
 	return filepath.Join(s.dir, id+".config.json")
 }
 
@@ -323,7 +361,13 @@ func (s *Store) writeJSON(path string, v any) error {
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	// Ensure the parent dir exists (per-camp dirs are created on demand).
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	chownToUser(dir)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}

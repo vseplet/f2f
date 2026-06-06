@@ -8,7 +8,12 @@ import (
 
 func TestPerCampRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s := New(dir)
+	campDir := func(id string) string {
+		d := filepath.Join(dir, id)
+		_ = os.MkdirAll(d, 0o755)
+		return d
+	}
+	s := New(campDir)
 	defer s.Close()
 
 	const camp = "abc_xyz"
@@ -46,7 +51,7 @@ func TestPerCampRoundTrip(t *testing.T) {
 	}
 
 	// per-camp file actually exists and is named by camp_id
-	if _, err := os.Stat(filepath.Join(dir, camp+".messenger.db")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, camp, "messenger.db")); err != nil {
 		t.Fatalf("expected per-camp db file: %v", err)
 	}
 
