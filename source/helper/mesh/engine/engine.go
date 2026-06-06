@@ -22,16 +22,15 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine/awg"
-	"github.com/vseplet/f2f/source/helper/engine/obfenv"
-	
-	
-	"github.com/vseplet/f2f/source/helper/engine/pair"
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
-	"github.com/vseplet/f2f/source/helper/engine/route"
-	"github.com/vseplet/f2f/source/helper/engine/utun"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/awg"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
+
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/pair"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/route"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/utun"
 	"github.com/vseplet/f2f/source/helper/platform"
+	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
 // tunnelSubnetCIDR is the CGNAT /10 the overlay carves per-peer
@@ -80,12 +79,12 @@ type Config struct {
 // Status is a point-in-time snapshot. It is computed; the underlying state
 // changes between calls.
 type Status struct {
-	Running      bool   `json:"running"`
-	UtunName     string `json:"utun_name,omitempty"`
-	LocalIP      string `json:"local_ip,omitempty"`
-	PeerIP       string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
-	ListenAddr   string `json:"listen_addr,omitempty"`
-	PeerAddr     string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
+	Running    bool   `json:"running"`
+	UtunName   string `json:"utun_name,omitempty"`
+	LocalIP    string `json:"local_ip,omitempty"`
+	PeerIP     string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
+	ListenAddr string `json:"listen_addr,omitempty"`
+	PeerAddr   string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
 	// CampID is the only camp metadata engine carries — it's the
 	// active session key (config store / identity / obfenv all keyed
 	// by it). URL/StunAddr/Name/Label and connection signals
@@ -311,7 +310,7 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun      *utun.Tunnel
+	tun    *utun.Tunnel
 	udp    *net.UDPConn
 	routes *route.Manager
 
@@ -1010,7 +1009,6 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
 
-
 func (e *Engine) SetTunnelHTTPPort(port string) {
 	e.tunnelHTTPPort = port
 }
@@ -1413,7 +1411,6 @@ func (e *Engine) Stop() error {
 	}
 	e.workers.Wait()
 
-
 	e.mu.Lock()
 	if e.awgDevice != nil {
 		// Device.Close stops its goroutines AND closes the underlying
@@ -1455,10 +1452,10 @@ func (e *Engine) Status() Status {
 	st := Status{
 		Running:   e.running,
 		StartedAt: e.started,
-		TxBytes:      e.txBytes.Load(),
-		RxBytes:      e.rxBytes.Load(),
-		TxPackets:    e.txPackets.Load(),
-		RxPackets:    e.rxPackets.Load(),
+		TxBytes:   e.txBytes.Load(),
+		RxBytes:   e.rxBytes.Load(),
+		TxPackets: e.txPackets.Load(),
+		RxPackets: e.rxPackets.Load(),
 	}
 	if e.tun != nil {
 		st.UtunName = e.tun.Name()
@@ -1511,17 +1508,17 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		// UDPEndpoint for self comes from services/camp via web
 		// statusView (engine no longer owns the announce reply).
 		out = append(out, PeerStatusInfo{
-			Name:       e.cfg.CampName,
-			Pub:        selfPub,
-			Fp:         selfFp,
-			JoinedAt:   e.started.UnixMilli(),
-			InCamp:     true,
-			Online:     true,
-			Reachable:  true,
-			Verified:   true,
-			Paired:     true,
-			Self:       true,
-			OverlayV4:  e.cfg.LocalIP,
+			Name:      e.cfg.CampName,
+			Pub:       selfPub,
+			Fp:        selfFp,
+			JoinedAt:  e.started.UnixMilli(),
+			InCamp:    true,
+			Online:    true,
+			Reachable: true,
+			Verified:  true,
+			Paired:    true,
+			Self:      true,
+			OverlayV4: e.cfg.LocalIP,
 		})
 	}
 	// Sort peer-keys so the UI list is stable across refreshes —
@@ -1628,7 +1625,6 @@ func (e *Engine) SetActivePeer(pub string) error {
 	log.Printf("camp: active peer = %s (pub=%s)", p.Name, pub)
 	return nil
 }
-
 
 func (e *Engine) tunToPeerLoop(ctx context.Context) {
 	defer e.workers.Done()

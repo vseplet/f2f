@@ -56,11 +56,11 @@ type Options struct {
 // Client wraps the underlying anacrolix client + bookkeeping for our
 // own torrents and discovered ones.
 type Client struct {
-	opts     Options
-	atc      *atorrent.Client
-	mu       sync.Mutex
-	seeding  map[string]*SeedHandle // info_hash hex → seed entry
-	loading  map[string]*Download   // info_hash hex → in-flight download
+	opts    Options
+	atc     *atorrent.Client
+	mu      sync.Mutex
+	seeding map[string]*SeedHandle // info_hash hex → seed entry
+	loading map[string]*Download   // info_hash hex → in-flight download
 }
 
 // SeedHandle tracks one file we're sharing.

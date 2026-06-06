@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
 )
 
 // Base config must include the private key as 64-char hex and all four

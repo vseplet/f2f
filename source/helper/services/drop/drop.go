@@ -30,8 +30,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
 )
@@ -51,11 +51,11 @@ type PeerFile struct {
 type Service struct {
 	eng *engine.Engine
 
-	mu         sync.Mutex
-	client     *internaltorrent.Client
-	campID     string
-	sharedDir  string
-	downloads  string
+	mu        sync.Mutex
+	client    *internaltorrent.Client
+	campID    string
+	sharedDir string
+	downloads string
 
 	peerMu    sync.RWMutex
 	peerFiles map[string][]PeerFile // pub → files

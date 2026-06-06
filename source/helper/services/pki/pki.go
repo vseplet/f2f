@@ -41,8 +41,8 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -73,10 +73,10 @@ type Service struct {
 	store *config.Store
 	eng   *engine.Engine
 
-	mu        sync.Mutex
-	myCA   *CA                // current camp's local CA (HTTPS termination)
-	peers     map[string]PeerEntry // fingerprint → discovered peer CA
-	campID    string              // active camp; set in Start/Load
+	mu     sync.Mutex
+	myCA   *CA                  // current camp's local CA (HTTPS termination)
+	peers  map[string]PeerEntry // fingerprint → discovered peer CA
+	campID string               // active camp; set in Start/Load
 }
 
 // New constructs a Service. store and engine must outlive it.

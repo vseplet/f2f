@@ -104,18 +104,22 @@ source/helper/
 │
 ├── identity/                  # Ed25519 ключ peer'а + X25519 derive + fingerprint
 │
-├── engine/                    # TRANSPORT SUBSTRATE — только сеть, никакой application logic
-│   ├── engine.go                # orchestrator: lifecycle, peers map, callbacks (~2000 LOC)
-│   ├── config_store.go          # hydrate peers from Store, mergePeerSnapshotLocked
-│   ├── helpers.go               # PubToV4Addr/V4Subnet + extractDst/packetSummary
-│   ├── log.go                   # broadcast-логгер для UI
-│   ├── awg/                     # AmneziaWG Device + conn.Bind + UAPI builder
-│   ├── obfenv/                  # ChaCha20-Poly1305 envelope, magic-headers H1..H8 из camp_id
-│   ├── pair/                    # signed pair_req/pair_res handshake
-│   ├── rendezvous/              # camp UDP announce (ростер приходит в ответе; адрес ре-резолвится на каждом announce)
-│   ├── route/                   # Manager поверх platform.Route* — track + Cleanup
-│   ├── utun/                    # lifecycle одного utun-устройства (Open/Read/Write/Close)
-│   └── *_test.go                # тесты overlay/packet
+├── mesh/                      # ФАБРИКА ПИРОВ — всё про связь узлов (L3 → L7), без app logic
+│   ├── engine/                  # TRANSPORT SUBSTRATE (L3): оверлей, только сеть
+│   │   ├── engine.go              # orchestrator: lifecycle, peers map, callbacks (~2000 LOC)
+│   │   ├── config_store.go        # hydrate peers from Store, mergePeerSnapshotLocked
+│   │   ├── helpers.go             # PubToV4Addr/V4Subnet + extractDst/packetSummary
+│   │   ├── log.go                 # broadcast-логгер для UI
+│   │   ├── awg/                   # AmneziaWG Device + conn.Bind + UAPI builder
+│   │   ├── obfenv/                # ChaCha20-Poly1305 envelope, magic-headers H1..H8 из camp_id
+│   │   ├── pair/                  # signed pair_req/pair_res handshake
+│   │   ├── rendezvous/            # camp UDP announce (ростер в ответе; адрес ре-резолвится на каждом announce)
+│   │   ├── route/                 # Manager поверх platform.Route* — track + Cleanup
+│   │   └── utun/                  # lifecycle одного utun-устройства (Open/Read/Write/Close)
+│   ├── bus/                     # ТРАНСПОРТ (L7): QUIC overlay:2203 — типизир. обмен по pub
+│   │   └── bus.go                 # Service: listener+dial, auto-mesh, tie-break, Request/Notify/Handle
+│   └── gossip/                  # репликация NodeState (platform + peer-view) по шине
+│       └── gossip.go              # Service: Announce/Peer/All/OnChange; generic для app, типизир. для fabric
 │
 ├── services/                  # APPLICATION-LEVEL сервисы поверх engine
 │   ├── dns/                     # DNS-сервер + MyDomains catalog + peer-poll + health
@@ -137,8 +141,6 @@ source/helper/
 │   ├── tunnel/                  # APPLICATION-уровень routing: intercepts + egress
 │   │   ├── tunnel.go              # Service: AddIntercept/RemoveIntercept, RefreshDomainRoutes
 │   │   └── egress.go              # NAT install + ip-forwarding (бывший engine/egress)
-│   ├── bus/                     # QUIC data bus (overlay:2203) — единый пир-к-пир транспорт
-│   │   └── bus.go                # Service: listener+dial, auto-mesh, tie-break, Request/Notify/Handle
 │   ├── messenger/              # пер-камповая SQLite (~/.f2f/<camp_id>.messenger.db)
 │   │   └── messenger.go          # Store: messages/channels, modernc sqlite (no cgo)
 │   └── notify/                 # хаб уведомлений (in-memory ring + SSE), слушает шину
@@ -149,17 +151,19 @@ source/helper/
     └── assets/                  # SPA (embed'ятся в бинарь)
 ```
 
-**Два слоя.** `engine/` — то что трогает сеть/железо (utun, UDP,
-AWG, pair, hole-punch, camp announce). Никакой application logic.
-`services/` — пользовательские сервисы поверх engine: каждый держит
-своё состояние, пишет в `config.Store` через `UpdateCamp(fn)`, читает
-живые peer'ы через `engine.OnlinePeersForCAPoll()` /
-`engine.HasPeerName()` и т.п. main.go соединяет их.
+**Тиры.** `mesh/` — **фабрика пиров**: всё про связь узлов, без app logic.
+Внутри по уровням: `engine` (L3 — оверлей: utun/UDP/AWG/pair/hole-punch/
+announce), `bus` (L7 — типизированный QUIC-обмен по pub), `gossip`
+(репликация fabric-стейта NodeState). `services/` — пользовательские
+сервисы поверх фабрики: каждый держит своё состояние, пишет в
+`config.Store`, читает живых peer'ов через `engine.*` и обменивается с
+пирами через `mesh/bus`. main.go соединяет их.
 
-**Зачем такое разделение.** Engine — это "транспорт", его поведение
-не зависит от того что мы публикуем (домены / файлы / звонки). А
-сервис — это "что ты можешь сделать с транспортом". Можно убрать
-сервис без поломки engine, добавить новый без правок engine.
+**Зачем такое разделение.** Фабрика — это "как узлы связаны", её
+поведение не зависит от того что мы публикуем (домены / файлы / звонки).
+Сервис — это "что ты можешь сделать поверх фабрики". Можно убрать сервис
+без поломки фабрики, добавить новый без её правок. `identity/config/
+platform` — фундамент под всеми тирами.
 
 ---
 
@@ -300,13 +304,15 @@ SetAWGAllowedCIDRsHook(fn)                // services/tunnel инжектит in
 ### Кто кого знает (импорты)
 
 ```
-ui/web         → engine, services/*       (нужен всё)
-services/*     → engine, config, platform (но НЕ друг друга)
-engine         → engine/*, config, identity, platform
-engine/*       → platform, identity       (no app logic)
-config         → platform                 (paths/chown)
-identity       → -                        (stdlib only)
-platform       → -                        (stdlib + OS calls)
+ui/web         → mesh, services/*            (нужен всё)
+services/*     → mesh, config, identity, platform   (но НЕ друг друга)
+mesh/gossip    → mesh/bus                     (транспорт)
+mesh/bus       → (свой Resolver-интерфейс)    (engine-адаптер инъектит main)
+mesh/engine    → mesh/engine/*, config, identity, platform
+mesh/engine/*  → platform, identity           (no app logic)
+config         → platform                     (paths/chown)
+identity       → -                            (stdlib only — кросс-каттинг примитив)
+platform       → -                            (stdlib + OS calls)
 ```
 
 Сервисы **не импортируют друг друга**. Если двум нужны общие данные

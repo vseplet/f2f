@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
 )
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
@@ -45,13 +45,13 @@ var ErrEngineNotRunning = errors.New("firewall: engine not running")
 //
 //   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer
 //     signal polling over utun.
-//   - 2203/udp — the QUIC peer-to-peer data bus (services/bus).
+//   - 2203/udp — the QUIC peer-to-peer data bus (mesh/bus).
 //   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
 //     locally-registered domains.
 //   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the
 //     drop subsystem.
 //
-// Keep in sync with web.Server, services/bus (Port) and the torrent client.
+// Keep in sync with web.Server, mesh/bus (Port) and the torrent client.
 var BuiltinRules = []PortRule{
 	{Port: 2202, Protocol: "tcp"},
 	{Port: 2203, Protocol: "udp"}, // QUIC data bus

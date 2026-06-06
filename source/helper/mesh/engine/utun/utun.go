@@ -8,8 +8,8 @@ import (
 	"log"
 	"net/netip"
 
-	"github.com/vseplet/f2f/source/helper/platform"
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // MTU we configure on the tunnel. Conservative — leaves room for the

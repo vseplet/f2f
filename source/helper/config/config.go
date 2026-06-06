@@ -1,9 +1,9 @@
 // Package config persists user-editable engine configuration under
 // $HOME/.f2f/. Two file types live there:
 //
-//   state.json               — global pointer: last camp_id + list of known camps
-//   <camp_id>.config.json    — per-camp: name, intercepts, my-domains, firewall,
-//                              trusted-peer CA metadata, last-known peer roster
+//	state.json               — global pointer: last camp_id + list of known camps
+//	<camp_id>.config.json    — per-camp: name, intercepts, my-domains, firewall,
+//	                           trusted-peer CA metadata, last-known peer roster
 //
 // Writes are atomic (tmp + rename) and chowned to $SUDO_USER so the
 // user (not root) can manage these files from Finder.
@@ -256,7 +256,7 @@ func deepCopyCamp(src *Camp) *Camp {
 func (s *Store) Dir() string { return s.dir }
 
 // statePath / campPath build the absolute paths under s.dir.
-func (s *Store) statePath() string             { return filepath.Join(s.dir, "state.json") }
+func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
 func (s *Store) campPath(id string) string {
 	return filepath.Join(s.dir, id+".config.json")
 }

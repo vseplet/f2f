@@ -525,9 +525,9 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 }
 
 type renegotiateMsg struct {
-	Kind   string          `json:"kind"`
-	From   string          `json:"from"`
-	Tracks []trackInfoMsg  `json:"tracks,omitempty"`
+	Kind   string         `json:"kind"`
+	From   string         `json:"from"`
+	Tracks []trackInfoMsg `json:"tracks,omitempty"`
 }
 
 type trackInfoMsg struct {
