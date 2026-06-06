@@ -49,7 +49,8 @@ func (s *Service) HealthSnapshot() *Health {
 // Service owns the AnnounceClient. Constructed once in main.go; Start
 // runs on eng.OnStarted, Stop on eng.OnStopped.
 type Service struct {
-	eng *engine.Engine
+	eng   *engine.Engine
+	store *config.Store
 
 	mu            sync.Mutex
 	announce      *rendezvous.AnnounceClient
@@ -63,11 +64,18 @@ type Service struct {
 	// self holds the latest announce reply (our PeerInfo as camp sees
 	// us). Read by UI for the self peer-row endpoint display.
 	self atomic.Pointer[rendezvous.PeerInfo]
+	// curCampID is the camp_id of the running camp, set in Start and
+	// cleared in Stop. Read lock-free by onUpdate (which runs on the
+	// announce goroutine) so it never contends with s.mu held by Stop.
+	curCampID atomic.Pointer[string]
 }
 
-// New constructs a Service. The engine must outlive the service.
-func New(eng *engine.Engine) *Service {
-	return &Service{eng: eng}
+// New constructs a Service. The engine must outlive the service. The
+// store is where this service persists each camp's peer catalog (the
+// roster snapshot it receives on every announce reply) — the engine no
+// longer owns that write.
+func New(eng *engine.Engine, store *config.Store) *Service {
+	return &Service{eng: eng, store: store}
 }
 
 // Start brings up the announce client for the given camp config.
@@ -107,6 +115,7 @@ func (s *Service) Start(c *config.Camp) error {
 	// else having to touch the socket.
 	campName := c.Identity.Name
 	campID := c.CampID
+	s.curCampID.Store(&campID) // onUpdate persists the catalog under this id
 	unreg := s.eng.RegisterUDPHandler(func(pkt []byte, from *net.UDPAddr) bool {
 		// Read the camp address dynamically — it can change as the address
 		// re-resolves (DNS recovery / fly.io IP rotation).
@@ -159,6 +168,7 @@ func (s *Service) Stop() error {
 	s.announceDone = nil
 	s.unregisterUDP = nil
 	s.mu.Unlock()
+	s.curCampID.Store(nil)
 	if unreg != nil {
 		unreg()
 	}
@@ -228,13 +238,93 @@ func (s *Service) AnnounceStats() (sentMs, replyMs, rttMs int64) {
 	return ac.LastSentMs(), ac.LastReplyMs(), ac.LastRTTMs()
 }
 
-// onUpdate is the announce-reply roster callback. Stores a snapshot
-// for the UI hot path and pushes the diff into the engine so peers
-// map + catalog reconcile.
+// onUpdate is the announce-reply roster callback. Stores a snapshot for
+// the UI hot path, pushes the roster into the engine so the live peers
+// map reconciles, and persists the roster into the per-camp catalog so
+// the UI sees known nodes (incl. currently-offline) on the next start.
 func (s *Service) onUpdate(peers []rendezvous.PeerInfo) {
 	dup := append([]rendezvous.PeerInfo(nil), peers...)
 	s.snapshot.Store(&dup)
 	s.eng.ApplyCampRoster(peers)
+	s.persistCatalog(peers)
+}
+
+// persistCatalog merges the latest roster into the running camp's
+// PeerCatalog on disk. Best-effort: a lost write is re-applied on the
+// next announce reply. Runs on the announce goroutine, so it must not
+// touch s.mu (Stop holds it while waiting for that goroutine to exit) —
+// it reads curCampID lock-free instead.
+func (s *Service) persistCatalog(peers []rendezvous.PeerInfo) {
+	if s.store == nil {
+		return
+	}
+	idp := s.curCampID.Load()
+	if idp == nil {
+		return
+	}
+	if err := s.store.UpdateCamp(*idp, func(c *config.Camp) {
+		mergeRoster(c, peers)
+	}); err != nil {
+		log.Printf("camp: persist peer catalog: %v", err)
+	}
+}
+
+// mergeRoster upserts every PeerInfo from a roster into c.PeerCatalog.
+// Existing entries are refreshed in place; new peers are appended;
+// removed peers stay — the catalog is historical (no node deletion yet).
+// Our own entry (matched by display name) is skipped. When camp reports
+// a peer offline its endpoint fields go blank, so we preserve the
+// previously-known values — the catalog is our long-term memory of who
+// has been in the camp. (Moved here from the engine, which no longer
+// writes config.)
+func mergeRoster(c *config.Camp, peers []rendezvous.PeerInfo) {
+	ourName := c.Identity.Name
+	byPub := make(map[string]int, len(c.PeerCatalog))
+	for i, p := range c.PeerCatalog {
+		if p.Pub != "" {
+			byPub[p.Pub] = i
+		}
+	}
+	for _, p := range peers {
+		if p.Pub == "" || p.Name == ourName {
+			continue
+		}
+		entry := config.Peer{
+			Name:        p.Name,
+			Pub:         p.Pub,
+			PublicIP:    p.PublicIP,
+			UDPPort:     p.UDPPort,
+			UDPEndpoint: p.UDPEndpoint,
+			JoinedAt:    p.JoinedAt,
+			LastSeenAt:  p.LastSeenAt,
+			Online:      p.Online,
+		}
+		idx, ok := byPub[p.Pub]
+		if !ok {
+			byPub[p.Pub] = len(c.PeerCatalog)
+			c.PeerCatalog = append(c.PeerCatalog, entry)
+			continue
+		}
+		if !p.Online {
+			prev := c.PeerCatalog[idx]
+			if entry.PublicIP == "" {
+				entry.PublicIP = prev.PublicIP
+			}
+			if entry.UDPEndpoint == "" {
+				entry.UDPEndpoint = prev.UDPEndpoint
+			}
+			if entry.UDPPort == 0 {
+				entry.UDPPort = prev.UDPPort
+			}
+			if entry.JoinedAt == 0 {
+				entry.JoinedAt = prev.JoinedAt
+			}
+			if entry.LastSeenAt == 0 {
+				entry.LastSeenAt = prev.LastSeenAt
+			}
+		}
+		c.PeerCatalog[idx] = entry
+	}
 }
 
 // sameUDPAddr compares two *net.UDPAddr by IP+Port (nil-safe).

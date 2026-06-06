@@ -189,8 +189,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	}
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
-	mux.HandleFunc("POST /api/start", s.handleStart)
-	mux.HandleFunc("POST /api/stop", s.handleStop)
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
@@ -210,12 +208,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("POST /api/trusted-peers/{fp}/install", s.handleInstallTrustedPeer)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
-
-	// Per-camp configuration. /api/camps is the global view (list +
-	// last selected); /api/camp/{id} returns the full config file so
-	// the UI can preview before switching.
-	mux.HandleFunc("GET /api/camps", s.handleListCamps)
-	mux.HandleFunc("GET /api/camp/{id}", s.handleGetCamp)
 
 	// Firewall: default-deny inbound on utun + user-configurable
 	// allow list (in addition to f2f's own ports). Loopback-only,
@@ -698,7 +690,7 @@ func (s *Server) statusWithDomains() statusView {
 		health = s.camp.HealthSnapshot()
 	}
 	var knownCamps []config.KnownCamp
-	if gs, err := s.engine.ListCamps(); err == nil && gs != nil {
+	if gs, err := s.store.LoadState(); err == nil && gs != nil {
 		knownCamps = gs.KnownCamps
 	}
 	return statusView{
@@ -906,43 +898,6 @@ func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListCamps returns the global state file — last selected
-// camp_id and the roster of every camp the user has ever joined.
-// Powers the UI's camp dropdown / switcher.
-func (s *Server) handleListCamps(w http.ResponseWriter, r *http.Request) {
-	st, err := s.engine.ListCamps()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if st.KnownCamps == nil {
-		st.KnownCamps = []config.KnownCamp{}
-	}
-	writeJSON(w, http.StatusOK, st)
-}
-
-// handleGetCamp returns the full on-disk config for one camp_id —
-// intercepts, my-domains, firewall, trusted-peer fingerprints, peer
-// catalog. 404 if no config exists yet for that id (i.e. the user
-// hasn't started the engine with this camp_id).
-func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("missing camp_id"))
-		return
-	}
-	c, err := s.store.SnapshotCamp(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if c == nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("no config for camp %q", id))
-		return
-	}
-	writeJSON(w, http.StatusOK, c)
 }
 
 // handleListFirewall returns the inbound-utun allow list: built-in
@@ -1245,80 +1200,9 @@ func isLoopback(remoteAddr string) bool {
 	return host == "127.0.0.1" || host == "::1"
 }
 
-type startRequest struct {
-	CampName  string `json:"camp_name,omitempty"`
-	CampID    string `json:"camp_id"`
-	CampLabel string `json:"camp_label,omitempty"`
-}
-
-// handleStart accepts only camp identity from the UI now; everything else
-// (utun addresses, UDP listen port, camp endpoint) uses sensible defaults
-// that the engine fills in. Static-peer mode is no longer reachable from
-// the UI — use the CLI if you need it.
-//
-// camp_name is optional when a per-camp config already exists on disk
-// (the engine reads it from $HOME/.f2f/<camp_id>.config.json). It is
-// required on the first start for a given camp_id.
-//
-// If the engine is already running with a different camp_id, we stop
-// it first — gives the UI a one-click "switch camp" affordance.
-func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
-	var req startRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	// Two flows in one endpoint:
-	//   - join/resume: req.CampID populated (a known camp on disk or a
-	//     full <pub>_<label> id pasted from an invite).
-	//   - create: req.CampID empty, req.CampLabel populated → engine
-	//     generates identity and derives ID = <pub>_<label>.
-	// req.CampName is the user's nickname inside the camp either way.
-	if req.CampID == "" && req.CampLabel == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id or camp_label is required"))
-		return
-	}
-	if cur := s.engine.Status(); cur.Running {
-		if req.CampID != "" && cur.CampID == req.CampID {
-			writeJSON(w, http.StatusOK, s.statusWithDomains())
-			return
-		}
-		if err := s.engine.Stop(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Errorf("stop current: %w", err))
-			return
-		}
-	}
-	name := req.CampName
-	if name == "" && req.CampID != "" {
-		if existing, err := s.store.SnapshotCamp(req.CampID); err == nil && existing != nil {
-			name = existing.Identity.Name
-		}
-	}
-	if name == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required"))
-		return
-	}
-	cfg := engine.Config{
-		LocalIP:   "100.64.0.1", // placeholder; engine derives the real overlay-IP from pub on Start
-		Listen:    ":9000",
-		CampID:    req.CampID,
-		CampName:  name,
-		CampLabel: req.CampLabel,
-	}
-	if err := s.engine.Start(cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.statusWithDomains())
-}
-
-func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.Stop(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.statusWithDomains())
-}
+// Camp lifecycle (start / stop / create / switch) is owned by package
+// cli now — the web UI is read-only for camps. The old POST /api/start
+// and /api/stop endpoints were removed with the SPA's camp switcher.
 
 type addInterceptRequest struct {
 	Spec string `json:"spec"`

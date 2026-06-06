@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -55,22 +56,48 @@ type service struct {
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	bind := flag.String("bind", defaultBind, "HTTP bind address for the loopback UI")
-	console := flag.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
-	flag.Parse()
+	args := os.Args[1:]
 
-	if err := run(*bind, *console); err != nil {
+	// `f2f camp …` — camp management (create/list/use/join/rm/invite).
+	// Runs and exits: no engine, no UI. Needs only the config store.
+	if len(args) > 0 && args[0] == "camp" {
+		store, err := config.NewStore()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config store:", err)
+			os.Exit(1)
+		}
+		if err := cli.RunCamp(store, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `f2f up [flags]` — non-interactive: bring up the last-used camp
+	// (login items / headless). Bare `f2f` shows the interactive picker.
+	autostart := false
+	if len(args) > 0 && args[0] == "up" {
+		autostart = true
+		args = args[1:]
+	}
+
+	fs := flag.NewFlagSet("f2f", flag.ExitOnError)
+	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI")
+	console := fs.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
+	_ = fs.Parse(args)
+
+	if err := run(*bind, *console, autostart); err != nil {
 		clog.Fatal("%v", err)
 	}
 }
 
-func run(bind string, console bool) error {
+func run(bind string, console bool, autostart bool) error {
 	store, err := config.NewStore()
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
 	}
 
-	eng := engine.New(store)
+	eng := engine.New()
 	eng.SetDefaultListen(":0") // ephemeral; camp learns reflex after NAT
 
 	// Centralised logging: log.* → file (+ UI tap), console only with
@@ -87,7 +114,7 @@ func run(bind string, console bool) error {
 	dropSvc := drop.New(eng, store.CampDir)
 	callsSvc := calls.New(store, eng)
 	tunnelSvc := tunnel.New(store, eng)
-	campSvc := camp.New(eng)
+	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
 	// Local message/channel store — one SQLite file per camp under ~/.f2f
@@ -302,11 +329,29 @@ func run(bind string, console bool) error {
 		}
 	}()
 
-	go func() {
-		if err := eng.StartLastCamp(); err != nil {
-			log.Printf("autostart: %v", err)
+	// Decide which camp to bring up. Interactive (a TTY, not `f2f up`)
+	// shows the huh picker — choose a known camp, create one, or join via
+	// invite; non-interactive auto-selects the last-used camp. Camp
+	// provisioning + selection live in package cli now (the engine no
+	// longer owns any of this). Runs in the foreground so the picker owns
+	// the terminal cleanly; the UI server is already listening above.
+	mgr := cli.NewManager(store)
+	interactive := !autostart && cli.Interactive()
+	if camp, idt, err := mgr.SelectCamp(interactive); err != nil {
+		clog.Console("camp select: %v", err)
+	} else if camp != nil {
+		cfg := engine.Config{
+			LocalIP:  "100.64.0.1", // placeholder; engine derives the overlay-IP from pub
+			Listen:   ":9000",
+			Camp:     camp,
+			Identity: idt,
 		}
-	}()
+		if err := eng.Start(cfg); err != nil {
+			clog.Console("start camp: %v", err)
+		}
+	} else {
+		clog.Console("no camp selected — open the UI to create or join one")
+	}
 
 	<-ctx.Done()
 	log.Println("shutting down…")

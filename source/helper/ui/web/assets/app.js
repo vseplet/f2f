@@ -402,8 +402,8 @@ $(function () {
   let livePeers = [];      // last seen camp peers from /api/status
   const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
-  // Camp identity is loaded from the backend on first render — see
-  // refreshCamps(). The form fields are no longer the source of truth.
+  // Camp identity is loaded from the backend (/api/status) on render;
+  // the UI no longer creates or switches camps (that's the CLI's job).
   function restoreForm() { /* no-op: backend is authoritative now */ }
 
   const fmtBytes = (n) => {
@@ -452,10 +452,10 @@ $(function () {
   function setEngineState(state, label, meta) {
     const icons = { running: '■', stopped: '▶', loading: '⋯', error: '!' };
     const titles = {
-      running: 'click to stop',
-      stopped: 'click to start',
+      running: 'engine running — manage camps via the CLI',
+      stopped: 'engine stopped — run `sudo f2f` to bring up a camp',
       loading: 'loading…',
-      error: 'click to start',
+      error: 'API error',
     };
     $btnEngine
       .removeClass('state-running state-stopped state-loading state-error')
@@ -470,79 +470,10 @@ $(function () {
     $.getJSON('/api/status', applyStatus).fail(() => setEngineState('error', 'API error', ''));
   }
 
-  // refreshCamps pulls $HOME/.f2f/state.json — the last selected camp_id
-  // and the roster of known camps — and wires up the dropdown. Called
-  // once on load, after start, and after Stop.
-  let knownCamps = [];
-  function refreshCamps() {
-    $.getJSON('/api/camps', (st) => {
-      knownCamps = (st && Array.isArray(st.known_camps)) ? st.known_camps : [];
-      renderCampPicker();
-      const last = st && st.last_camp_id;
-      // Pre-select the last camp in the picker if engine isn't running
-      // and the user hasn't picked anything else yet — gives one-click
-      // "start where you left off" affordance.
-      if (last && !engineRunning && !$('#camp-picker').val()) {
-        $('#camp-picker').val(last);
-      }
-    });
-  }
-  // renderCampPicker builds the dropdown: every known camp + a
-  // sentinel "+ new camp" at the bottom that reveals the join form.
-  function renderCampPicker() {
-    const $sel = $('#camp-picker');
-    const cur = $sel.val();
-    $sel.empty();
-    $sel.append($('<option>').val('').text('— pick a camp —'));
-    knownCamps.forEach((c) => {
-      // Display: <camp_label> · fp <8hex> (<nickname>) — keeps the
-      // dropdown readable even when c.id is a 64-hex-prefixed string.
-      const label = campLabelFromID(c.id);
-      const fp = campShortFP(c.id);
-      const fpPart = fp ? ` · fp ${fp}` : '';
-      const namePart = c.name ? ` (${c.name})` : '';
-      $sel.append($('<option>').val(c.id).text(`${label}${fpPart}${namePart}`));
-    });
-    $sel.append($('<option>').val('__new__').text('+ new camp'));
-    if (cur) $sel.val(cur);
-  }
-  $('#camp-picker').on('change', function () {
-    const id = $(this).val();
-    if (id === '__new__') {
-      $('#camp-name').val('');
-      $('#camp-id').val('');
-      $('#new-camp-form').removeClass('hidden');
-      setTimeout(() => $('#camp-name').focus(), 0);
-      return;
-    }
-    $('#new-camp-form').addClass('hidden');
-    if (!id) return;
-    // Known camp picked — auto-start. Backend stop+starts if we were
-    // running with a different camp_id. triggerStart re-reads picker
-    // state itself, so we don't need to mirror values into inputs.
-    triggerStart();
-  });
-  $('#btn-new-camp-start').on('click', () => {
-    const id = ($('#camp-id').val() || '').trim();
-    const name = ($('#camp-name').val() || '').trim();
-    if (!id || !name) {
-      alert('camp and name are required');
-      return;
-    }
-    triggerStart();
-  });
-  $('#btn-new-camp-cancel').on('click', () => {
-    $('#new-camp-form').addClass('hidden');
-    $('#camp-picker').val('');
-  });
-  // Running-state header link: collapse status, expose picker so the
-  // user can switch without stopping first.
-  $('#identity-switch').on('click', (e) => {
-    e.preventDefault();
-    $('#identity-status').addClass('hidden');
-    $('#identity-picker').removeClass('hidden');
-    $('#camp-picker').val('').trigger('focus');
-  });
+  // Camp lifecycle (create / join / switch / stop) lives in the CLI
+  // now — the UI is read-only for camps. It just reflects whatever camp
+  // the backend is running (or shows the "no camp" hint when stopped).
+
   // Click the pub-key cell to copy its full hex to the clipboard.
   // No alert — flash the cell colour for half a second as feedback.
   $('#identity-pub').on('click', function () {
@@ -579,19 +510,8 @@ $(function () {
   // the user's first manual Stop would be immediately followed by an
   // auto-Start, which races with camp's session cleanup and fails with
   // "name_taken".
-  // `pendingOp` guards the engine button against periodic /api/status
-  // races while a Start/Stop is in flight. Both Start and Stop on the
-  // server take a few seconds (utun, routes, STUN, WS close+wait); during
-  // that window the 3s refresh would see the stale running flag and
-  // overwrite our "starting…/stopping…" loading state, then the user's
-  // next click triggers a second operation that races the first and gets
-  // "already running" / a name_taken.
-  let pendingOp = null; // 'starting' | 'stopping' | null
   // Tracked from /api/status — drives `<name>.<camp_id>.f2f` rendering
-  // in the domains panels. With the identity rework #camp-id input is
-  // now only filled on the "+ new camp" path, so we can't read it
-  // there anymore. Falls back to the picker value if status hasn't
-  // arrived yet (page-load → first refreshStatus is a brief window).
+  // in the domains panels.
   // campLabelFromID mirrors identity.CampLabel in Go: new-format camp_ids
   // look like "<64-hex-pub>_<label>", legacy ones are free-form. Split
   // only when the prefix is exactly 64 hex chars; otherwise return the
@@ -603,17 +523,10 @@ $(function () {
     }
     return id;
   }
-  // campShortFP extracts the first 8 hex of pub from a new-format camp_id
-  // for UI disambiguation. Empty for legacy camps.
-  function campShortFP(id) {
-    if (!id || id.length <= 65 || id[64] !== '_') return '';
-    if (!/^[0-9a-f]{64}$/i.test(id.slice(0, 64))) return '';
-    return id.slice(0, 8);
-  }
   let currentCampID = '';
   let currentCampLabel = '';
   function campIDOrPlaceholder() {
-    return currentCampID || ($('#camp-picker').val() || '').trim().replace(/^__new__$/, '') || '<camp_id>';
+    return currentCampID || '<camp_id>';
   }
   // campLabelOrPlaceholder picks the DNS-zone-safe label (post-CampLabel
   // split server-side). Falls back to the same picker value as the id
@@ -637,7 +550,6 @@ $(function () {
       $('#identity-reflex').text(peer.udp_endpoint || '—');
       $('#identity-pub').text(peer.pub || '—').data('pub', peer.pub || '');
       $('#identity-fp').text(peer.last_rtt_ms ? '· ' + peer.last_rtt_ms + 'ms' : '');
-      $('#identity-switch').hide();
     } else {
       $('#identity-title').text('— identity');
       $('#identity-name').text(s.camp_name || '?');
@@ -646,32 +558,24 @@ $(function () {
       const pub = s.identity_pub || '', fp = s.identity_fp || '';
       $('#identity-pub').text(pub || '—').data('pub', pub);
       $('#identity-fp').text(fp ? '· fp ' + fp : '');
-      $('#identity-switch').show();
     }
   }
 
   function applyStatus(s) {
     lastStatus = s;
-    if (pendingOp) {
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', true);
-    } else if (s.running) {
+    if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';
       currentCampLabel = s.camp_label || s.camp_id || '';
-      // Running: collapse the picker and form into a key:value readout.
-      // The "switch" link inside #identity-status re-exposes the picker
-      // without forcing a manual stop first.
+      // Running: show the key:value readout, hide the "no camp" hint.
       renderIdentity(s);
       $('#identity-status').removeClass('hidden');
-      $('#identity-picker').addClass('hidden');
-      $('#new-camp-form').addClass('hidden');
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
+      $('#identity-none').addClass('hidden');
     } else {
-      setEngineState('stopped', 'start', '');
+      setEngineState('stopped', 'stopped', '');
       currentCampID = '';
       $('#identity-status').addClass('hidden');
-      $('#identity-picker').removeClass('hidden');
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
+      $('#identity-none').removeClass('hidden');
     }
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
@@ -1286,80 +1190,8 @@ $(function () {
     if (current && others.some((p) => p.name === current)) $sel.val(current);
   }
 
-  function triggerStart() {
-    // Source of truth is the picker. Three paths:
-    //   - picker = known camp id → use it directly, name from
-    //     knownCamps entry (camp config on disk already has the name).
-    //   - picker = "__new__" → user is creating or joining via the
-    //     form below. The "camp" input takes either a full <pub>_<label>
-    //     id (join existing) or a short label (create fresh).
-    //   - picker = "" → nothing selected, surface it.
-    const pick = ($('#camp-picker').val() || '').trim();
-    const cfg = {};
-    let needName = false;
-    if (pick && pick !== '__new__') {
-      cfg.camp_id = pick;
-      const entry = knownCamps.find((c) => c.id === pick);
-      if (entry && entry.name) cfg.camp_name = entry.name;
-    } else if (pick === '__new__') {
-      const raw = ($('#camp-id').val() || '').trim();
-      const name = ($('#camp-name').val() || '').trim();
-      if (!raw) {
-        $('#camp-id').trigger('focus');
-        return;
-      }
-      // Full <64hex>_<label> shape → join existing. Otherwise treat
-      // input as a label for a brand-new camp.
-      if (/^[0-9a-f]{64}_.+$/i.test(raw)) {
-        cfg.camp_id = raw;
-      } else {
-        cfg.camp_label = raw;
-      }
-      if (name) cfg.camp_name = name;
-      needName = true;
-    }
-    if (!cfg.camp_id && !cfg.camp_label) {
-      $('#identity-picker').removeClass('hidden');
-      $('#camp-picker').trigger('focus');
-      return;
-    }
-    if (needName && !cfg.camp_name) {
-      $('#camp-name').trigger('focus');
-      return;
-    }
-    pendingOp = 'starting';
-    setEngineState('loading', 'starting…', '');
-    $.ajax({
-      url: '/api/start',
-      method: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(cfg)
-    })
-      .always(() => { pendingOp = null; })
-      .done(() => { refreshStatus(); refreshCamps(); })
-      .fail((xhr) => {
-        refreshStatus();
-        alert('Start failed: ' + errorOf(xhr));
-      });
-  }
-
-  function triggerStop() {
-    pendingOp = 'stopping';
-    setEngineState('loading', 'stopping…', '');
-    $.ajax({ url: '/api/stop', method: 'POST' })
-      .always(() => { pendingOp = null; })
-      .done(refreshStatus)
-      .fail((xhr) => {
-        refreshStatus();
-        alert('Stop failed: ' + errorOf(xhr));
-      });
-  }
-
-  $btnEngine.on('click', () => {
-    if ($btnEngine.hasClass('state-loading')) return;
-    if (engineRunning) triggerStop();
-    else triggerStart();
-  });
+  // The engine status button is a read-only indicator now (running /
+  // stopped). Starting, stopping and switching camps are CLI-only.
 
   function addOne(spec, peer) {
     return $.ajax({
@@ -2268,7 +2100,6 @@ $(function () {
   })();
 
   restoreForm();
-  refreshCamps();
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();

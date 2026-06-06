@@ -13,10 +13,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,9 +69,18 @@ type Config struct {
 	// Camp mode — engine wants the minimum it needs for identity /
 	// obfenv / store key. Server endpoints (URL/StunAddr) live in
 	// the per-camp config.Camp and are read by services/camp.
-	CampID    string // shared camp id; empty triggers create-new path (CampLabel required)
-	CampName  string // our display alias in the camp
-	CampLabel string // human label for create-new (derives ID = <pub>_<label>)
+	// Camp is the already-provisioned per-camp config; Identity is its
+	// keypair. The caller (package cli / the orchestrator in main) loads
+	// both from disk and hands them over — the engine no longer creates,
+	// names, or registers camps, it only brings transport up for what
+	// it's given. Both nil in static --peer mode. Server endpoints
+	// (URL/StunAddr) live in Camp and are read by services/camp.
+	Camp     *config.Camp
+	Identity *identity.Identity
+	// CampID / CampName are derived from Camp at Start (the transport
+	// reads them pervasively). Not set by the caller.
+	CampID   string
+	CampName string
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
@@ -379,13 +386,10 @@ type Engine struct {
 	OnStarted func(localIP string)
 	OnStopped func()
 
-	// store is the singleton handle to $HOME/.f2f/. Lazily opened on
-	// the first Start so test code that just calls New() doesn't touch
-	// the filesystem.
-	store *config.Store
-	// camp mirrors the on-disk <camp_id>.config.json for the currently
-	// running camp. nil when engine is stopped or in static mode.
-	// Mutations under e.mu are followed by persistCampLocked.
+	// camp is the per-camp config handed in at Start (read-only seed for
+	// the peer catalog + our display name). nil when stopped or in
+	// static mode. The engine does NOT persist it — the on-disk file is
+	// owned by package config and written by cli + services.
 	camp *config.Camp
 	// identity is the per-camp Ed25519 keypair under
 	// /var/lib/f2f/identity/<camp_id>/. Loaded (or generated) on Start
@@ -395,14 +399,11 @@ type Engine struct {
 	identity *identity.Identity
 }
 
-// New returns a fresh Engine with the given config Store. The Store
-// is shared with services that need to persist their own slices of
-// camp config (firewall rules, trusted peers, MyDomains, ...).
-// Passing the Store explicitly lets main.go own the lifecycle and
-// keeps the engine from being the sole gatekeeper of disk state.
-func New(store *config.Store) *Engine {
+// New returns a fresh Engine. It holds no disk state — camp config and
+// identity are passed in at Start; persistence is owned by package
+// config and driven by package cli + the services.
+func New() *Engine {
 	return &Engine{
-		store: store,
 		peers: map[string]*peerState{},
 	}
 }
@@ -417,81 +418,39 @@ func (e *Engine) Start(cfg Config) error {
 	if e.running {
 		return errors.New("engine already running")
 	}
-	if cfg.CampID != "" {
-		// With Camp, peer is auto-discovered; we still need a UDP socket
-		// to receive on.
+	if cfg.Camp != nil {
+		// Camp mode. The caller hands us an already-provisioned config +
+		// identity (see package cli); peers are auto-discovered, so we
+		// only need a UDP socket to receive on.
 		if cfg.Listen == "" {
-			return errors.New("Camp mode requires Listen")
+			return errors.New("camp mode requires Listen")
 		}
+		if cfg.Identity == nil {
+			return errors.New("camp mode requires Identity")
+		}
+		if cfg.Camp.CampID == "" {
+			return errors.New("camp mode requires a camp_id in the config")
+		}
+		// Derive the fields the transport reads pervasively from the
+		// config — the caller doesn't set them.
+		cfg.CampID = cfg.Camp.CampID
+		cfg.CampName = cfg.Camp.Identity.Name
 		if cfg.CampName == "" {
-			return errors.New("Camp mode requires CampName")
-		}
-		// camp_id is optional iff we have a label — empty id means
-		// "create a new camp": generate identity first, derive id from
-		// the pub. ID populated here so the rest of Start sees a normal
-		// fully-formed CampConfig.
-		if cfg.CampID == "" {
-			label := strings.TrimSpace(cfg.CampLabel)
-			if label == "" {
-				return errors.New("camp create: Camp.Label required when ID is empty")
-			}
-			if !validCampLabel(label) {
-				return errors.New("camp create: Label must match [A-Za-z0-9_.-]+")
-			}
-			id, err := identity.Generate()
-			if err != nil {
-				return fmt.Errorf("camp create: identity: %w", err)
-			}
-			cfg.CampID = id.PubHex() + "_" + label
-			idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
-			if err := id.Save(idDir); err != nil {
-				return fmt.Errorf("camp create: save identity: %w", err)
-			}
-			e.identity = id
-			log.Printf("camp create: new camp id=%s pub=%s", cfg.CampID, id.PubHex())
+			return errors.New("camp mode requires a name in the camp config")
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
 	}
 
-	// Open $HOME/.f2f/ + load (or create) the per-camp config. Camp
-	// mode only — static --peer mode has no per-camp identity.
-	if cfg.CampID != "" {
-		if err := e.ensureStore(); err != nil {
-			return fmt.Errorf("config store: %w", err)
-		}
-		c, err := e.loadOrCreateCamp(cfg.CampID, cfg.CampName)
-		if err != nil {
-			return fmt.Errorf("config load %s: %w", cfg.CampID, err)
-		}
-		e.camp = c
-		// Per-camp Ed25519 keypair. Lives under /var/lib/f2f/ (root,
-		// 0700) so different camps can't correlate and "leaving" a
-		// camp is rm -rf of that one subdir. Failures here are fatal
-		// — without an identity we can't prove tunnel_ip ownership
-		// to the camp server once that path is wired through.
-		// If we already created+saved one above (camp-create path),
-		// LoadOrGenerate finds it on disk and returns it.
-		idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
-		id, err := identity.LoadOrGenerate(idDir)
-		if err != nil {
-			return fmt.Errorf("identity %s: %w", cfg.CampID, err)
-		}
-		e.identity = id
-		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, id.PubHex(), id.Fingerprint())
-		// Mirror pub/fingerprint into camp config so the UI can show
-		// it offline. Private key stays under /var/lib/f2f/identity/.
-		// Only writes when the pub changes (avoids touching the file
-		// on every Start once the keypair is stable). Name is left
-		// alone — it was set by loadOrCreateCamp.
-		pub, fp := id.PubHex(), id.Fingerprint()
-		if c.Identity.Pub != pub || c.Identity.Fingerprint != fp {
-			c.Identity.Pub = pub
-			c.Identity.Fingerprint = fp
-			if err := e.store.SaveCamp(c.CampID, c); err != nil {
-				log.Printf("identity: persist into camp config: %v", err)
-			}
-		}
+	// Adopt the provided config + identity. Camp mode only — static
+	// --peer mode has no per-camp identity. The engine treats both as
+	// read-only: it never writes the config file back (cli + services
+	// own persistence) and never generates keys (cli does that on
+	// create).
+	if cfg.Camp != nil {
+		e.camp = cfg.Camp
+		e.identity = cfg.Identity
+		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, e.identity.PubHex(), e.identity.Fingerprint())
 
 		// Camp-wide obfuscation: camp_key + magic-header ranges (H1..H8),
 		// derived deterministically from camp_id. Every member of this
@@ -647,9 +606,8 @@ func (e *Engine) Start(cfg Config) error {
 	// Intercepts (routing user-specified prefixes through specific
 	// peers) and their periodic DNS-spec refresh live in
 	// services/tunnel — main.go starts it off eng.OnStarted.
-	if e.camp != nil {
-		e.upsertKnownCamp(e.camp.CampID, e.camp.Identity.Name)
-	}
+	// Marking the camp as last-used / known lives in package cli now,
+	// done at the moment the orchestrator selects the camp to start.
 
 	// tunToPeerLoop reads outgoing IP packets from utun and sends
 	// them as plaintext UDP to peers. When AWG device is active, it
@@ -970,12 +928,10 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 			e.activePub.Store(nil)
 		}
 	}
-	// Merge the snapshot into the persistent catalog so the UI sees
-	// known nodes (incl. currently-offline) on the next engine start.
-	if e.camp != nil {
-		e.mergePeerSnapshotLocked(peers)
-		e.persistCampLocked()
-	}
+	// Persisting the roster snapshot into the per-camp catalog (so the
+	// UI sees known nodes, incl. offline ones, on the next start) is
+	// owned by services/camp now — it holds the same roster it just
+	// pushed in here via ApplyCampRoster.
 	// Camp poll may have refreshed peer endpoints (NAT rebind) or
 	// added/removed peers entirely. Refresh the AWG peer list so
 	// routing and allowed_ips stay current. Async to keep poller fast.
@@ -1551,24 +1507,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		})
 	}
 	return out
-}
-
-// validCampLabel returns true iff label only uses chars the camp
-// server's NAME_RE accepts. The same character set we constrain camp
-// labels to so the derived camp_id = <pub>_<label> stays acceptable.
-func validCampLabel(label string) bool {
-	if label == "" {
-		return false
-	}
-	for i := 0; i < len(label); i++ {
-		c := label[i]
-		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-			c == '_' || c == '.' || c == '-'
-		if !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // peerHTTPHostLocked returns the pub-derived v4 address for peer p,
