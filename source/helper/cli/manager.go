@@ -1,8 +1,7 @@
 // Package cli owns the camp lifecycle: creating, listing, selecting,
-// joining (via invite), removing camps, and minting invites. This is the
-// management layer the engine used to carry inline — the engine now only
-// brings transport up for an already-provisioned camp+identity that this
-// package hands it.
+// joining (by camp_id) and removing camps. This is the management layer
+// the engine used to carry inline — the engine now only brings transport
+// up for an already-provisioned camp+identity that this package hands it.
 //
 // Two entry points:
 //
@@ -17,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -105,38 +103,37 @@ func (m *Manager) Create(label, name string) (*config.Camp, *identity.Identity, 
 	return c, id, nil
 }
 
-// Join records a camp from an owner-signed invite token. The token is
-// fully verified (signature + expiry) by identity.ParseInvite before we
-// write anything. We persist a per-camp config with our chosen name and
-// mark the camp last-used; our own identity is generated lazily on the
-// first Start (we are not the owner, so we have no key yet). Returns the
-// camp_id we joined.
-func (m *Manager) Join(token, name string) (string, error) {
+// Join records an existing camp the user was told about out-of-band: the
+// caller supplies the full camp_id and our chosen display name. We persist
+// a per-camp config and mark it last-used; our own identity is generated
+// lazily on the first Start (we're not the owner, so we have no key yet).
+// Returns the camp_id we joined.
+func (m *Manager) Join(campID, name string) (string, error) {
+	campID = strings.TrimSpace(campID)
 	name = strings.TrimSpace(name)
+	if campID == "" {
+		return "", fmt.Errorf("a camp_id is required")
+	}
 	if name == "" {
 		return "", fmt.Errorf("a display name is required")
 	}
-	body, err := identity.ParseInvite(token)
-	if err != nil {
-		return "", err
-	}
-	if existing, _ := m.store.SnapshotCamp(body.CampID); existing == nil {
-		c := config.NewCamp(body.CampID, name)
-		if err := m.store.SaveCamp(body.CampID, c); err != nil {
+	if existing, _ := m.store.SnapshotCamp(campID); existing == nil {
+		c := config.NewCamp(campID, name)
+		if err := m.store.SaveCamp(campID, c); err != nil { // also validates camp_id
 			return "", fmt.Errorf("save camp config: %w", err)
 		}
 	} else {
 		// Already known — just refresh our display name.
-		if err := m.store.UpdateCamp(body.CampID, func(c *config.Camp) {
+		if err := m.store.UpdateCamp(campID, func(c *config.Camp) {
 			c.Identity.Name = name
 		}); err != nil {
 			return "", err
 		}
 	}
-	if err := m.markKnown(body.CampID, name); err != nil {
+	if err := m.markKnown(campID, name); err != nil {
 		return "", err
 	}
-	return body.CampID, nil
+	return campID, nil
 }
 
 // Use marks an existing camp as last-used so the next bare start (or
@@ -186,21 +183,6 @@ func (m *Manager) Remove(ref string) (string, error) {
 		return "", err
 	}
 	return id, nil
-}
-
-// Invite mints an owner-signed bearer token for an existing camp. Only
-// the camp owner (who holds the identity that derived the camp_id) can
-// produce a token the server will accept — so this loads that identity.
-func (m *Manager) Invite(ref string, ttl time.Duration) (string, error) {
-	id, err := m.Resolve(ref)
-	if err != nil {
-		return "", err
-	}
-	idt, err := identity.LoadOrGenerate(identity.DirFor(id))
-	if err != nil {
-		return "", fmt.Errorf("load identity: %w", err)
-	}
-	return idt.GenerateInvite(id, ttl)
 }
 
 // LoadForStart loads the per-camp config and identity for campID and

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/mattn/go-isatty"
 
@@ -38,8 +37,6 @@ func RunCamp(store *config.Store, args []string) error {
 		return m.cmdUse(args[1:])
 	case "rm", "remove", "forget":
 		return m.cmdRemove(args[1:])
-	case "invite":
-		return m.cmdInvite(args[1:])
 	case "-h", "--help", "help":
 		return campUsage()
 	default:
@@ -49,15 +46,13 @@ func RunCamp(store *config.Store, args []string) error {
 
 const campUsageText = `usage: f2f camp <command>
 
-  ls                       list known camps (★ = last used)
-  new [label] [--name N]   create a new camp
-  join [token] [--name N]  join a camp from an invite token
-  use <id|label>           mark a camp as last-used
-  rm <id|label>            forget a camp (deletes its keys + data)
-  invite [id|label] [--ttl 24h]
-                           mint an invite token for a camp you own
+  ls                          list known camps (★ = last used)
+  new [label] [--name N]      create a new camp
+  join [camp_id] [--name N]   join an existing camp by its camp_id
+  use <id|label>              mark a camp as last-used
+  rm <id|label>               forget a camp (deletes its keys + data)
 
-With no label/token, 'new' and 'join' prompt interactively.`
+With no argument, 'new' and 'join' prompt interactively.`
 
 func campUsage() error {
 	fmt.Println(campUsageText)
@@ -117,16 +112,16 @@ func (m *Manager) cmdJoin(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	token := fs.Arg(0)
-	if token != "" && *name != "" {
-		id, err := m.Join(token, *name)
+	campID := fs.Arg(0)
+	if campID != "" && *name != "" {
+		id, err := m.Join(campID, *name)
 		if err != nil {
 			return err
 		}
 		return reportJoined(id)
 	}
 	if !Interactive() {
-		return fmt.Errorf("camp join: provide a token and --name (no terminal for interactive prompt)")
+		return fmt.Errorf("camp join: provide a camp_id and --name (no terminal for interactive prompt)")
 	}
 	c, _, err := m.joinInteractive()
 	if err != nil || c == nil {
@@ -156,32 +151,6 @@ func (m *Manager) cmdRemove(args []string) error {
 		return err
 	}
 	fmt.Printf("forgot camp %s (keys and data deleted)\n", identity.CampLabel(id))
-	return nil
-}
-
-func (m *Manager) cmdInvite(args []string) error {
-	fs := flag.NewFlagSet("camp invite", flag.ContinueOnError)
-	ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite stays valid")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	ref := fs.Arg(0)
-	if ref == "" {
-		// default to the last-used camp
-		st, err := m.List()
-		if err != nil {
-			return err
-		}
-		if st.LastCampID == "" {
-			return fmt.Errorf("camp invite: no camp specified and no last-used camp")
-		}
-		ref = st.LastCampID
-	}
-	token, err := m.Invite(ref, *ttl)
-	if err != nil {
-		return err
-	}
-	fmt.Println(token)
 	return nil
 }
 

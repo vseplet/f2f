@@ -19,8 +19,8 @@ const (
 )
 
 // SelectCamp decides which camp to bring up. When interactive, it shows
-// the huh picker (choose a known camp, create a new one, or join via
-// invite). When not (no TTY, or `f2f up`), it auto-selects the last-used
+// the huh picker (choose a known camp, create a new one, or join an
+// existing one by camp_id). When not (no TTY, or `f2f up`), the last-used
 // camp. Returns (nil, nil, nil) when there is nothing to start or the
 // user quit the picker — the caller then runs idle until the user picks
 // a camp from the UI or restarts.
@@ -54,7 +54,7 @@ func (m *Manager) chooseCamp() (*config.Camp, *identity.Identity, error) {
 	}
 	opts = append(opts,
 		huh.NewOption("➕  Create a new camp", actCreate),
-		huh.NewOption("🔗  Join with an invite", actJoin),
+		huh.NewOption("🔗  Join an existing camp (camp_id)", actJoin),
 	)
 
 	sel := st.LastCampID
@@ -115,21 +115,16 @@ func (m *Manager) createInteractive() (*config.Camp, *identity.Identity, error) 
 	return m.Create(label, name)
 }
 
-// joinInteractive collects an invite token + display name and records
-// the camp. Returns (nil, nil, nil) if the user aborts the form.
+// joinInteractive collects a camp_id + display name and records the camp.
+// Returns (nil, nil, nil) if the user aborts the form.
 func (m *Manager) joinInteractive() (*config.Camp, *identity.Identity, error) {
-	var token, name string
+	var campID, name string
 	err := huh.NewForm(huh.NewGroup(
-		huh.NewText().
-			Title("Invite token").
-			Description("paste the token your camp owner sent you").
-			Value(&token).
-			Validate(func(s string) error {
-				if _, err := identity.ParseInvite(s); err != nil {
-					return err
-				}
-				return nil
-			}),
+		huh.NewInput().
+			Title("Camp id").
+			Description("the full camp_id you were given").
+			Value(&campID).
+			Validate(required),
 		huh.NewInput().
 			Title("Your display name in this camp").
 			Value(&name).
@@ -141,7 +136,7 @@ func (m *Manager) joinInteractive() (*config.Camp, *identity.Identity, error) {
 		}
 		return nil, nil, err
 	}
-	id, err := m.Join(token, name)
+	id, err := m.Join(campID, name)
 	if err != nil {
 		return nil, nil, err
 	}
