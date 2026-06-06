@@ -307,6 +307,16 @@ func run(bind string, console bool, autostart bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Choose the camp to bring up BEFORE starting the workers and the UI
+	// server: the interactive huh picker must own a clean terminal, with
+	// no concurrent log lines or the UI banner corrupting its redraws.
+	// Non-interactive (`f2f up` / no TTY) auto-selects the last-used camp
+	// and returns immediately. Camp provisioning + selection live in
+	// package cli now (the engine no longer owns any of this).
+	mgr := cli.NewManager(store)
+	interactive := !autostart && cli.Interactive()
+	selCamp, selIdt, selErr := mgr.SelectCamp(interactive)
+
 	// Long-lived workers tied to the process root ctx. They survive
 	// engine restarts (each tick checks engine state, no-ops when down).
 	var workerDone []chan struct{}
@@ -329,28 +339,21 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}()
 
-	// Decide which camp to bring up. Interactive (a TTY, not `f2f up`)
-	// shows the huh picker — choose a known camp, create one, or join via
-	// invite; non-interactive auto-selects the last-used camp. Camp
-	// provisioning + selection live in package cli now (the engine no
-	// longer owns any of this). Runs in the foreground so the picker owns
-	// the terminal cleanly; the UI server is already listening above.
-	mgr := cli.NewManager(store)
-	interactive := !autostart && cli.Interactive()
-	if camp, idt, err := mgr.SelectCamp(interactive); err != nil {
-		clog.Console("camp select: %v", err)
-	} else if camp != nil {
+	// Bring up the chosen camp (eng.Start → OnStarted → services start).
+	if selErr != nil {
+		clog.Console("camp select: %v", selErr)
+	} else if selCamp != nil {
 		cfg := engine.Config{
 			LocalIP:  "100.64.0.1", // placeholder; engine derives the overlay-IP from pub
 			Listen:   ":9000",
-			Camp:     camp,
-			Identity: idt,
+			Camp:     selCamp,
+			Identity: selIdt,
 		}
 		if err := eng.Start(cfg); err != nil {
 			clog.Console("start camp: %v", err)
 		}
 	} else {
-		clog.Console("no camp selected — open the UI to create or join one")
+		clog.Console("no camp selected — run `f2f camp new` / `join`, or use the UI")
 	}
 
 	<-ctx.Done()
