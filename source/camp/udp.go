@@ -16,7 +16,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
+	"github.com/vseplet/f2f/source/helper/mesh/camp/rendezvous"
 )
 
 var (

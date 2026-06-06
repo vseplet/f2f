@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
+	"github.com/vseplet/f2f/source/helper/mesh/camp/rendezvous"
 )
 
 // peer is a hub entry. lastSeen drives eviction; info is the wire view

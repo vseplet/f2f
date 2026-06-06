@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/camp/rendezvous"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
 // Health reports UDP-announce liveness against the camp server,

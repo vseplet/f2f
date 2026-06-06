@@ -61,7 +61,7 @@ type Camp struct {
 	LegacyName string `json:"name,omitempty"`
 	// ServerURL / StunAddr point at the rendezvous server hosting
 	// this camp. Defaults applied by NewCamp; can be overridden by
-	// hand-editing the per-camp file. Used by services/camp to spin
+	// hand-editing the per-camp file. Used by mesh/camp to spin
 	// up the announce client + HTTP poller.
 	ServerURL    string        `json:"server_url,omitempty"`
 	StunAddr     string        `json:"stun_addr,omitempty"`

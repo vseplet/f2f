@@ -24,11 +24,11 @@ import (
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/camp"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/mesh/gossip"
 	"github.com/vseplet/f2f/source/helper/platform"
 	"github.com/vseplet/f2f/source/helper/services/calls"
-	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
@@ -607,7 +607,7 @@ type statusView struct {
 	CampLabel    string `json:"camp_label,omitempty"`
 	CampPeerName string `json:"camp_peer_name,omitempty"`
 	// Camp connection signals (Active/Reflex/Health) come from
-	// services/camp; web merges them into /api/status so the UI
+	// mesh/camp; web merges them into /api/status so the UI
 	// keeps one endpoint.
 	CampActive bool         `json:"camp_active"`
 	CampReflex string       `json:"camp_reflex,omitempty"`

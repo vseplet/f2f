@@ -2,12 +2,12 @@ package engine
 
 // Read-only seeding of the in-memory peer map from the camp config the
 // caller handed in at Start. The engine never writes the catalog back —
-// persistence of roster snapshots is owned by services/camp.
+// persistence of roster snapshots is owned by mesh/camp.
 
 // pruneSelfFromCatalogLocked drops any seed entries whose name or pub
 // match our own — defensive cleanup for catalogs written by older builds
 // (before self was filtered at the source). In-memory only; the on-disk
-// file is reconciled by services/camp on the next poll. Called from Start
+// file is reconciled by mesh/camp on the next poll. Called from Start
 // under e.mu.
 func (e *Engine) pruneSelfFromCatalogLocked() {
 	if e.camp == nil || e.cfg.CampID == "" {
