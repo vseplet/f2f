@@ -146,54 +146,21 @@
                                     </tr>
                                 </tbody>
                             </table>
-                            <div class="ax-section-status">
-                                <a id="identity-switch" href="#"
-                                    >switch camp →</a
-                                >
-                            </div>
                         </div>
-                        <!-- Stopped: single dropdown of known camps + "new camp"
-               sentinel at the bottom. Selecting a known camp auto-
-               starts; selecting "new camp" reveals the form below. -->
-                        <div id="identity-picker" class="ax-field">
-                            <label>camp</label>
-                            <select id="camp-picker" class="ax-input">
-                                <option value="">— pick a camp —</option>
-                                <option value="__new__">+ new camp</option>
-                            </select>
-                        </div>
-                        <div id="new-camp-form" class="hidden">
-                            <div class="ax-grid-2">
-                                <div class="ax-field">
-                                    <label>name</label>
-                                    <input
-                                        id="camp-name"
-                                        type="text"
-                                        class="ax-input"
-                                        placeholder="your nickname"
-                                    />
-                                </div>
-                                <div class="ax-field">
-                                    <label>camp</label>
-                                    <input
-                                        id="camp-id"
-                                        type="text"
-                                        class="ax-input"
-                                        placeholder="new label (e.g. family) or full pasted camp_id"
-                                    />
-                                </div>
-                            </div>
-                            <div class="ax-add-row" style="margin-top: 6px">
-                                <button
-                                    id="btn-new-camp-start"
-                                    class="ax-btn ax-btn-primary"
-                                >
-                                    join
-                                </button>
-                                <button id="btn-new-camp-cancel" class="ax-btn">
-                                    cancel
-                                </button>
-                            </div>
+                        <!-- Stopped: camp lifecycle (create / join / switch)
+               lives in the CLI now. The UI is read-only for camps. -->
+                        <div id="identity-none" class="ax-section-status muted">
+                            no camp running — manage camps from the
+                            terminal:
+                            <br />
+                            <code class="ax-mono">sudo f2f</code> — pick,
+                            create or join a camp
+                            <br />
+                            <code class="ax-mono">f2f camp ls</code> ·
+                            <code class="ax-mono">new</code> ·
+                            <code class="ax-mono">join</code> ·
+                            <code class="ax-mono">use</code> ·
+                            <code class="ax-mono">invite</code>
                         </div>
                     </div>
 

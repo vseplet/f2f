@@ -45,9 +45,9 @@ func TrustStoreContains(sha256HexUpper string) bool {
 func TrustStoreAdd(certPath string) error {
 	cmd := exec.Command("security",
 		"add-trusted-cert",
-		"-d",                 // add to admin (system) cert store
-		"-r", "trustRoot",    // trust as a root CA
-		"-p", "ssl",          // trust policy: SSL
+		"-d",              // add to admin (system) cert store
+		"-r", "trustRoot", // trust as a root CA
+		"-p", "ssl", // trust policy: SSL
 		"-k", systemKeychain, // target keychain
 		certPath,
 	)

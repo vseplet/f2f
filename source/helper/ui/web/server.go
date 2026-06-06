@@ -21,15 +21,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/camp"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
+	"github.com/vseplet/f2f/source/helper/mesh/gossip"
 	"github.com/vseplet/f2f/source/helper/platform"
 	"github.com/vseplet/f2f/source/helper/services/calls"
-	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/messenger"
+	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 )
@@ -53,6 +57,9 @@ type Server struct {
 	tunnel   *tunnel.Service
 	camp     *camp.Service
 	dns      *dns.Service
+	msg      *messenger.Store
+	notify   *notify.Service
+	gossip   *gossip.Service
 	addr     string
 	srv      *http.Server
 
@@ -64,7 +71,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -75,6 +82,9 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		calls:       callsSvc,
 		tunnel:      tunnelSvc,
 		camp:        campSvc,
+		msg:         msgSvc,
+		notify:      notifySvc,
+		gossip:      gossipSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -179,8 +189,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	}
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
-	mux.HandleFunc("POST /api/start", s.handleStart)
-	mux.HandleFunc("POST /api/stop", s.handleStop)
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
@@ -200,12 +208,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("POST /api/trusted-peers/{fp}/install", s.handleInstallTrustedPeer)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
-
-	// Per-camp configuration. /api/camps is the global view (list +
-	// last selected); /api/camp/{id} returns the full config file so
-	// the UI can preview before switching.
-	mux.HandleFunc("GET /api/camps", s.handleListCamps)
-	mux.HandleFunc("GET /api/camp/{id}", s.handleGetCamp)
 
 	// Firewall: default-deny inbound on utun + user-configurable
 	// allow list (in addition to f2f's own ports). Loopback-only,
@@ -233,6 +235,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
 	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
+
+	// Notifications: recent list + live SSE stream for the UI.
+	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
+	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
+
+	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
+	mux.HandleFunc("GET /api/mesh", s.handleMesh)
 
 	// Group calls (SFU-based). Browser-facing endpoints on the UI
 	// server; /api/call/signal also registered on the tunnel listener
@@ -440,6 +449,56 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleNotifications returns the buffered notifications (oldest-first).
+func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.notify.Recent())
+}
+
+// handleMesh returns every peer's gossip NodeState — the mesh-wide topology
+// (who-sees-whom) + platform inventory.
+func (s *Server) handleMesh(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.gossip.All())
+}
+
+// handleNotificationsStream pushes new notifications to the browser over SSE.
+func (s *Server) handleNotificationsStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, unsubscribe := s.notify.Subscribe()
+	defer unsubscribe()
+
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case n, ok := <-ch:
+			if !ok {
+				return
+			}
+			if b, err := json.Marshal(n); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				flusher.Flush()
+			}
+		case <-keepalive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
 // topologyNode and topologyEdge feed the d3 force graph in the UI. The
 // graph is: self in the middle, one node per known camp peer, and each
 // intercept hung off its bound peer's node. Orphan intercepts (peer
@@ -548,7 +607,7 @@ type statusView struct {
 	CampLabel    string `json:"camp_label,omitempty"`
 	CampPeerName string `json:"camp_peer_name,omitempty"`
 	// Camp connection signals (Active/Reflex/Health) come from
-	// services/camp; web merges them into /api/status so the UI
+	// mesh/camp; web merges them into /api/status so the UI
 	// keeps one endpoint.
 	CampActive bool         `json:"camp_active"`
 	CampReflex string       `json:"camp_reflex,omitempty"`
@@ -631,7 +690,7 @@ func (s *Server) statusWithDomains() statusView {
 		health = s.camp.HealthSnapshot()
 	}
 	var knownCamps []config.KnownCamp
-	if gs, err := s.engine.ListCamps(); err == nil && gs != nil {
+	if gs, err := s.store.LoadState(); err == nil && gs != nil {
 		knownCamps = gs.KnownCamps
 	}
 	return statusView{
@@ -839,43 +898,6 @@ func (s *Server) handleRemoveTrustedPeer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListCamps returns the global state file — last selected
-// camp_id and the roster of every camp the user has ever joined.
-// Powers the UI's camp dropdown / switcher.
-func (s *Server) handleListCamps(w http.ResponseWriter, r *http.Request) {
-	st, err := s.engine.ListCamps()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if st.KnownCamps == nil {
-		st.KnownCamps = []config.KnownCamp{}
-	}
-	writeJSON(w, http.StatusOK, st)
-}
-
-// handleGetCamp returns the full on-disk config for one camp_id —
-// intercepts, my-domains, firewall, trusted-peer fingerprints, peer
-// catalog. 404 if no config exists yet for that id (i.e. the user
-// hasn't started the engine with this camp_id).
-func (s *Server) handleGetCamp(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("missing camp_id"))
-		return
-	}
-	c, err := s.store.SnapshotCamp(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if c == nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("no config for camp %q", id))
-		return
-	}
-	writeJSON(w, http.StatusOK, c)
 }
 
 // handleListFirewall returns the inbound-utun allow list: built-in
@@ -1178,80 +1200,9 @@ func isLoopback(remoteAddr string) bool {
 	return host == "127.0.0.1" || host == "::1"
 }
 
-type startRequest struct {
-	CampName  string `json:"camp_name,omitempty"`
-	CampID    string `json:"camp_id"`
-	CampLabel string `json:"camp_label,omitempty"`
-}
-
-// handleStart accepts only camp identity from the UI now; everything else
-// (utun addresses, UDP listen port, camp endpoint) uses sensible defaults
-// that the engine fills in. Static-peer mode is no longer reachable from
-// the UI — use the CLI if you need it.
-//
-// camp_name is optional when a per-camp config already exists on disk
-// (the engine reads it from $HOME/.f2f/<camp_id>.config.json). It is
-// required on the first start for a given camp_id.
-//
-// If the engine is already running with a different camp_id, we stop
-// it first — gives the UI a one-click "switch camp" affordance.
-func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
-	var req startRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	// Two flows in one endpoint:
-	//   - join/resume: req.CampID populated (a known camp on disk or a
-	//     full <pub>_<label> id pasted from an invite).
-	//   - create: req.CampID empty, req.CampLabel populated → engine
-	//     generates identity and derives ID = <pub>_<label>.
-	// req.CampName is the user's nickname inside the camp either way.
-	if req.CampID == "" && req.CampLabel == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_id or camp_label is required"))
-		return
-	}
-	if cur := s.engine.Status(); cur.Running {
-		if req.CampID != "" && cur.CampID == req.CampID {
-			writeJSON(w, http.StatusOK, s.statusWithDomains())
-			return
-		}
-		if err := s.engine.Stop(); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Errorf("stop current: %w", err))
-			return
-		}
-	}
-	name := req.CampName
-	if name == "" && req.CampID != "" {
-		if existing, err := s.store.SnapshotCamp(req.CampID); err == nil && existing != nil {
-			name = existing.Identity.Name
-		}
-	}
-	if name == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("camp_name required"))
-		return
-	}
-	cfg := engine.Config{
-		LocalIP:   "100.64.0.1", // placeholder; engine derives the real overlay-IP from pub on Start
-		Listen:    ":9000",
-		CampID:    req.CampID,
-		CampName:  name,
-		CampLabel: req.CampLabel,
-	}
-	if err := s.engine.Start(cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.statusWithDomains())
-}
-
-func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.Stop(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.statusWithDomains())
-}
+// Camp lifecycle (start / stop / create / switch) is owned by package
+// cli now — the web UI is read-only for camps. The old POST /api/start
+// and /api/stop endpoints were removed with the SPA's camp switcher.
 
 type addInterceptRequest struct {
 	Spec string `json:"spec"`
@@ -1311,7 +1262,7 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, unsubscribe := s.engine.Subscribe(64)
+	ch, unsubscribe := clog.Subscribe(64)
 	defer unsubscribe()
 
 	keepalive := time.NewTicker(20 * time.Second)

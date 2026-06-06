@@ -143,84 +143,96 @@ $(function () {
   // Each notification has a stable `id` so we can find/remove it after
   // render. Real notification service will mint these server-side; for
   // now we generate from the index at module load time.
-  const MOCK_NOTIFICATIONS = [
-    { kind: 'ok',    group: 'today',     when: 'just now', title: 'artpani started a meet',                meta: '#dev · join now' },
-    { kind: 'warn',  group: 'today',     when: '2m',       title: 'mac-mini-m4 wants to install your CA',  meta: 'click to approve' },
-    { kind: 'ok',    group: 'today',     when: '5m',       title: 'sevapp_vm_ubuntu joined the camp',      meta: '100.109.72.42' },
-    { kind: 'muted', group: 'today',     when: '12m',      title: 'dinar went offline',                    meta: '' },
-    { kind: 'info',  group: 'today',     when: '1h',       title: 'mac-mini-m4 shared a file',             meta: 'project-notes.md · 12 KB' },
-    { kind: 'warn',  group: 'today',     when: '3h',       title: 'firewall blocked inbound :22',          meta: 'from artpani · 4 attempts' },
-    { kind: 'info',  group: 'yesterday', when: '1d',       title: 'new domain registered',                 meta: 'foo.local → :3000' },
-    { kind: 'muted', group: 'yesterday', when: '1d',       title: '#offtopic archived',                    meta: '' },
-    { kind: 'ok',    group: 'this week', when: '3d',       title: 'sevapp_vm_nixos joined the camp',       meta: '' },
-  ].map((n, i) => ({ ...n, id: 'n' + i }));
+  // Live notifications from the backend (/api/notifications + SSE). Newest
+  // first. The bus pushes QUIC ping results here; more sources to come.
+  let notifications = [];
   let selectedNotifId = null;
+
+  function notifPeerName(pub) {
+    if (!pub) return '';
+    const p = ((lastStatus && lastStatus.peers) || []).find(x => x.pub === pub);
+    return p ? (p.name || pub.slice(0, 12)) : pub.slice(0, 12);
+  }
+  function notifAccent(n) {
+    const t = (n.title || '').toLowerCase();
+    if (/fail|down|denied|blocked|offline|error/.test(t)) return 'warn';
+    if (n.kind === 'ping') return 'ok';
+    return ({ message: 'info', call: 'ok', cert: 'warn', peer: 'info', system: 'muted' })[n.kind] || 'info';
+  }
+  function notifWhen(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 5) return 'now';
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60); if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60); if (h < 24) return h + 'h';
+    return Math.floor(h / 24) + 'd';
+  }
+
   function renderNotifications() {
     const q = ($('#ax-notifications-search').val() || '').trim().toLowerCase();
     const items = q
-      ? MOCK_NOTIFICATIONS.filter(n =>
-          (n.title + ' ' + (n.meta || '')).toLowerCase().includes(q))
-      : MOCK_NOTIFICATIONS;
+      ? notifications.filter(n => (n.title + ' ' + (n.body || '') + ' ' + notifPeerName(n.from)).toLowerCase().includes(q))
+      : notifications;
     if (!items.length) {
       $('#ax-notifications-list').html(empty('no notifications'));
       return;
     }
-    // Group by .group preserving the natural order in MOCK_NOTIFICATIONS
-    // (it's already chronological newest-first).
-    let lastGroup = null;
-    const parts = [];
-    for (const n of items) {
-      if (n.group !== lastGroup) {
-        parts.push(`<div class="ax-notif-group">${esc(n.group)}</div>`);
-        lastGroup = n.group;
-      }
+    const parts = items.map(n => {
       const selected = n.id === selectedNotifId ? ' selected' : '';
-      parts.push(
-        `<div class="ax-notif ${esc(n.kind)}${selected}" data-id="${esc(n.id)}" title="${esc(n.title)}">`
-          + `<div class="ax-notif-accent"></div>`
-          + `<div class="ax-notif-body">`
-            + `<div class="ax-notif-title">${esc(n.title)}</div>`
-            + (n.meta ? `<div class="ax-notif-meta">${esc(n.meta)}</div>` : '')
-          + `</div>`
-          + `<div class="ax-notif-time">${esc(n.when)}</div>`
-          + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
+      const meta = n.body || notifPeerName(n.from);
+      return `<div class="ax-notif ${esc(notifAccent(n))}${selected}" data-id="${esc(n.id)}" title="${esc(n.title)}">`
+        + `<div class="ax-notif-accent"></div>`
+        + `<div class="ax-notif-body">`
+          + `<div class="ax-notif-title">${esc(n.title)}</div>`
+          + (meta ? `<div class="ax-notif-meta">${esc(meta)}</div>` : '')
         + `</div>`
-      );
-    }
+        + `<div class="ax-notif-time">${esc(notifWhen(n.ts))}</div>`
+        + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
+      + `</div>`;
+    });
     $('#ax-notifications-list').html(parts.join(''));
   }
   $('#ax-notifications-search').on('input', renderNotifications);
   $('#ax-notifications-search').on('keydown', function (e) {
     if (e.key === 'Escape') { $(this).val('').trigger('input').blur(); }
   });
-
-  // Click on the × — fade the card out, then drop it from the model
-  // and re-render. stopPropagation so the parent .ax-notif click
-  // (selection) doesn't also fire.
+  // Dismiss (×) — local-only: drop from the live list.
   $('#ax-notifications-list').on('click', '.ax-notif-close', function (e) {
     e.stopPropagation();
     const $card = $(this).closest('.ax-notif');
     const id = $card.data('id');
     $card.addClass('removing');
     setTimeout(function () {
-      const idx = MOCK_NOTIFICATIONS.findIndex(n => n.id === id);
-      if (idx >= 0) MOCK_NOTIFICATIONS.splice(idx, 1);
+      notifications = notifications.filter(n => String(n.id) !== String(id));
       if (selectedNotifId === id) selectedNotifId = null;
       renderNotifications();
     }, 180);
   });
-  // Click anywhere else on the card selects it. Real handlers (open
-  // the meet, approve the CA, jump to the file) will branch off n.kind
-  // once the backend lands — for now we just visually mark selection
-  // and log to console so the click is observable.
   $('#ax-notifications-list').on('click', '.ax-notif', function () {
     const id = $(this).data('id');
-    selectedNotifId = (selectedNotifId === id) ? null : id;
-    const n = MOCK_NOTIFICATIONS.find(x => x.id === id);
-    if (n) console.log('notif click:', n);
+    selectedNotifId = (selectedNotifId === String(id)) ? null : String(id);
+    const n = notifications.find(x => String(x.id) === String(id));
+    if (n && n.route) location.hash = n.route;
     renderNotifications();
   });
-  renderNotifications();
+
+  // Seed from the buffer, then stream new ones over SSE.
+  $.getJSON('/api/notifications', function (list) {
+    notifications = (Array.isArray(list) ? list : []).slice().reverse(); // newest-first
+    renderNotifications();
+  });
+  (function notifStream() {
+    let es;
+    try { es = new EventSource('/api/notifications/stream'); } catch (_) { return; }
+    es.onmessage = function (e) {
+      let n; try { n = JSON.parse(e.data); } catch (_) { return; }
+      notifications.unshift(n);
+      if (notifications.length > 200) notifications.length = 200;
+      renderNotifications();
+    };
+  })();
+  setInterval(renderNotifications, 30000); // refresh relative timestamps
 
   // Category collapse: click the row toggles .collapsed on the category;
   // the CSS adjacent-sibling selector hides .ax-tree-children.
@@ -390,8 +402,8 @@ $(function () {
   let livePeers = [];      // last seen camp peers from /api/status
   const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
-  // Camp identity is loaded from the backend on first render — see
-  // refreshCamps(). The form fields are no longer the source of truth.
+  // Camp identity is loaded from the backend (/api/status) on render;
+  // the UI no longer creates or switches camps (that's the CLI's job).
   function restoreForm() { /* no-op: backend is authoritative now */ }
 
   const fmtBytes = (n) => {
@@ -440,10 +452,10 @@ $(function () {
   function setEngineState(state, label, meta) {
     const icons = { running: '■', stopped: '▶', loading: '⋯', error: '!' };
     const titles = {
-      running: 'click to stop',
-      stopped: 'click to start',
+      running: 'engine running — manage camps via the CLI',
+      stopped: 'engine stopped — run `sudo f2f` to bring up a camp',
       loading: 'loading…',
-      error: 'click to start',
+      error: 'API error',
     };
     $btnEngine
       .removeClass('state-running state-stopped state-loading state-error')
@@ -458,79 +470,10 @@ $(function () {
     $.getJSON('/api/status', applyStatus).fail(() => setEngineState('error', 'API error', ''));
   }
 
-  // refreshCamps pulls $HOME/.f2f/state.json — the last selected camp_id
-  // and the roster of known camps — and wires up the dropdown. Called
-  // once on load, after start, and after Stop.
-  let knownCamps = [];
-  function refreshCamps() {
-    $.getJSON('/api/camps', (st) => {
-      knownCamps = (st && Array.isArray(st.known_camps)) ? st.known_camps : [];
-      renderCampPicker();
-      const last = st && st.last_camp_id;
-      // Pre-select the last camp in the picker if engine isn't running
-      // and the user hasn't picked anything else yet — gives one-click
-      // "start where you left off" affordance.
-      if (last && !engineRunning && !$('#camp-picker').val()) {
-        $('#camp-picker').val(last);
-      }
-    });
-  }
-  // renderCampPicker builds the dropdown: every known camp + a
-  // sentinel "+ new camp" at the bottom that reveals the join form.
-  function renderCampPicker() {
-    const $sel = $('#camp-picker');
-    const cur = $sel.val();
-    $sel.empty();
-    $sel.append($('<option>').val('').text('— pick a camp —'));
-    knownCamps.forEach((c) => {
-      // Display: <camp_label> · fp <8hex> (<nickname>) — keeps the
-      // dropdown readable even when c.id is a 64-hex-prefixed string.
-      const label = campLabelFromID(c.id);
-      const fp = campShortFP(c.id);
-      const fpPart = fp ? ` · fp ${fp}` : '';
-      const namePart = c.name ? ` (${c.name})` : '';
-      $sel.append($('<option>').val(c.id).text(`${label}${fpPart}${namePart}`));
-    });
-    $sel.append($('<option>').val('__new__').text('+ new camp'));
-    if (cur) $sel.val(cur);
-  }
-  $('#camp-picker').on('change', function () {
-    const id = $(this).val();
-    if (id === '__new__') {
-      $('#camp-name').val('');
-      $('#camp-id').val('');
-      $('#new-camp-form').removeClass('hidden');
-      setTimeout(() => $('#camp-name').focus(), 0);
-      return;
-    }
-    $('#new-camp-form').addClass('hidden');
-    if (!id) return;
-    // Known camp picked — auto-start. Backend stop+starts if we were
-    // running with a different camp_id. triggerStart re-reads picker
-    // state itself, so we don't need to mirror values into inputs.
-    triggerStart();
-  });
-  $('#btn-new-camp-start').on('click', () => {
-    const id = ($('#camp-id').val() || '').trim();
-    const name = ($('#camp-name').val() || '').trim();
-    if (!id || !name) {
-      alert('camp and name are required');
-      return;
-    }
-    triggerStart();
-  });
-  $('#btn-new-camp-cancel').on('click', () => {
-    $('#new-camp-form').addClass('hidden');
-    $('#camp-picker').val('');
-  });
-  // Running-state header link: collapse status, expose picker so the
-  // user can switch without stopping first.
-  $('#identity-switch').on('click', (e) => {
-    e.preventDefault();
-    $('#identity-status').addClass('hidden');
-    $('#identity-picker').removeClass('hidden');
-    $('#camp-picker').val('').trigger('focus');
-  });
+  // Camp lifecycle (create / join / switch / stop) lives in the CLI
+  // now — the UI is read-only for camps. It just reflects whatever camp
+  // the backend is running (or shows the "no camp" hint when stopped).
+
   // Click the pub-key cell to copy its full hex to the clipboard.
   // No alert — flash the cell colour for half a second as feedback.
   $('#identity-pub').on('click', function () {
@@ -567,19 +510,8 @@ $(function () {
   // the user's first manual Stop would be immediately followed by an
   // auto-Start, which races with camp's session cleanup and fails with
   // "name_taken".
-  // `pendingOp` guards the engine button against periodic /api/status
-  // races while a Start/Stop is in flight. Both Start and Stop on the
-  // server take a few seconds (utun, routes, STUN, WS close+wait); during
-  // that window the 3s refresh would see the stale running flag and
-  // overwrite our "starting…/stopping…" loading state, then the user's
-  // next click triggers a second operation that races the first and gets
-  // "already running" / a name_taken.
-  let pendingOp = null; // 'starting' | 'stopping' | null
   // Tracked from /api/status — drives `<name>.<camp_id>.f2f` rendering
-  // in the domains panels. With the identity rework #camp-id input is
-  // now only filled on the "+ new camp" path, so we can't read it
-  // there anymore. Falls back to the picker value if status hasn't
-  // arrived yet (page-load → first refreshStatus is a brief window).
+  // in the domains panels.
   // campLabelFromID mirrors identity.CampLabel in Go: new-format camp_ids
   // look like "<64-hex-pub>_<label>", legacy ones are free-form. Split
   // only when the prefix is exactly 64 hex chars; otherwise return the
@@ -591,17 +523,10 @@ $(function () {
     }
     return id;
   }
-  // campShortFP extracts the first 8 hex of pub from a new-format camp_id
-  // for UI disambiguation. Empty for legacy camps.
-  function campShortFP(id) {
-    if (!id || id.length <= 65 || id[64] !== '_') return '';
-    if (!/^[0-9a-f]{64}$/i.test(id.slice(0, 64))) return '';
-    return id.slice(0, 8);
-  }
   let currentCampID = '';
   let currentCampLabel = '';
   function campIDOrPlaceholder() {
-    return currentCampID || ($('#camp-picker').val() || '').trim().replace(/^__new__$/, '') || '<camp_id>';
+    return currentCampID || '<camp_id>';
   }
   // campLabelOrPlaceholder picks the DNS-zone-safe label (post-CampLabel
   // split server-side). Falls back to the same picker value as the id
@@ -625,7 +550,6 @@ $(function () {
       $('#identity-reflex').text(peer.udp_endpoint || '—');
       $('#identity-pub').text(peer.pub || '—').data('pub', peer.pub || '');
       $('#identity-fp').text(peer.last_rtt_ms ? '· ' + peer.last_rtt_ms + 'ms' : '');
-      $('#identity-switch').hide();
     } else {
       $('#identity-title').text('— identity');
       $('#identity-name').text(s.camp_name || '?');
@@ -634,32 +558,24 @@ $(function () {
       const pub = s.identity_pub || '', fp = s.identity_fp || '';
       $('#identity-pub').text(pub || '—').data('pub', pub);
       $('#identity-fp').text(fp ? '· fp ' + fp : '');
-      $('#identity-switch').show();
     }
   }
 
   function applyStatus(s) {
     lastStatus = s;
-    if (pendingOp) {
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', true);
-    } else if (s.running) {
+    if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';
       currentCampLabel = s.camp_label || s.camp_id || '';
-      // Running: collapse the picker and form into a key:value readout.
-      // The "switch" link inside #identity-status re-exposes the picker
-      // without forcing a manual stop first.
+      // Running: show the key:value readout, hide the "no camp" hint.
       renderIdentity(s);
       $('#identity-status').removeClass('hidden');
-      $('#identity-picker').addClass('hidden');
-      $('#new-camp-form').addClass('hidden');
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
+      $('#identity-none').addClass('hidden');
     } else {
-      setEngineState('stopped', 'start', '');
+      setEngineState('stopped', 'stopped', '');
       currentCampID = '';
       $('#identity-status').addClass('hidden');
-      $('#identity-picker').removeClass('hidden');
-      $('#camp-name, #camp-id, #camp-picker').prop('disabled', false);
+      $('#identity-none').removeClass('hidden');
     }
     // Intercept management is always available — list lives in the browser.
     $interceptInput.prop('disabled', false);
@@ -1274,80 +1190,8 @@ $(function () {
     if (current && others.some((p) => p.name === current)) $sel.val(current);
   }
 
-  function triggerStart() {
-    // Source of truth is the picker. Three paths:
-    //   - picker = known camp id → use it directly, name from
-    //     knownCamps entry (camp config on disk already has the name).
-    //   - picker = "__new__" → user is creating or joining via the
-    //     form below. The "camp" input takes either a full <pub>_<label>
-    //     id (join existing) or a short label (create fresh).
-    //   - picker = "" → nothing selected, surface it.
-    const pick = ($('#camp-picker').val() || '').trim();
-    const cfg = {};
-    let needName = false;
-    if (pick && pick !== '__new__') {
-      cfg.camp_id = pick;
-      const entry = knownCamps.find((c) => c.id === pick);
-      if (entry && entry.name) cfg.camp_name = entry.name;
-    } else if (pick === '__new__') {
-      const raw = ($('#camp-id').val() || '').trim();
-      const name = ($('#camp-name').val() || '').trim();
-      if (!raw) {
-        $('#camp-id').trigger('focus');
-        return;
-      }
-      // Full <64hex>_<label> shape → join existing. Otherwise treat
-      // input as a label for a brand-new camp.
-      if (/^[0-9a-f]{64}_.+$/i.test(raw)) {
-        cfg.camp_id = raw;
-      } else {
-        cfg.camp_label = raw;
-      }
-      if (name) cfg.camp_name = name;
-      needName = true;
-    }
-    if (!cfg.camp_id && !cfg.camp_label) {
-      $('#identity-picker').removeClass('hidden');
-      $('#camp-picker').trigger('focus');
-      return;
-    }
-    if (needName && !cfg.camp_name) {
-      $('#camp-name').trigger('focus');
-      return;
-    }
-    pendingOp = 'starting';
-    setEngineState('loading', 'starting…', '');
-    $.ajax({
-      url: '/api/start',
-      method: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(cfg)
-    })
-      .always(() => { pendingOp = null; })
-      .done(() => { refreshStatus(); refreshCamps(); })
-      .fail((xhr) => {
-        refreshStatus();
-        alert('Start failed: ' + errorOf(xhr));
-      });
-  }
-
-  function triggerStop() {
-    pendingOp = 'stopping';
-    setEngineState('loading', 'stopping…', '');
-    $.ajax({ url: '/api/stop', method: 'POST' })
-      .always(() => { pendingOp = null; })
-      .done(refreshStatus)
-      .fail((xhr) => {
-        refreshStatus();
-        alert('Stop failed: ' + errorOf(xhr));
-      });
-  }
-
-  $btnEngine.on('click', () => {
-    if ($btnEngine.hasClass('state-loading')) return;
-    if (engineRunning) triggerStop();
-    else triggerStart();
-  });
+  // The engine status button is a read-only indicator now (running /
+  // stopped). Starting, stopping and switching camps are CLI-only.
 
   function addOne(spec, peer) {
     return $.ajax({
@@ -2256,7 +2100,6 @@ $(function () {
   })();
 
   restoreForm();
-  refreshCamps();
   refreshStatus();
   refreshCampPeers();
   refreshMyDomains();

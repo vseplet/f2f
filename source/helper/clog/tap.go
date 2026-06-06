@@ -1,4 +1,4 @@
-package engine
+package clog
 
 import (
 	"strings"
@@ -8,17 +8,16 @@ import (
 
 // LogEntry is one line of output. Time is when the entry was captured;
 // Message is the formatted text already produced by the standard logger
-// (it still contains the time prefix the log package added). UI consumers
-// typically just display Message verbatim.
+// (it still contains the time prefix log added). UI consumers display
+// Message verbatim.
 type LogEntry struct {
 	Time    time.Time `json:"time"`
 	Message string    `json:"message"`
 }
 
-// logTap is an io.Writer that taps the global log output: every line the
-// program writes via log.Printf goes through here, gets broadcast to all
-// active subscribers, and is also passed through to whatever upstream
-// writer (usually os.Stderr) the caller wires up via io.MultiWriter.
+// logTap is an io.Writer that taps the log stream: every line written via
+// log.Printf (routed through Init's MultiWriter) is broadcast to all active
+// subscribers — the UI's diagnostics log stream.
 type logTap struct {
 	mu   sync.RWMutex
 	subs map[chan<- LogEntry]struct{}
@@ -27,6 +26,15 @@ type logTap struct {
 func newLogTap() *logTap {
 	return &logTap{subs: map[chan<- LogEntry]struct{}{}}
 }
+
+// tap is the process-wide log tap. It exists before Init so Subscribe never
+// nil-panics; Init wires it into the log output.
+var tap = newLogTap()
+
+// Subscribe returns a channel of log entries plus an unsubscribe func. buf
+// bounds the queue before slow-subscriber drops start. Used by the web layer
+// for GET /api/log/stream.
+func Subscribe(buf int) (<-chan LogEntry, func()) { return tap.Subscribe(buf) }
 
 // Write parses one or more lines from p and broadcasts each as a LogEntry.
 // Slow subscribers drop messages rather than block the writer.
@@ -41,9 +49,7 @@ func (t *logTap) Write(p []byte) (int, error) {
 		for ch := range t.subs {
 			select {
 			case ch <- entry:
-			default:
-				// Subscriber is slow — drop rather than block the entire
-				// log path.
+			default: // slow subscriber — drop rather than block the log path
 			}
 		}
 		t.mu.RUnlock()
@@ -51,8 +57,6 @@ func (t *logTap) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Subscribe returns a channel of log entries plus a function to unsubscribe.
-// The buffer controls how many entries can queue before drops start.
 func (t *logTap) Subscribe(buf int) (<-chan LogEntry, func()) {
 	ch := make(chan LogEntry, buf)
 	t.mu.Lock()

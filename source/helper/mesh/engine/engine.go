@@ -13,24 +13,20 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine/awg"
-	"github.com/vseplet/f2f/source/helper/engine/obfenv"
-	
-	
-	"github.com/vseplet/f2f/source/helper/engine/pair"
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
-	"github.com/vseplet/f2f/source/helper/engine/route"
-	"github.com/vseplet/f2f/source/helper/engine/utun"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/awg"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
+
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/pair"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/route"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/utun"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -71,25 +67,34 @@ type Config struct {
 	Peer    string // UDP peer address ("host:9000"); ignored when CampID is set
 	// Camp mode — engine wants the minimum it needs for identity /
 	// obfenv / store key. Server endpoints (URL/StunAddr) live in
-	// the per-camp config.Camp and are read by services/camp.
-	CampID    string // shared camp id; empty triggers create-new path (CampLabel required)
-	CampName  string // our display alias in the camp
-	CampLabel string // human label for create-new (derives ID = <pub>_<label>)
+	// the per-camp config.Camp and are read by mesh/camp.
+	// Camp is the already-provisioned per-camp config; Identity is its
+	// keypair. The caller (package cli / the orchestrator in main) loads
+	// both from disk and hands them over — the engine no longer creates,
+	// names, or registers camps, it only brings transport up for what
+	// it's given. Both nil in static --peer mode. Server endpoints
+	// (URL/StunAddr) live in Camp and are read by mesh/camp.
+	Camp     *config.Camp
+	Identity *identity.Identity
+	// CampID / CampName are derived from Camp at Start (the transport
+	// reads them pervasively). Not set by the caller.
+	CampID   string
+	CampName string
 }
 
 // Status is a point-in-time snapshot. It is computed; the underlying state
 // changes between calls.
 type Status struct {
-	Running      bool   `json:"running"`
-	UtunName     string `json:"utun_name,omitempty"`
-	LocalIP      string `json:"local_ip,omitempty"`
-	PeerIP       string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
-	ListenAddr   string `json:"listen_addr,omitempty"`
-	PeerAddr     string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
+	Running    bool   `json:"running"`
+	UtunName   string `json:"utun_name,omitempty"`
+	LocalIP    string `json:"local_ip,omitempty"`
+	PeerIP     string `json:"peer_ip,omitempty"` // active peer's tunnel_ip (camp mode) or static peer (legacy)
+	ListenAddr string `json:"listen_addr,omitempty"`
+	PeerAddr   string `json:"peer_addr,omitempty"` // active peer's UDP endpoint
 	// CampID is the only camp metadata engine carries — it's the
 	// active session key (config store / identity / obfenv all keyed
 	// by it). URL/StunAddr/Name/Label and connection signals
-	// (Active/Reflex/Health) live in services/camp + web statusView.
+	// (Active/Reflex/Health) live in mesh/camp + web statusView.
 	CampID string `json:"camp_id,omitempty"`
 	// Identity (Ed25519) for the running camp. Pub is the full 32-byte
 	// public key in hex; Fingerprint is the short SHA-256 prefix the
@@ -111,7 +116,7 @@ type Status struct {
 }
 
 // Camp connection health (UDP-announce + HTTP-poll counters) lives
-// in services/camp now; web statusView merges it into /api/status.
+// in mesh/camp now; web statusView merges it into /api/status.
 
 // Diagnostics is the catch-all runtime info displayed in the UI's
 // diagnostics tab. Keep additions here purely additive — JSON omitempty
@@ -129,7 +134,7 @@ type Diagnostics struct {
 	DNSResolverOK  bool  `json:"dns_resolver_ok"` // /etc/resolver/<id>.f2f present
 }
 
-// PeerStatusInfo augments rendezvous.PeerInfo with our local reachability
+// PeerStatusInfo augments the camp roster view with our local reachability
 // view: when we last received UDP from this peer, and whether it counts
 // as "reachable" right now (within 30s window). One synthetic entry
 // with Self=true represents us so the UI can render a single uniform
@@ -311,12 +316,12 @@ type Engine struct {
 	running bool
 	cfg     Config
 
-	tun      *utun.Tunnel
+	tun    *utun.Tunnel
 	udp    *net.UDPConn
 	routes *route.Manager
 
 	// udpHandlers are external claimants of UDP packets from
-	// peerToTunLoop. services/camp registers one to catch camp-source
+	// peerToTunLoop. mesh/camp registers one to catch camp-source
 	// packets (announce reply). Empty slot left by unregister() is nil.
 	udpHandlersMu sync.Mutex
 	udpHandlers   []UDPHandler
@@ -373,8 +378,6 @@ type Engine struct {
 	txBytes, rxBytes     atomic.Uint64
 	txPackets, rxPackets atomic.Uint64
 
-	tap *logTap
-
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
@@ -382,13 +385,10 @@ type Engine struct {
 	OnStarted func(localIP string)
 	OnStopped func()
 
-	// store is the singleton handle to $HOME/.f2f/. Lazily opened on
-	// the first Start so test code that just calls New() doesn't touch
-	// the filesystem.
-	store *config.Store
-	// camp mirrors the on-disk <camp_id>.config.json for the currently
-	// running camp. nil when engine is stopped or in static mode.
-	// Mutations under e.mu are followed by persistCampLocked.
+	// camp is the per-camp config handed in at Start (read-only seed for
+	// the peer catalog + our display name). nil when stopped or in
+	// static mode. The engine does NOT persist it — the on-disk file is
+	// owned by package config and written by cli + services.
 	camp *config.Camp
 	// identity is the per-camp Ed25519 keypair under
 	// /var/lib/f2f/identity/<camp_id>/. Loaded (or generated) on Start
@@ -398,27 +398,13 @@ type Engine struct {
 	identity *identity.Identity
 }
 
-// New returns a fresh Engine with the given config Store. The Store
-// is shared with services that need to persist their own slices of
-// camp config (firewall rules, trusted peers, MyDomains, ...).
-// Passing the Store explicitly lets main.go own the lifecycle and
-// keeps the engine from being the sole gatekeeper of disk state.
-func New(store *config.Store) *Engine {
+// New returns a fresh Engine. It holds no disk state — camp config and
+// identity are passed in at Start; persistence is owned by package
+// config and driven by package cli + the services.
+func New() *Engine {
 	return &Engine{
-		store: store,
 		peers: map[string]*peerState{},
-		tap:   newLogTap(),
 	}
-}
-
-// LogTap returns the io.Writer that should be added to log output so that
-// in-engine messages are broadcast to subscribers. Callers typically wire
-// it via log.SetOutput(io.MultiWriter(os.Stderr, e.LogTap())).
-func (e *Engine) LogTap() *logTap { return e.tap }
-
-// Subscribe returns a channel of log entries plus a cancel function.
-func (e *Engine) Subscribe(buf int) (<-chan LogEntry, func()) {
-	return e.tap.Subscribe(buf)
 }
 
 // Start brings the engine up with cfg. Returns an error if already running
@@ -431,81 +417,39 @@ func (e *Engine) Start(cfg Config) error {
 	if e.running {
 		return errors.New("engine already running")
 	}
-	if cfg.CampID != "" {
-		// With Camp, peer is auto-discovered; we still need a UDP socket
-		// to receive on.
+	if cfg.Camp != nil {
+		// Camp mode. The caller hands us an already-provisioned config +
+		// identity (see package cli); peers are auto-discovered, so we
+		// only need a UDP socket to receive on.
 		if cfg.Listen == "" {
-			return errors.New("Camp mode requires Listen")
+			return errors.New("camp mode requires Listen")
 		}
+		if cfg.Identity == nil {
+			return errors.New("camp mode requires Identity")
+		}
+		if cfg.Camp.CampID == "" {
+			return errors.New("camp mode requires a camp_id in the config")
+		}
+		// Derive the fields the transport reads pervasively from the
+		// config — the caller doesn't set them.
+		cfg.CampID = cfg.Camp.CampID
+		cfg.CampName = cfg.Camp.Identity.Name
 		if cfg.CampName == "" {
-			return errors.New("Camp mode requires CampName")
-		}
-		// camp_id is optional iff we have a label — empty id means
-		// "create a new camp": generate identity first, derive id from
-		// the pub. ID populated here so the rest of Start sees a normal
-		// fully-formed CampConfig.
-		if cfg.CampID == "" {
-			label := strings.TrimSpace(cfg.CampLabel)
-			if label == "" {
-				return errors.New("camp create: Camp.Label required when ID is empty")
-			}
-			if !validCampLabel(label) {
-				return errors.New("camp create: Label must match [A-Za-z0-9_.-]+")
-			}
-			id, err := identity.Generate()
-			if err != nil {
-				return fmt.Errorf("camp create: identity: %w", err)
-			}
-			cfg.CampID = id.PubHex() + "_" + label
-			idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
-			if err := id.Save(idDir); err != nil {
-				return fmt.Errorf("camp create: save identity: %w", err)
-			}
-			e.identity = id
-			log.Printf("camp create: new camp id=%s pub=%s", cfg.CampID, id.PubHex())
+			return errors.New("camp mode requires a name in the camp config")
 		}
 	} else if (cfg.Listen == "") != (cfg.Peer == "") {
 		return errors.New("Listen and Peer must both be set or both be empty")
 	}
 
-	// Open $HOME/.f2f/ + load (or create) the per-camp config. Camp
-	// mode only — static --peer mode has no per-camp identity.
-	if cfg.CampID != "" {
-		if err := e.ensureStore(); err != nil {
-			return fmt.Errorf("config store: %w", err)
-		}
-		c, err := e.loadOrCreateCamp(cfg.CampID, cfg.CampName)
-		if err != nil {
-			return fmt.Errorf("config load %s: %w", cfg.CampID, err)
-		}
-		e.camp = c
-		// Per-camp Ed25519 keypair. Lives under /var/lib/f2f/ (root,
-		// 0700) so different camps can't correlate and "leaving" a
-		// camp is rm -rf of that one subdir. Failures here are fatal
-		// — without an identity we can't prove tunnel_ip ownership
-		// to the camp server once that path is wired through.
-		// If we already created+saved one above (camp-create path),
-		// LoadOrGenerate finds it on disk and returns it.
-		idDir := filepath.Join("/var/lib/f2f/identity", cfg.CampID)
-		id, err := identity.LoadOrGenerate(idDir)
-		if err != nil {
-			return fmt.Errorf("identity %s: %w", cfg.CampID, err)
-		}
-		e.identity = id
-		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, id.PubHex(), id.Fingerprint())
-		// Mirror pub/fingerprint into camp config so the UI can show
-		// it offline. Private key stays under /var/lib/f2f/identity/.
-		// Only writes when the pub changes (avoids touching the file
-		// on every Start once the keypair is stable). Name is left
-		// alone — it was set by loadOrCreateCamp.
-		pub, fp := id.PubHex(), id.Fingerprint()
-		if c.Identity.Pub != pub || c.Identity.Fingerprint != fp {
-			c.Identity.Pub = pub
-			c.Identity.Fingerprint = fp
-			if err := e.store.SaveCamp(c.CampID, c); err != nil {
-				log.Printf("identity: persist into camp config: %v", err)
-			}
-		}
+	// Adopt the provided config + identity. Camp mode only — static
+	// --peer mode has no per-camp identity. The engine treats both as
+	// read-only: it never writes the config file back (cli + services
+	// own persistence) and never generates keys (cli does that on
+	// create).
+	if cfg.Camp != nil {
+		e.camp = cfg.Camp
+		e.identity = cfg.Identity
+		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, e.identity.PubHex(), e.identity.Fingerprint())
 
 		// Camp-wide obfuscation: camp_key + magic-header ranges (H1..H8),
 		// derived deterministically from camp_id. Every member of this
@@ -556,7 +500,7 @@ func (e *Engine) Start(cfg Config) error {
 	// involvement) — unique per-peer so intercept replies routed back
 	// through this overlay don't collide on the egress peer's utun.
 	// The camp roster (UDP announce + HTTP peer-list poll) is owned
-	// by services/camp now and runs after eng.OnStarted.
+	// by mesh/camp now and runs after eng.OnStarted.
 	var (
 		localIP = cfg.LocalIP
 		peerIP  = cfg.PeerIP
@@ -661,9 +605,8 @@ func (e *Engine) Start(cfg Config) error {
 	// Intercepts (routing user-specified prefixes through specific
 	// peers) and their periodic DNS-spec refresh live in
 	// services/tunnel — main.go starts it off eng.OnStarted.
-	if e.camp != nil {
-		e.upsertKnownCamp(e.camp.CampID, e.camp.Identity.Name)
-	}
+	// Marking the camp as last-used / known lives in package cli now,
+	// done at the moment the orchestrator selects the camp to start.
 
 	// tunToPeerLoop reads outgoing IP packets from utun and sends
 	// them as plaintext UDP to peers. When AWG device is active, it
@@ -678,7 +621,7 @@ func (e *Engine) Start(cfg Config) error {
 		go e.peerToTunLoop(ctx)
 	}
 	// Camp announce + HTTP poller + UDP dispatch handler all live in
-	// services/camp; main.go starts the service off eng.OnStarted.
+	// mesh/camp; main.go starts the service off eng.OnStarted.
 	if e.udp != nil {
 		e.workers.Add(1)
 		go e.holePunchLoop(ctx)
@@ -801,19 +744,35 @@ func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
 	return out
 }
 
-// ApplyCampRoster is called by services/camp every poll cycle (and
+// RosterEntry is the engine's neutral view of one camp member — enough
+// to track a peer for hole-punching, AWG sync and the status UI. It is
+// the input type of ApplyCampRoster, deliberately free of any wire
+// format so the engine doesn't depend on the rendezvous protocol types.
+// mesh/camp maps the camp server's reply into these.
+type RosterEntry struct {
+	Name        string
+	Pub         string // Ed25519 pubkey hex; stable identity, peers-map key
+	PublicIP    string
+	UDPPort     int
+	UDPEndpoint string
+	JoinedAt    int64
+	LastSeenAt  int64
+	Online      bool // camp confirms the peer announced recently
+}
+
+// ApplyCampRoster is called by mesh/camp every poll cycle (and
 // any other future producer of peer rosters) to push the latest list
 // into engine state. Updates e.peers (live state used by pair-
-// handshake + hole-punch + AWG sync) and the persisted catalog.
+// handshake + hole-punch + AWG sync). The caller maps its own wire
+// format into []RosterEntry, so the engine stays free of protocol types.
 //
-// Internally delegates to applyPeerList — public surface kept thin
-// so the engine import list in services/camp stays small.
-func (e *Engine) ApplyCampRoster(peers []rendezvous.PeerInfo) {
+// Internally delegates to applyPeerList.
+func (e *Engine) ApplyCampRoster(peers []RosterEntry) {
 	e.applyPeerList(peers)
 }
 
 // UDPConn returns the shared UDP socket the transport runs on. Nil
-// before Start / after Stop. services/camp borrows it to construct
+// before Start / after Stop. mesh/camp borrows it to construct
 // its AnnounceClient (the announce protocol piggybacks on the same
 // socket so camp can observe our external endpoint via the packet
 // source — replaces STUN).
@@ -824,7 +783,7 @@ func (e *Engine) UDPConn() *net.UDPConn {
 }
 
 // IdentityPub returns the local Ed25519 public key in hex, or "" if
-// the engine isn't running in camp mode. services/camp tags the
+// the engine isn't running in camp mode. mesh/camp tags the
 // announce packet with this so peers in the camp can route us by
 // identity.
 func (e *Engine) IdentityPub() string {
@@ -842,7 +801,7 @@ func (e *Engine) IdentityPub() string {
 type UDPHandler func(pkt []byte, from *net.UDPAddr) bool
 
 // RegisterUDPHandler adds h to the dispatch chain. Returns an
-// unregister func that removes it again. services/camp registers
+// unregister func that removes it again. mesh/camp registers
 // one in Start to claim packets whose source is the camp server.
 func (e *Engine) RegisterUDPHandler(h UDPHandler) (unregister func()) {
 	e.udpHandlersMu.Lock()
@@ -880,8 +839,8 @@ func (e *Engine) dispatchUDP(pkt []byte, from *net.UDPAddr) bool {
 // and caches the snapshot for the UI. Every peer (except ourselves) is
 // tracked so the holePunchLoop can keep NAT mappings open with all of
 // them. Active selection is independent and driven by the UI.
-func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
-	// Snapshot of the polled roster lives in services/camp now (its
+func (e *Engine) applyPeerList(peers []RosterEntry) {
+	// Snapshot of the polled roster lives in mesh/camp now (its
 	// Snapshot() exposes it to the UI). Engine just merges the diff
 	// into peers + catalog.
 
@@ -984,12 +943,10 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 			e.activePub.Store(nil)
 		}
 	}
-	// Merge the snapshot into the persistent catalog so the UI sees
-	// known nodes (incl. currently-offline) on the next engine start.
-	if e.camp != nil {
-		e.mergePeerSnapshotLocked(peers)
-		e.persistCampLocked()
-	}
+	// Persisting the roster snapshot into the per-camp catalog (so the
+	// UI sees known nodes, incl. offline ones, on the next start) is
+	// owned by mesh/camp now — it holds the same roster it just
+	// pushed in here via ApplyCampRoster.
 	// Camp poll may have refreshed peer endpoints (NAT rebind) or
 	// added/removed peers entirely. Refresh the AWG peer list so
 	// routing and allowed_ips stay current. Async to keep poller fast.
@@ -998,7 +955,7 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 	}
 }
 
-// Camp roster snapshot lives in services/camp now — UI hits
+// Camp roster snapshot lives in mesh/camp now — UI hits
 // campSvc.Snapshot() directly.
 
 // 1-byte UDP punch/keepalive packets are below our 20-byte IP minimum,
@@ -1009,7 +966,6 @@ func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
-
 
 func (e *Engine) SetTunnelHTTPPort(port string) {
 	e.tunnelHTTPPort = port
@@ -1413,7 +1369,6 @@ func (e *Engine) Stop() error {
 	}
 	e.workers.Wait()
 
-
 	e.mu.Lock()
 	if e.awgDevice != nil {
 		// Device.Close stops its goroutines AND closes the underlying
@@ -1455,10 +1410,10 @@ func (e *Engine) Status() Status {
 	st := Status{
 		Running:   e.running,
 		StartedAt: e.started,
-		TxBytes:      e.txBytes.Load(),
-		RxBytes:      e.rxBytes.Load(),
-		TxPackets:    e.txPackets.Load(),
-		RxPackets:    e.rxPackets.Load(),
+		TxBytes:   e.txBytes.Load(),
+		RxBytes:   e.rxBytes.Load(),
+		TxPackets: e.txPackets.Load(),
+		RxPackets: e.rxPackets.Load(),
 	}
 	if e.tun != nil {
 		st.UtunName = e.tun.Name()
@@ -1508,20 +1463,20 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			selfPub = e.identity.PubHex()
 			selfFp = e.identity.Fingerprint()
 		}
-		// UDPEndpoint for self comes from services/camp via web
+		// UDPEndpoint for self comes from mesh/camp via web
 		// statusView (engine no longer owns the announce reply).
 		out = append(out, PeerStatusInfo{
-			Name:       e.cfg.CampName,
-			Pub:        selfPub,
-			Fp:         selfFp,
-			JoinedAt:   e.started.UnixMilli(),
-			InCamp:     true,
-			Online:     true,
-			Reachable:  true,
-			Verified:   true,
-			Paired:     true,
-			Self:       true,
-			OverlayV4:  e.cfg.LocalIP,
+			Name:      e.cfg.CampName,
+			Pub:       selfPub,
+			Fp:        selfFp,
+			JoinedAt:  e.started.UnixMilli(),
+			InCamp:    true,
+			Online:    true,
+			Reachable: true,
+			Verified:  true,
+			Paired:    true,
+			Self:      true,
+			OverlayV4: e.cfg.LocalIP,
 		})
 	}
 	// Sort peer-keys so the UI list is stable across refreshes —
@@ -1569,24 +1524,6 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 	return out
 }
 
-// validCampLabel returns true iff label only uses chars the camp
-// server's NAME_RE accepts. The same character set we constrain camp
-// labels to so the derived camp_id = <pub>_<label> stays acceptable.
-func validCampLabel(label string) bool {
-	if label == "" {
-		return false
-	}
-	for i := 0; i < len(label); i++ {
-		c := label[i]
-		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-			c == '_' || c == '.' || c == '-'
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // peerHTTPHostLocked returns the pub-derived v4 address for peer p,
 // used as the host in tunnel-side HTTP URLs.
 func (e *Engine) peerHTTPHostLocked(p *peerState) string {
@@ -1628,7 +1565,6 @@ func (e *Engine) SetActivePeer(pub string) error {
 	log.Printf("camp: active peer = %s (pub=%s)", p.Name, pub)
 	return nil
 }
-
 
 func (e *Engine) tunToPeerLoop(ctx context.Context) {
 	defer e.workers.Done()
@@ -1743,7 +1679,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			return
 		}
 		pkt := buf[:n]
-		// External claimants first: services/camp registers a handler
+		// External claimants first: mesh/camp registers a handler
 		// that catches announce-reply packets from the camp server
 		// (and could be extended by future control-plane services
 		// piggybacking on the same socket).

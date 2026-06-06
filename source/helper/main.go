@@ -14,18 +14,24 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
+	"github.com/vseplet/f2f/source/helper/mesh/camp"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
+	"github.com/vseplet/f2f/source/helper/mesh/gossip"
 	"github.com/vseplet/f2f/source/helper/services/calls"
-	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
+	"github.com/vseplet/f2f/source/helper/services/messenger"
+	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
@@ -50,27 +56,53 @@ type service struct {
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	bind := flag.String("bind", defaultBind, "HTTP bind address for the loopback UI")
-	console := flag.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
-	flag.Parse()
+	args := os.Args[1:]
 
-	if err := run(*bind, *console); err != nil {
+	// `f2f camp …` — camp management (create/list/use/join/rm/invite).
+	// Runs and exits: no engine, no UI. Needs only the config store.
+	if len(args) > 0 && args[0] == "camp" {
+		store, err := config.NewStore()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config store:", err)
+			os.Exit(1)
+		}
+		if err := cli.RunCamp(store, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `f2f up [flags]` — non-interactive: bring up the last-used camp
+	// (login items / headless). Bare `f2f` shows the interactive picker.
+	autostart := false
+	if len(args) > 0 && args[0] == "up" {
+		autostart = true
+		args = args[1:]
+	}
+
+	fs := flag.NewFlagSet("f2f", flag.ExitOnError)
+	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI")
+	console := fs.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
+	_ = fs.Parse(args)
+
+	if err := run(*bind, *console, autostart); err != nil {
 		clog.Fatal("%v", err)
 	}
 }
 
-func run(bind string, console bool) error {
+func run(bind string, console bool, autostart bool) error {
 	store, err := config.NewStore()
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
 	}
 
-	eng := engine.New(store)
+	eng := engine.New()
 	eng.SetDefaultListen(":0") // ephemeral; camp learns reflex after NAT
 
 	// Centralised logging: log.* → file (+ UI tap), console only with
 	// --console. clog.Console() is the always-visible channel.
-	logCloser, err := clog.Init(filepath.Join(store.Dir(), "f2f.log"), console, eng.LogTap())
+	logCloser, err := clog.Init(filepath.Join(store.Dir(), "f2f.log"), console)
 	if err != nil {
 		return err
 	}
@@ -79,13 +111,67 @@ func run(bind string, console bool) error {
 	fwSvc := firewall.New(store, eng)
 	pkiSvc := pki.New(store, eng)
 	dnsSvc := dns.New(store, eng)
-	dropSvc := drop.New(eng)
+	dropSvc := drop.New(eng, store.CampDir)
 	callsSvc := calls.New(store, eng)
 	tunnelSvc := tunnel.New(store, eng)
-	campSvc := camp.New(eng)
+	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, bind)
+	// Local message/channel store — one SQLite file per camp under ~/.f2f
+	// (<camp_id>.messenger.db), opened lazily.
+	msgSvc := messenger.New(store.CampDir)
+	defer msgSvc.Close()
+
+	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
+	// comes up (OnStarted); it auto-meshes with every reachable peer.
+	busSvc, err := bus.New(busResolver{eng: eng})
+	if err != nil {
+		return fmt.Errorf("bus: %w", err)
+	}
+	defer busSvc.Stop()
+
+	// Notification hub — fans UI notifications out over SSE. Peers can push
+	// notifications to us over the bus ("notify" type); bus activity (pings)
+	// is surfaced too.
+	notifySvc := notify.New(store.CampDir, func() string { return eng.Status().CampID })
+	defer notifySvc.Close()
+	busSvc.Handle("notify", notifySvc.FromBus)
+	busSvc.Events = func(kind, peerPub, text string) {
+		notifySvc.Push(notify.Notification{Kind: kind, Title: text, From: peerPub})
+	}
+
+	// gossip: replicate our fabric-level NodeState (platform + peer-view)
+	// across the mesh. Source assembles it from engine.Status() + runtime.
+	gossipSvc := gossip.New(busSvc, func() gossip.NodeState {
+		st := eng.Status()
+		ns := gossip.NodeState{
+			Pub: st.IdentityPub,
+			Platform: gossip.Platform{
+				OS:     runtime.GOOS,
+				Arch:   runtime.GOARCH,
+				NumCPU: runtime.NumCPU(),
+				Go:     runtime.Version(),
+			},
+		}
+		if h, err := os.Hostname(); err == nil {
+			ns.Platform.Hostname = h
+		}
+		for _, p := range st.Peers {
+			if p.Self {
+				ns.Name = p.Name // our display name lives on the self entry
+				continue
+			}
+			if p.Pub == "" {
+				continue
+			}
+			ns.Sees = append(ns.Sees, gossip.PeerLink{
+				Pub: p.Pub, Name: p.Name, Paired: p.Paired, Reachable: p.Reachable, RTTMs: p.RTTMs,
+			})
+		}
+		return ns
+	})
+
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -164,10 +250,16 @@ func run(bind string, console bool) error {
 	// the wake-from-sleep detector can restart the engine repeatedly.
 	var lastPortalCamp string
 	eng.OnStarted = func(localIP string) {
+		st := eng.Status()
+		// Route logs into the per-camp dir for the lifetime of this camp.
+		if st.CampID != "" {
+			if err := clog.SwitchTo(filepath.Join(store.CampDir(st.CampID), "f2f.log")); err != nil {
+				log.Printf("WARN: switch camp log: %v", err)
+			}
+		}
 		if err := srv.BindTunnel(localIP); err != nil {
 			log.Printf("WARN: bind tunnel inbox: %v", err)
 		}
-		st := eng.Status()
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -181,6 +273,11 @@ func run(bind string, console bool) error {
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
 			log.Printf("WARN: bind http proxies: %v", err)
 		}
+		// QUIC data bus on the overlay IP — auto-meshes with peers.
+		if err := busSvc.Start(localIP); err != nil {
+			log.Printf("WARN: start bus: %v", err)
+		}
+		gossipSvc.Start() // replicate NodeState across the mesh
 		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
@@ -188,6 +285,8 @@ func run(bind string, console bool) error {
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
+		gossipSvc.Stop()
+		_ = busSvc.Stop()
 		_ = proxySvc.Stop()
 		for i := len(services) - 1; i >= 0; i-- {
 			s := services[i]
@@ -198,6 +297,8 @@ func run(bind string, console bool) error {
 				log.Printf("WARN: %s stop: %v", s.name, err)
 			}
 		}
+		// Camp-less again — route logs back to the bootstrap file.
+		_ = clog.SwitchTo(filepath.Join(store.Dir(), "f2f.log"))
 	}
 	if _, port, err := net.SplitHostPort(bind); err == nil {
 		eng.SetTunnelHTTPPort(port)
@@ -205,6 +306,16 @@ func run(bind string, console bool) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Choose the camp to bring up BEFORE starting the workers and the UI
+	// server: the interactive huh picker must own a clean terminal, with
+	// no concurrent log lines or the UI banner corrupting its redraws.
+	// Non-interactive (`f2f up` / no TTY) auto-selects the last-used camp
+	// and returns immediately. Camp provisioning + selection live in
+	// package cli now (the engine no longer owns any of this).
+	mgr := cli.NewManager(store)
+	interactive := !autostart && cli.Interactive()
+	selCamp, selIdt, selErr := mgr.SelectCamp(interactive)
 
 	// Long-lived workers tied to the process root ctx. They survive
 	// engine restarts (each tick checks engine state, no-ops when down).
@@ -228,11 +339,22 @@ func run(bind string, console bool) error {
 		}
 	}()
 
-	go func() {
-		if err := eng.StartLastCamp(); err != nil {
-			log.Printf("autostart: %v", err)
+	// Bring up the chosen camp (eng.Start → OnStarted → services start).
+	if selErr != nil {
+		clog.Console("camp select: %v", selErr)
+	} else if selCamp != nil {
+		cfg := engine.Config{
+			LocalIP:  "100.64.0.1", // placeholder; engine derives the overlay-IP from pub
+			Listen:   ":9000",
+			Camp:     selCamp,
+			Identity: selIdt,
 		}
-	}()
+		if err := eng.Start(cfg); err != nil {
+			clog.Console("start camp: %v", err)
+		}
+	} else {
+		clog.Console("no camp selected — run `f2f camp new` / `join`, or use the UI")
+	}
 
 	<-ctx.Done()
 	log.Println("shutting down…")
@@ -251,4 +373,45 @@ func run(bind string, console bool) error {
 		}
 	}
 	return nil
+}
+
+// busResolver adapts the engine's peer roster to bus.Resolver. Identity is
+// the overlay IP (WireGuard-attested), so the bus needs no auth of its own.
+type busResolver struct{ eng *engine.Engine }
+
+func (r busResolver) AddrForPub(pub string) string {
+	for _, p := range r.eng.Status().Peers {
+		if !p.Self && p.Pub == pub {
+			return p.OverlayV4
+		}
+	}
+	return ""
+}
+
+func (r busResolver) PubForIP(ip string) string {
+	for _, p := range r.eng.Status().Peers {
+		if p.OverlayV4 == ip {
+			return p.Pub
+		}
+	}
+	return ""
+}
+
+func (r busResolver) SelfPub() string { return r.eng.Status().IdentityPub }
+
+func (r busResolver) Peers() []string {
+	st := r.eng.Status()
+	var out []string
+	for _, p := range st.Peers {
+		if p.Self || p.Pub == "" || p.OverlayV4 == "" || !p.InCamp {
+			continue
+		}
+		// Defensive self-exclusion: the camp-owner entry can appear without
+		// the Self flag set, which would make us ping ourselves.
+		if p.Pub == st.IdentityPub || p.OverlayV4 == st.LocalIP {
+			continue
+		}
+		out = append(out, p.Pub)
+	}
+	return out
 }

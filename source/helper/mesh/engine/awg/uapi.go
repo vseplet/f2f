@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
 )
 
 // keepaliveDefaultSec is the persistent-keepalive interval handed to AWG

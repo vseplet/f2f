@@ -20,11 +20,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 )
+
+// baseDir is the root under which every camp's keypair lives, one
+// subdir per camp_id. Root-owned, 0700 — different camps can't
+// correlate, and "leaving" a camp is rm -rf of its DirFor.
+const baseDir = "/var/lib/f2f/identity"
+
+// DirFor returns the on-disk directory holding the keypair for campID
+// (/var/lib/f2f/identity/<camp_id>). Single source of truth for the
+// path — engine, cli, and invite generation all resolve it through here
+// instead of hard-coding the prefix.
+func DirFor(campID string) string {
+	return filepath.Join(baseDir, campID)
+}
 
 // x25519HKDFInfo is the domain-separation tag for deriving the per-identity
 // X25519 keypair from the Ed25519 seed. Bump the version suffix if we ever
@@ -285,4 +299,44 @@ func (i *Identity) GenerateInvite(campID string, ttl time.Duration) (string, err
 		return "", fmt.Errorf("invite: marshal: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// ParseInvite decodes and fully verifies a bearer invite token produced
+// by GenerateInvite. The owner's public key is the first 64 hex chars of
+// the bound camp_id (camp_id = <owner-pub>_<label>), so the signature is
+// checkable client-side with no extra trust input. Returns the verified
+// body or an error when the token is malformed, signed by someone other
+// than the camp owner, or expired.
+func ParseInvite(token string) (InviteBody, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(token))
+	if err != nil {
+		return InviteBody{}, fmt.Errorf("invite: base64: %w", err)
+	}
+	var wire inviteToken
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return InviteBody{}, fmt.Errorf("invite: json: %w", err)
+	}
+	b := wire.Body
+	if b.CampID == "" {
+		return InviteBody{}, fmt.Errorf("invite: missing camp_id")
+	}
+	if !(len(b.CampID) > 65 && b.CampID[64] == '_' && isHex64(b.CampID[:64])) {
+		return InviteBody{}, fmt.Errorf("invite: camp_id %q is not <pub>_<label>", b.CampID)
+	}
+	pub, err := hex.DecodeString(b.CampID[:64])
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return InviteBody{}, fmt.Errorf("invite: bad owner pub in camp_id")
+	}
+	sig, err := hex.DecodeString(wire.Sig)
+	if err != nil {
+		return InviteBody{}, fmt.Errorf("invite: bad signature hex: %w", err)
+	}
+	msg := []byte(InviteSigMsg(b.CampID, b.InviteID, b.ExpiresAt))
+	if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
+		return InviteBody{}, fmt.Errorf("invite: signature not from camp owner")
+	}
+	if time.Now().UnixMilli() > b.ExpiresAt {
+		return InviteBody{}, fmt.Errorf("invite: expired")
+	}
+	return b, nil
 }

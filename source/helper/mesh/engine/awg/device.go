@@ -9,8 +9,8 @@ import (
 	"github.com/amnezia-vpn/amneziawg-go/device"
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 
-	"github.com/vseplet/f2f/source/helper/engine/obfenv"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
 )
 
 // Device wraps amneziawg-go's *device.Device with the convenience

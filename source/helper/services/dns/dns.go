@@ -35,7 +35,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
-	"github.com/vseplet/f2f/source/helper/engine"
+	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -572,4 +572,3 @@ func SortByName(in []Entry) []Entry {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
-
