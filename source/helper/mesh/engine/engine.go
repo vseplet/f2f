@@ -372,8 +372,6 @@ type Engine struct {
 	txBytes, rxBytes     atomic.Uint64
 	txPackets, rxPackets atomic.Uint64
 
-	tap *logTap
-
 	// Hooks let the surrounding process (currently web.Server) react to
 	// engine lifecycle without engine importing web. OnStarted fires
 	// after utun + UDP are up and LocalIP is finalised; OnStopped fires
@@ -406,18 +404,7 @@ func New(store *config.Store) *Engine {
 	return &Engine{
 		store: store,
 		peers: map[string]*peerState{},
-		tap:   newLogTap(),
 	}
-}
-
-// LogTap returns the io.Writer that should be added to log output so that
-// in-engine messages are broadcast to subscribers. Callers typically wire
-// it via log.SetOutput(io.MultiWriter(os.Stderr, e.LogTap())).
-func (e *Engine) LogTap() *logTap { return e.tap }
-
-// Subscribe returns a channel of log entries plus a cancel function.
-func (e *Engine) Subscribe(buf int) (<-chan LogEntry, func()) {
-	return e.tap.Subscribe(buf)
 }
 
 // Start brings the engine up with cfg. Returns an error if already running

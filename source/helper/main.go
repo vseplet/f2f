@@ -75,7 +75,7 @@ func run(bind string, console bool) error {
 
 	// Centralised logging: log.* → file (+ UI tap), console only with
 	// --console. clog.Console() is the always-visible channel.
-	logCloser, err := clog.Init(filepath.Join(store.Dir(), "f2f.log"), console, eng.LogTap())
+	logCloser, err := clog.Init(filepath.Join(store.Dir(), "f2f.log"), console)
 	if err != nil {
 		return err
 	}

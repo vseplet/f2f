@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
@@ -1377,7 +1378,7 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, unsubscribe := s.engine.Subscribe(64)
+	ch, unsubscribe := clog.Subscribe(64)
 	defer unsubscribe()
 
 	keepalive := time.NewTicker(20 * time.Second)

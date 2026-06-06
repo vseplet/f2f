@@ -38,7 +38,8 @@ func Init(path string, console bool, extra ...io.Writer) (io.Closer, error) {
 
 	fileW = f
 	toConsole = console
-	sinks := append([]io.Writer{io.Writer(f)}, extra...)
+	// file + the UI tap (always) + any extra sinks; stderr only on console.
+	sinks := append([]io.Writer{io.Writer(f), tap}, extra...)
 	if console {
 		sinks = append(sinks, os.Stderr)
 	}
