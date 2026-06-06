@@ -21,16 +21,13 @@ overlay-подсеть `100.64.0.0/10`) могут жить несколько p
   рестарты сам по себе.
 - **Управление camp'ами — в CLI** (пакет `cli`). `sudo f2f` без
   аргументов показывает интерактивный picker (на `charmbracelet/huh`):
-  выбрать известный camp, создать новый или войти по invite. Отдельные
-  подкоманды: `f2f camp ls|new|join|use|rm|invite`. Движок к camp-
-  менеджменту отношения не имеет — ему отдают уже готовые config+identity.
+  выбрать известный camp, создать новый или войти в существующий по
+  camp_id. Отдельные подкоманды: `f2f camp ls|new|join|use|rm`. Движок к
+  camp-менеджменту отношения не имеет — ему отдают готовые config+identity.
 - **Per-camp identity** — на каждый camp_id своя Ed25519-пара
   (`/var/lib/f2f/identity/<camp_id>/{priv,pub}.key`). При создании camp'а
-  её генерит CLI и зеркалит pub/fingerprint в `<camp_id>/config.json`.
-- **Invite** — владелец делает `f2f camp invite` → подписанный base64-
-  токен; гость `f2f camp join <токен>`. Проверяется локально:
-  `camp_id = <pub-владельца>_<label>`, поэтому подпись и срок сверяются
-  без обращения к серверу.
+  её генерит CLI и зеркалит pub/fingerprint в `<camp_id>/config.json`;
+  присоединяясь к чужому camp'у, гость генерит свою пару при первом старте.
 - **Per-camp config** — все user-editable настройки (identity с alias и
   публичным ключом, intercepts, my-domains, firewall, trusted-peer
   fingerprints, peer catalog с last-known доменами и open-портами
@@ -99,12 +96,11 @@ sudo ./f2f up                           # без picker: поднять посл
 ### Управление camp'ами (CLI)
 
 ```sh
-sudo ./f2f camp ls                      # список известных camp'ов (★ = последний)
-sudo ./f2f camp new family --name vasya # создать camp (без аргументов — спросит интерактивно)
-sudo ./f2f camp join <invite-token>     # войти по приглашению
-sudo ./f2f camp use family              # сделать camp последним
-sudo ./f2f camp rm family               # забыть camp (удаляет ключи + данные)
-sudo ./f2f camp invite [--ttl 24h]      # выпустить invite-токен (для своего camp'а)
+sudo ./f2f camp ls                          # список известных camp'ов (★ = последний)
+sudo ./f2f camp new family --name vasya     # создать camp (без аргументов — спросит интерактивно)
+sudo ./f2f camp join <camp_id> --name vasya # войти в существующий camp по camp_id
+sudo ./f2f camp use family                  # сделать camp последним
+sudo ./f2f camp rm family                   # забыть camp (удаляет ключи + данные)
 ```
 
 После выбора camp'а открой `http://127.0.0.1:2202` — там всё **прикладное**

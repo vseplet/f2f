@@ -102,9 +102,9 @@ source/helper/
 │   └── config.go                # Camp/Peer/Domain/Firewall/TrustedPeer структуры
 │                                # + Store{Snapshot/UpdateCamp/Load/Save} с in-memory кэшем
 │
-├── identity/                  # Ed25519 ключ peer'а + X25519 derive + fingerprint + invite (Generate/Parse)
+├── identity/                  # Ed25519 ключ peer'а + X25519 derive + fingerprint (GenerateInvite — заготовка, пока не подключена)
 │
-├── cli/                       # ЖИЗНЕННЫЙ ЦИКЛ CAMP'ОВ (create/list/use/join/rm/invite)
+├── cli/                       # ЖИЗНЕННЫЙ ЦИКЛ CAMP'ОВ (create/list/use/join/rm)
 │   ├── manager.go               # Manager над config.Store: provisioning, state.json, LoadForStart
 │   ├── wizard.go                # интерактивный picker на charmbracelet/huh (SelectCamp)
 │   └── cli.go                   # разбор `f2f camp …` подкоманд
@@ -165,7 +165,7 @@ source/helper/
 fabric-стейта NodeState). `services/` — пользовательские сервисы поверх
 фабрики: каждый держит своё состояние, пишет в `config.Store`, читает
 живых peer'ов через `engine.*` и обменивается с пирами через `mesh/bus`.
-`cli/` — жизненный цикл camp'ов (create/list/use/join/rm/invite + picker);
+`cli/` — жизненный цикл camp'ов (create/list/use/join/rm + picker);
 отдаёт движку готовые `config.Camp` + `identity`. main.go соединяет их.
 
 **Зачем такое разделение.** Фабрика — это "как узлы связаны", её
@@ -188,7 +188,7 @@ fabric-стейта NodeState). `services/` — пользовательские
 ```go
 func main() {
     // args[0] == "camp" → cli.RunCamp(store, args[1:]); exit
-    //                     (управление camp'ами: ls/new/join/use/rm/invite)
+    //                     (управление camp'ами: ls/new/join/use/rm)
     // args[0] == "up"   → autostart=true (без интерактивного picker'а)
     // иначе             → run(bind, console, autostart)
 }
@@ -319,8 +319,8 @@ SetAWGAllowedCIDRsHook(fn)                // services/tunnel инжектит in
 | Пакет | Что |
 |---|---|
 | `config.Store` | thread-safe wrapper над `~/.f2f/<camp_id>/config.json`. `Snapshot(id)` отдаёт deep-copy, `UpdateCamp(id, fn)` атомарно читает→мутирует→пишет. In-memory cache синхронизирован с диском. Источник правды для всех сервисов и для `cli`. |
-| `identity` | derive Ed25519 keypair из persistent seed, fingerprint = первые 8 байт SHA-256(pub). `X25519()` через HKDF — для AWG transport keys. `CampLabel(id)` — короткий display-label из camp_id. `DirFor(id)` — путь к keypair'у. Invite: `GenerateInvite` (владелец подписывает), `ParseInvite` (гость проверяет подпись+срок по pub из camp_id). |
-| `cli` | жизненный цикл camp'ов над `config.Store`: `Manager` (create/list/use/join/rm/invite, `state.json`, `LoadForStart`), `SelectCamp` (picker `huh` или последний camp), разбор `f2f camp …`. Единственный, кто генерит identity и пишет camp-config при создании. |
+| `identity` | derive Ed25519 keypair из persistent seed, fingerprint = первые 8 байт SHA-256(pub). `X25519()` через HKDF — для AWG transport keys. `CampLabel(id)` — короткий display-label из camp_id. `DirFor(id)` — путь к keypair'у. `GenerateInvite` — заготовка под invite-токены (механизм ещё не реализован: не вызывается, в CLI минтинга/парсинга нет). |
+| `cli` | жизненный цикл camp'ов над `config.Store`: `Manager` (create/list/use/join-по-camp_id/rm, `state.json`, `LoadForStart`), `SelectCamp` (picker `huh` или последний camp), разбор `f2f camp …`. Единственный, кто генерит identity и пишет camp-config при создании. |
 | `platform` | OS-specific примитивы. Build-tag'ы `_darwin.go`/`_linux.go`/`_windows.go`. Pfctl/nftables, ifconfig/ip-link, /sbin/route/ip-route, NAT install, trust-store add/remove, /etc/resolver write, AppSupportDir, "reveal in finder". |
 
 ### Кто кого знает (импорты)
@@ -2358,7 +2358,7 @@ CLI флаги для основных (`--dns-port`, `--bind`, `--log-level`).
 ```
 f2f [--bind addr]              # picker camp'а + UI (default)
 f2f up [--bind addr]           # headless: последний camp без picker'а
-f2f camp ls|new|join|use|rm|invite
+f2f camp ls|new|join|use|rm
 ```
 
 **Осталось** — диагностические подкоманды без браузера:
