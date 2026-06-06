@@ -28,7 +28,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/mesh/engine/route"
 	"github.com/vseplet/f2f/source/helper/mesh/engine/utun"
 	"github.com/vseplet/f2f/source/helper/platform"
-	"github.com/vseplet/f2f/source/helper/services/camp/rendezvous"
 )
 
 // tunnelSubnetCIDR is the CGNAT /10 the overlay carves per-peer
@@ -135,7 +134,7 @@ type Diagnostics struct {
 	DNSResolverOK  bool  `json:"dns_resolver_ok"` // /etc/resolver/<id>.f2f present
 }
 
-// PeerStatusInfo augments rendezvous.PeerInfo with our local reachability
+// PeerStatusInfo augments the camp roster view with our local reachability
 // view: when we last received UDP from this peer, and whether it counts
 // as "reachable" right now (within 30s window). One synthetic entry
 // with Self=true represents us so the UI can render a single uniform
@@ -745,14 +744,30 @@ func (e *Engine) OnlinePeersForCAPoll() []OnlinePeerHTTPInfo {
 	return out
 }
 
+// RosterEntry is the engine's neutral view of one camp member — enough
+// to track a peer for hole-punching, AWG sync and the status UI. It is
+// the input type of ApplyCampRoster, deliberately free of any wire
+// format so the engine doesn't depend on the rendezvous protocol types.
+// services/camp maps the camp server's reply into these.
+type RosterEntry struct {
+	Name        string
+	Pub         string // Ed25519 pubkey hex; stable identity, peers-map key
+	PublicIP    string
+	UDPPort     int
+	UDPEndpoint string
+	JoinedAt    int64
+	LastSeenAt  int64
+	Online      bool // camp confirms the peer announced recently
+}
+
 // ApplyCampRoster is called by services/camp every poll cycle (and
 // any other future producer of peer rosters) to push the latest list
 // into engine state. Updates e.peers (live state used by pair-
-// handshake + hole-punch + AWG sync) and the persisted catalog.
+// handshake + hole-punch + AWG sync). The caller maps its own wire
+// format into []RosterEntry, so the engine stays free of protocol types.
 //
-// Internally delegates to applyPeerList — public surface kept thin
-// so the engine import list in services/camp stays small.
-func (e *Engine) ApplyCampRoster(peers []rendezvous.PeerInfo) {
+// Internally delegates to applyPeerList.
+func (e *Engine) ApplyCampRoster(peers []RosterEntry) {
 	e.applyPeerList(peers)
 }
 
@@ -824,7 +839,7 @@ func (e *Engine) dispatchUDP(pkt []byte, from *net.UDPAddr) bool {
 // and caches the snapshot for the UI. Every peer (except ourselves) is
 // tracked so the holePunchLoop can keep NAT mappings open with all of
 // them. Active selection is independent and driven by the UI.
-func (e *Engine) applyPeerList(peers []rendezvous.PeerInfo) {
+func (e *Engine) applyPeerList(peers []RosterEntry) {
 	// Snapshot of the polled roster lives in services/camp now (its
 	// Snapshot() exposes it to the UI). Engine just merges the diff
 	// into peers + catalog.

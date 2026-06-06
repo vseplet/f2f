@@ -245,8 +245,28 @@ func (s *Service) AnnounceStats() (sentMs, replyMs, rttMs int64) {
 func (s *Service) onUpdate(peers []rendezvous.PeerInfo) {
 	dup := append([]rendezvous.PeerInfo(nil), peers...)
 	s.snapshot.Store(&dup)
-	s.eng.ApplyCampRoster(peers)
+	s.eng.ApplyCampRoster(toRoster(peers)) // map wire shape → engine's neutral type
 	s.persistCatalog(peers)
+}
+
+// toRoster maps the camp server's wire reply into the engine's neutral
+// RosterEntry input. Keeps the rendezvous protocol types out of the
+// engine's public API — the engine never learns the wire format.
+func toRoster(peers []rendezvous.PeerInfo) []engine.RosterEntry {
+	out := make([]engine.RosterEntry, 0, len(peers))
+	for _, p := range peers {
+		out = append(out, engine.RosterEntry{
+			Name:        p.Name,
+			Pub:         p.Pub,
+			PublicIP:    p.PublicIP,
+			UDPPort:     p.UDPPort,
+			UDPEndpoint: p.UDPEndpoint,
+			JoinedAt:    p.JoinedAt,
+			LastSeenAt:  p.LastSeenAt,
+			Online:      p.Online,
+		})
+	}
+	return out
 }
 
 // persistCatalog merges the latest roster into the running camp's
