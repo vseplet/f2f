@@ -24,6 +24,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/gossip"
 	"github.com/vseplet/f2f/source/helper/platform"
 	"github.com/vseplet/f2f/source/helper/services/calls"
 	"github.com/vseplet/f2f/source/helper/services/camp"
@@ -57,6 +58,7 @@ type Server struct {
 	dns      *dns.Service
 	msg      *messenger.Store
 	notify   *notify.Service
+	gossip   *gossip.Service
 	addr     string
 	srv      *http.Server
 
@@ -68,7 +70,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -81,6 +83,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		camp:        campSvc,
 		msg:         msgSvc,
 		notify:      notifySvc,
+		gossip:      gossipSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -243,6 +246,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Notifications: recent list + live SSE stream for the UI.
 	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
 	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
+
+	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
+	mux.HandleFunc("GET /api/mesh", s.handleMesh)
 
 	// Group calls (SFU-based). Browser-facing endpoints on the UI
 	// server; /api/call/signal also registered on the tunnel listener
@@ -453,6 +459,12 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 // handleNotifications returns the buffered notifications (oldest-first).
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.notify.Recent())
+}
+
+// handleMesh returns every peer's gossip NodeState — the mesh-wide topology
+// (who-sees-whom) + platform inventory.
+func (s *Server) handleMesh(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.gossip.All())
 }
 
 // handleNotificationsStream pushes new notifications to the browser over SSE.

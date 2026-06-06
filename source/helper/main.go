@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -21,7 +22,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/engine"
 	"github.com/vseplet/f2f/source/helper/identity"
-	"github.com/vseplet/f2f/source/helper/services/bus"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
+	"github.com/vseplet/f2f/source/helper/mesh/gossip"
 	"github.com/vseplet/f2f/source/helper/services/calls"
 	"github.com/vseplet/f2f/source/helper/services/camp"
 	"github.com/vseplet/f2f/source/helper/services/dns"
@@ -110,7 +112,38 @@ func run(bind string, console bool) error {
 		notifySvc.Push(notify.Notification{Kind: kind, Title: text, From: peerPub})
 	}
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, bind)
+	// gossip: replicate our fabric-level NodeState (platform + peer-view)
+	// across the mesh. Source assembles it from engine.Status() + runtime.
+	gossipSvc := gossip.New(busSvc, func() gossip.NodeState {
+		st := eng.Status()
+		ns := gossip.NodeState{
+			Pub: st.IdentityPub,
+			Platform: gossip.Platform{
+				OS:     runtime.GOOS,
+				Arch:   runtime.GOARCH,
+				NumCPU: runtime.NumCPU(),
+				Go:     runtime.Version(),
+			},
+		}
+		if h, err := os.Hostname(); err == nil {
+			ns.Platform.Hostname = h
+		}
+		for _, p := range st.Peers {
+			if p.Self {
+				ns.Name = p.Name // our display name lives on the self entry
+				continue
+			}
+			if p.Pub == "" {
+				continue
+			}
+			ns.Sees = append(ns.Sees, gossip.PeerLink{
+				Pub: p.Pub, Name: p.Name, Paired: p.Paired, Reachable: p.Reachable, RTTMs: p.RTTMs,
+			})
+		}
+		return ns
+	})
+
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -210,6 +243,7 @@ func run(bind string, console bool) error {
 		if err := busSvc.Start(localIP); err != nil {
 			log.Printf("WARN: start bus: %v", err)
 		}
+		gossipSvc.Start() // replicate NodeState across the mesh
 		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
@@ -217,6 +251,7 @@ func run(bind string, console bool) error {
 	}
 	eng.OnStopped = func() {
 		_ = srv.UnbindTunnel()
+		gossipSvc.Stop()
 		_ = busSvc.Stop()
 		_ = proxySvc.Stop()
 		for i := len(services) - 1; i >= 0; i-- {

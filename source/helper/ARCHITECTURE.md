@@ -112,7 +112,7 @@ source/helper/
 │   ├── awg/                     # AmneziaWG Device + conn.Bind + UAPI builder
 │   ├── obfenv/                  # ChaCha20-Poly1305 envelope, magic-headers H1..H8 из camp_id
 │   ├── pair/                    # signed pair_req/pair_res handshake
-│   ├── rendezvous/              # camp UDP announce + HTTP peer-list poll
+│   ├── rendezvous/              # camp UDP announce (ростер приходит в ответе; адрес ре-резолвится на каждом announce)
 │   ├── route/                   # Manager поверх platform.Route* — track + Cleanup
 │   ├── utun/                    # lifecycle одного utun-устройства (Open/Read/Write/Close)
 │   └── *_test.go                # тесты overlay/packet
@@ -134,9 +134,15 @@ source/helper/
 │   ├── calls/                   # SFU + group calls + remote-call poll
 │   │   ├── calls.go               # Service: Create/Join/Leave/End, PollPeers
 │   │   └── sfu/                   # Pion-based SFU (бывший helper/sfu)
-│   └── tunnel/                  # APPLICATION-уровень routing: intercepts + egress
-│       ├── tunnel.go              # Service: AddIntercept/RemoveIntercept, RefreshDomainRoutes
-│       └── egress.go              # NAT install + ip-forwarding (бывший engine/egress)
+│   ├── tunnel/                  # APPLICATION-уровень routing: intercepts + egress
+│   │   ├── tunnel.go              # Service: AddIntercept/RemoveIntercept, RefreshDomainRoutes
+│   │   └── egress.go              # NAT install + ip-forwarding (бывший engine/egress)
+│   ├── bus/                     # QUIC data bus (overlay:2203) — единый пир-к-пир транспорт
+│   │   └── bus.go                # Service: listener+dial, auto-mesh, tie-break, Request/Notify/Handle
+│   ├── messenger/              # пер-камповая SQLite (~/.f2f/<camp_id>.messenger.db)
+│   │   └── messenger.go          # Store: messages/channels, modernc sqlite (no cgo)
+│   └── notify/                 # хаб уведомлений (in-memory ring + SSE), слушает шину
+│       └── notify.go            # Service: Push/Recent/Subscribe, FromBus
 │
 └── ui/web/                    # HTTP UI + reverse-proxy
     ├── server.go                # роутер, statusView мерджит engine.Status + service-данные
@@ -275,10 +281,13 @@ SetAWGAllowedCIDRsHook(fn)                // services/tunnel инжектит in
 |---|---|
 | **dns** | DNS-сервер `127.0.0.1:0` для `<camp>.f2f` зоны, имплементит `Resolver` через `LookupHost`. Catalog: `MyDomains` (наши) + per-peer `peerDoms` (polled из `/api/domains` каждые 10с). TCP health-check каждые 8с (стучится на 127.0.0.1:port для опубликованных портов). |
 | **drop** | Anacrolix BT-клиент на overlay v4 + fallback на ephemeral port если 6881 занят. `rescanSharedDir` re-seed'ит при старте. `pruneLoop` снимает с раздачи удалённые файлы. `filesPollLoop` опрашивает peer'ов раз в минуту. Persist в `downloads.json`. |
-| **firewall** | pf-anchor lifecycle (Open/Apply/Close) с recovery state файлом. Built-in порты (2202/80/443/6881) + user CRUD из UI. Peer-firewall poll каждые 30с — складывает в `peerPorts[pub]`, статус показывается в UI. |
+| **firewall** | pf-anchor lifecycle (Open/Apply/Close) с recovery state файлом. Built-in порты (`2202/tcp`, `2203/udp` шина, `80`/`443`, `6881`) + user CRUD из UI. Peer-firewall poll каждые 30с — складывает в `peerPorts[pub]`, статус показывается в UI. |
 | **pki** | My CA: load-or-generate per camp, install в trust store (один раз — пользователь даёт пароль). Peer CAs: каждые 30с poll `/api/ca-cert`, новые сохраняются на диск. Install в keychain — только по клику в UI. |
 | **calls** | Pion SFU + group calls. Hosting peer запускает SFU `sfu.New(...)`, остальные join. Signal через `/api/call/signal` (HTTP через utun). Remote-call poll каждые 3с. |
 | **tunnel** | Application-уровень routing. **Intercepts**: AddIntercept(spec, peer) — resolve spec в prefixes, добавить routes на utun, persist в `c.Intercepts`. `RefreshDomainRoutes` каждые 60с re-resolve'ит DNS-spec'и. **Egress**: автоматически открывает NAT для overlay subnet на default route iface (`platform.InstallNAT` + ip-forwarding). |
+| **bus** | **QUIC data bus** на `overlay-IP:2203` — единый пир-к-пир транспорт (заменяет HTTP-over-tunnel). Авто-меш: пинг всех достижимых пиров раз в 30с, tie-break (младший pub дозванивается → одно соединение на пару), кэш коннектов (вход/исход переиспользуются — стримы двунаправленные). API: `Request`/`Notify`/`Handle(type, fn)`. TLS — self-signed + skip-verify: **аутентичность/шифрование уже даёт оверлей** (overlay-IP ≡ pub, WireGuard), идентичность пира = overlay-IP входящего коннекта. `Events`-хук отдаёт пинги в notify. |
+| **messenger** | Пер-камповая SQLite `~/.f2f/<camp_id>.messenger.db` (драйвер `modernc.org/sqlite`, без cgo), ленивое открытие + кэш хендлов. Таблицы `messages` (dm/channel) и `channels`. Локальное хранилище чата; обмен — поверх шины. |
+| **notify** | Хаб уведомлений: in-memory кольцо (200) + fan-out в UI по SSE. Источники: шина (`Handle("notify")` — пир прислал) и bus-события (пинги). Отдаёт `/api/notifications` + `/api/notifications/stream`. Транспорт-агностичен (локальные сервисы зовут `Push` напрямую). |
 
 ### config/ + identity/ + platform/
 
@@ -302,7 +311,65 @@ platform       → -                        (stdlib + OS calls)
 
 Сервисы **не импортируют друг друга**. Если двум нужны общие данные
 — через `config.Store` (catalog + per-peer secondary data) или через
-engine getter (live peer state).
+engine getter (live peer state). Исключение по проводке: `bus` и `notify`
+связаны в main.go через колбэки/хендлеры (`busSvc.Handle("notify", …)`,
+`busSvc.Events = …`), а не прямыми импортами.
+
+---
+
+## Миграция пир-к-пир HTTP → QUIC-шина
+
+Сейчас пиры общаются друг с другом по **HTTP поверх туннеля**: каждый
+держит `tunnelSrv` (HTTP-листенер на `overlay-IP:2202`, см. `BindTunnel`),
+и соседи делают к нему запросы по утану. Это работает, но плодит
+ad-hoc эндпоинты, требует открытого 2202 на оверлее и не даёт единой
+типизированной модели. Цель — перевести всё это на **шину** (`services/bus`,
+QUIC/2203) и **закрыть** лишний порт + листенер.
+
+Почему это безопасно без своей аутентификации: оверлей (WireGuard) уже
+шифрует и подтверждает источник (overlay-IP детерминирован из pub,
+чужой ключ → дроп). Поэтому и текущий HTTP — без TLS, и шина — с
+self-signed + skip-verify; идентичность пира = overlay-IP коннекта.
+
+### Что переезжает (всё пир-фейсинг на `tunnelSrv`)
+
+| HTTP-эндпоинт (overlay:2202) | Что делает | Тип на шине | Статус |
+|---|---|---|---|
+| `POST /api/signal/inbox` | WebRTC p2p сигналинг (offer/answer/candidate) | `signal` | TODO |
+| `POST /api/call/signal` | SFU-сигналинг (group calls) | `call-signal` | TODO |
+| `GET /api/call/state` | опрос состояния звонка пира | `call-state` | TODO |
+| `POST /api/call/join` / `leave` | join/leave удалённого SFU | `call-join` / `call-leave` | TODO |
+| `GET /api/domains` | опубликованные домены пира (dns-poll каждые 10с) | `domains` | TODO |
+| `GET /api/ca-cert` | CA-серт пира (pki-poll каждые 30с) | `ca-cert` | TODO |
+| `GET /api/files` | список расшаренных файлов (drop) | `files` | TODO |
+| `GET /api/firewall` | список открытых портов пира | `firewall` | TODO |
+| — | сообщения/каналы (messenger) | `message` | TODO |
+| — | уведомления | `notify` | ✅ есть |
+
+Шаблон миграции (на каждый эндпоинт): поднять `Push`/poll-сторону на
+`busSvc.Notify/Request`, а приёмную — на `busSvc.Handle(type, fn)`;
+HTTP-роут на `tunnelSrv` удалить. Опросы (domains/ca-cert/files/firewall)
+можно переделать из «каждый сам опрашивает соседей» в «владелец
+`Notify`-ит изменения по шине» — меньше трафика, мгновенные апдейты.
+
+### Что закрывается после полной миграции
+
+- **`tunnelSrv` целиком** (`BindTunnel`/`UnbindTunnel`) — пир-фейсинг
+  HTTP на оверлее больше не нужен.
+- **`2202/tcp` из `firewall.BuiltinRules`** — порт на оверлее закрывается
+  (loopback-UI на `127.0.0.1:2202` остаётся, он не под pf-правилом оверлея).
+
+### Что остаётся (не транспорт-шина)
+
+- **`80`/`443` (proxy)** — отдаёт пользовательские `.f2f`-домены (gitea и
+  т.п.) реальным браузерам; это не «данные f2f», а проксирование сервисов.
+- **`6881` (BitTorrent)** — фактическая передача файлов в drop (свой
+  протокол). По шине поедет только *листинг* файлов; перенос самой
+  передачи на QUIC — отдельная большая история.
+- **`2203/udp` (bus)** и WG-handshake на физическом UDP-порту.
+
+Итог: целевой пир-фейсинг surface на оверлее = `2203/udp` (шина) +
+`80/443` (proxy) + `6881` (BT). HTTP-листенер `tunnelSrv` уходит.
 
 ---
 

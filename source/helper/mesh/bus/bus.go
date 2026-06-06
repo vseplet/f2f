@@ -104,6 +104,10 @@ func (s *Service) Handle(typ string, fn HandlerFunc) {
 	s.mu.Unlock()
 }
 
+// Peers returns the pubs of reachable peers (from the resolver) — used by
+// higher layers (gossip) to fan out to the mesh.
+func (s *Service) Peers() []string { return s.resolver.Peers() }
+
 // Start binds the QUIC listener on overlayIP:Port and serves it. Idempotent.
 func (s *Service) Start(overlayIP string) error {
 	s.mu.Lock()
