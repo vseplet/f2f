@@ -968,6 +968,14 @@ $(function () {
     const m = decodeURIComponent(raw).match(/^call:(dm|group):(.+)$/);
     if (!m) return;
     const [, kind, id] = m;
+    // A group route we're not already in means the user navigated here (clicked
+    // a meet in the sidebar, or reloaded mid-call) WITHOUT joining — the router
+    // used to only paint the shell. Actually join the call now; Call.start
+    // re-renders the route once it has adopted the active call.
+    if (kind === 'group' && !(Call.active && Call.active.kind === 'group' && Call.active.id === id)) {
+      Call.start('group', id, id);
+      return;
+    }
     const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
     activateCallTab();
     showStageView();
@@ -1001,7 +1009,8 @@ $(function () {
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null'); } catch (_) {}
     if (!saved) return;
-    if (saved.kind === 'group') { Call.start('group', saved.id, saved.title); return; }
+    // Group calls re-join via the URL hash through applyCallRoute() above, so
+    // only dm needs explicit rejoin here (avoids a double Call.start on reload).
     if (saved.kind !== 'dm') return;
     const pub = PUB_RE.test(saved.pub || '') ? saved.pub : saved.id; // reconnect by pub
     Call.start('dm', pub, saved.title);
