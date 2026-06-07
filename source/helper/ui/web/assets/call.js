@@ -11,6 +11,7 @@
 //
 // Routes mirror chats:  #call:dm:<pub>  /  #call:group:<id>
 $(function () {
+  console.log('%c[grp] call.js INSTRUMENTED build loaded', 'color:#7fc474;font-weight:bold');
   const PUB_RE = /^[0-9a-f]{64}$/;
 
   // ---- DOM ----
