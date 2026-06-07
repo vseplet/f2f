@@ -402,17 +402,37 @@ $(function () {
       return r.json();
     },
 
-    async start() {
+    async start(target) {
       try {
         const s = await (await fetch('/api/status')).json();
         this.myIP = (s && s.local_ip) || '';
         this.myName = (s && s.camp_name) || 'you';
       } catch (_) {}
-      let calls = [];
-      try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
-      const existing = calls.find(c => c.sfu_host);
-      if (existing) { this.sfuHost = existing.sfu_host; await this.join(); }
+      // Resolve the clicked target to an existing call and JOIN it — this is
+      // the meet2 behaviour that the port dropped. `target` may be a call_id,
+      // an sfu_host IP, or a bare channel name (there is no backend room
+      // binding yet). A specific target (digit-leading: call_id or IP) is
+      // worth a few discovery retries because a peer's call may not have been
+      // polled yet; a channel name only falls back to the camp's single
+      // active call, else we create a fresh one.
+      const specific = /^\d/.test(target || '');
+      const call = await this.findCall(target, specific ? 4 : 1);
+      if (call) { this.sfuHost = call.sfu_host; await this.join(); }
       else { await this.create(); }
+    },
+    // findCall locates the call to join: first an exact match on the target
+    // (call_id or sfu_host), then any active call in the camp. Retries to ride
+    // out the ~3s remote-call discovery lag before we give up and create one.
+    async findCall(target, tries) {
+      for (let i = 0; i < tries; i++) {
+        let calls = [];
+        try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
+        const c = calls.find(x => x.call_id === target || x.sfu_host === target)
+               || calls.find(x => x.sfu_host);
+        if (c) return c;
+        if (i < tries - 1) await new Promise(r => setTimeout(r, 1200));
+      }
+      return null;
     },
 
     async create() {
