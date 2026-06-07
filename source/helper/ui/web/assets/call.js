@@ -417,6 +417,7 @@ $(function () {
       // active call, else we create a fresh one.
       const specific = /^\d/.test(target || '');
       const call = await this.findCall(target, specific ? 4 : 1);
+      console.log('[grp] start target=%s myIP=%s → %s', target, this.myIP, call ? 'JOIN host ' + call.sfu_host : 'CREATE new (no existing call found)');
       if (call) { this.sfuHost = call.sfu_host; await this.join(); }
       else { await this.create(); }
     },
@@ -446,10 +447,13 @@ $(function () {
       const target = this.sfuHost;
       if (this.inCall) await this.leave(true);
       this.sfuHost = target;
-      await this.jget('/api/call/join', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tunnel_ip: this.myIP, name: this.myName, sfu_host: this.sfuHost }),
-      });
+      try {
+        await this.jget('/api/call/join', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tunnel_ip: this.myIP, name: this.myName, sfu_host: this.sfuHost }),
+        });
+        console.log('[grp] join POST ok → sfu', this.sfuHost);
+      } catch (e) { console.warn('[grp] join POST FAILED to', this.sfuHost, ':', e.message); throw e; }
       await this.joinSFU();
     },
     async joinSFU() {
@@ -484,9 +488,10 @@ $(function () {
         if (this.sfuHost !== this.myIP && this.myIP && e.candidate.candidate.indexOf(this.myIP) === -1) return;
         this.sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
       };
-      conn.ontrack = (e) => { if (e.streams && e.streams[0]) this.addRemoteStream(e.streams[0]); };
+      conn.ontrack = (e) => { console.log('[grp] ontrack', e.track.kind, e.streams[0] && e.streams[0].id); if (e.streams && e.streams[0]) this.addRemoteStream(e.streams[0]); };
       conn.onconnectionstatechange = () => {
         const st = conn.connectionState;
+        console.log('[grp] pc', st);
         if (st === 'connected') this.reconnectAttempts = 0;
         else if (st === 'failed') this.scheduleReconnect();
         else if (st === 'closed') Call.hangup();
@@ -510,9 +515,10 @@ $(function () {
     async sendSignal(msg) {
       try {
         const r = await fetch('/api/call/signal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
-        if (r.status === 204 || !r.ok) return null;
+        if (!r.ok) { console.warn('[grp] signal', msg.kind, '→ HTTP', r.status, await r.text().catch(() => '')); return null; }
+        if (r.status === 204) return null;
         return r.json();
-      } catch (_) { return null; }
+      } catch (e) { console.warn('[grp] signal send failed', e.message); return null; }
     },
     startSignalStream() {
       if (this.signalES) return;
@@ -526,6 +532,7 @@ $(function () {
 
     async handleSignal(msg) {
       const pc = this.pc;
+      console.log('[grp] <sfu', msg.kind, 'from=' + msg.from, 'pc=' + (pc && pc.signalingState));
       if (!pc || msg.from !== 'sfu') return;
       if (msg.kind === 'offer') {
         if (pc.signalingState === 'have-local-offer') { try { await pc.setLocalDescription({ type: 'rollback' }); } catch (_) {} }
