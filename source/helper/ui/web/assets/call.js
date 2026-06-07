@@ -310,7 +310,7 @@ $(function () {
 
     // start a NEW outgoing call.
     async start(kind, idOrName, title) {
-      if (this.active) this.hangup(true); // one call at a time
+      if (this.active) await this.hangup(true); // one call at a time — fully tear the old one down BEFORE joining the new (shared Group singleton)
       if (kind === 'dm') {
         let pub = idOrName;
         if (!PUB_RE.test(idOrName)) {
@@ -334,19 +334,19 @@ $(function () {
 
     // hang up. For dm we notify the peer over the p2p channel; for group the
     // SFU leave happens in Group.leave (via endLocal).
-    hangup(silent) {
+    async hangup(silent) {
       if (this.active && this.active.kind === 'dm') {
         let pub = this.active.pub || currentPeerPub;
         if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
       }
-      this.endLocal(silent);
+      await this.endLocal(silent);
     },
 
     // tear everything down locally without signalling (used on a remote hangup).
     // silent = we're switching to another call, so skip the "ended" screen.
-    endLocal(silent) {
+    async endLocal(silent) {
       const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
-      if (this.active && this.active.kind === 'group') Group.leave(true);
+      if (this.active && this.active.kind === 'group') await Group.leave(true);
       else teardown();
       clearCall();
       this.active = null;
