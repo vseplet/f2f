@@ -689,7 +689,7 @@ $(function () {
       this.stopPolling();
       if (this.screenStream) this.stopShare();
       this.stopSignalStream();
-      if (this.pc) { try { this.pc.close(); } catch (_) {} this.pc = null; }
+      if (this.pc) { try { this.pc.onconnectionstatechange = null; this.pc.ontrack = null; this.pc.close(); } catch (_) {} this.pc = null; }
       if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
       this.clearTiles();
       videoSelf.srcObject = null; tileSelf.classList.remove('has-video');
@@ -968,21 +968,21 @@ $(function () {
     const m = decodeURIComponent(raw).match(/^call:(dm|group):(.+)$/);
     if (!m) return;
     const [, kind, id] = m;
-    // A group route we're not already in means the user navigated here (clicked
-    // a meet in the sidebar, or reloaded mid-call) WITHOUT joining — the router
-    // used to only paint the shell. Actually join the call now; Call.start
-    // re-renders the route once it has adopted the active call.
-    if (kind === 'group' && !(Call.active && Call.active.kind === 'group' && Call.active.id === id)) {
-      Call.start('group', id, id);
-      return;
-    }
     const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
+    // Paint the stage FIRST so the tiles window is shown regardless of join
+    // timing — Call.start below sets the same hash, so it would NOT re-fire this
+    // router, and the stage must already be up by then.
     activateCallTab();
     showStageView();
     // The fixed p2p peer tile is dm-only; group renders dynamic participant tiles.
     $('#call-tile-peer').toggle(kind === 'dm');
     $('#call-title').text((kind === 'group' ? '# ' : '') + title);
     $('#call-peer-name').text((kind === 'group' ? '# ' : '') + title);
+    // A group route we're not already in means the user navigated here (clicked
+    // a meet in the sidebar, or reloaded mid-call) WITHOUT joining — join now.
+    if (kind === 'group' && !(Call.active && Call.active.kind === 'group' && Call.active.id === id)) {
+      Call.start('group', id, id);
+    }
   }
   window.addEventListener('hashchange', applyCallRoute);
   applyCallRoute();
