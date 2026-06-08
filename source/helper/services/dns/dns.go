@@ -484,15 +484,15 @@ func (s *Service) PollPeers(ctx context.Context) {
 func (s *Service) pollOnce(ctx context.Context) {
 	port := s.eng.TunnelHTTPPort()
 	if port == "" {
-		log.Printf("dns-poll: tunnel HTTP port not set — skipping")
+		// log.Printf("dns-poll: tunnel HTTP port not set — skipping")
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
-		log.Printf("dns-poll: 0 peers online — skipping tick")
+		// log.Printf("dns-poll: 0 peers online — skipping tick")
 		return
 	}
-	log.Printf("dns-poll: polling %d peer(s) on port %s", len(targets), port)
+	// log.Printf("dns-poll: polling %d peer(s) on port %s", len(targets), port)
 	client := &http.Client{Timeout: 3 * time.Second}
 	for _, t := range targets {
 		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
@@ -511,7 +511,7 @@ func (s *Service) pollOnce(ctx context.Context) {
 			continue
 		}
 		s.upsertPeer(t.Pub, t.Name, list)
-		log.Printf("dns: peer %s published %d domain(s)", t.Name, len(list))
+		// log.Printf("dns: peer %s published %d domain(s)", t.Name, len(list))
 	}
 }
 

@@ -39,8 +39,18 @@
 
             #tab-vnc .ax-frame { display: flex; flex-direction: column; height: 100%; }
             #vnc-status { color: #7f8a9e; margin-left: 10px; }
-            #vnc-fs {
+            #vnc-quality {
                 margin-left: auto;
+                background: #11151c;
+                color: #cbd3e1;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 6px;
+                font: inherit;
+                cursor: pointer;
+            }
+            #vnc-fs {
+                margin-left: 8px;
                 background: transparent;
                 color: #9aa6bb;
                 border: 1px solid #2a3140;
@@ -1113,6 +1123,12 @@
                     <div class="ax-section-title">
                         <span id="vnc-title">— desktop</span>
                         <span class="ax-meta" id="vnc-status"></span>
+                        <select id="vnc-quality" title="picture quality / bandwidth">
+                            <option value="high">high</option>
+                            <option value="medium" selected>medium</option>
+                            <option value="low">low</option>
+                            <option value="ultra">ultra low</option>
+                        </select>
                         <button id="vnc-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                         <button id="vnc-disconnect" type="button">disconnect</button>
                     </div>

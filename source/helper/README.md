@@ -67,6 +67,12 @@ overlay-подсеть `100.64.0.0/10`) могут жить несколько p
   сессия **живёт на хосте** независимо от клиента: reload/сон → реаттач с
   перерисовкой экрана из ring-буфера (без «фарша»). По умолчанию шелл
   стартует через системный `login` (парольная аутентификация ОС).
+- **Remote desktop (desktops)** — графический доступ к машине через
+  noVNC в той же морде. Сервис `services/vnc` — тонкий TCP-прокси к
+  **родному VNC-серверу ОС** (macOS Screen Sharing `:5900`, x11vnc/
+  wayvnc на Linux): захват/кодирование/аутентификацию делает сам сервер,
+  мы лишь проксируем RFB по шине. Полный контроль (мышь+клава), auth —
+  родная (VNC-пароль / Apple ARD).
 - **Drop — file sharing через BitTorrent** в пределах camp-а. Каждый
   peer держит свой каталог раздачи (`anacrolix/torrent`, без DHT и
   публичных tracker'ов, чистый peer-wire протокол). Скачивание
@@ -282,6 +288,26 @@ IPv4-only).
   сервису гейтится политикой `shell` в `<camp_id>/config.json`
   (`enabled` + allowlist пабов); сейчас для теста permissive-дефолт.
 
+### `desktops`
+
+Графический доступ к машинам camp-а через noVNC (сервис `services/vnc`).
+В сайдбаре — секция **desktops** со списком пиров, у кого реально слушает
+VNC-сервер (опрашиваются по шине, `vnc.status` делает dial-тест `:5900`).
+Клик → таб с noVNC-вьювером.
+
+- **Тонкий прокси, не свой захват** — `services/vnc` просто переливает RFB
+  между bus-стримом и локальным VNC-сервером ОС (macOS Screen Sharing
+  `:5900`, x11vnc/wayvnc на Linux). Захват/кодирование/аутентификацию
+  делает сам сервер. Файрвол не трогаем — едет по шине.
+- **Полный контроль** (мышь+клава) по умолчанию; `⛶` — fullscreen.
+- **Качество/битрейт** — селектор high/medium/low/ultra low
+  (`qualityLevel`/`compressionLevel` noVNC; влияет, когда сервер гонит
+  Tight/JPEG).
+- **Авторизация** — родная VNC: пароль, либо Apple ARD (юзернейм аккаунта
+  Mac + пароль), вводятся в маскированной модалке. macOS: включи в Screen
+  Sharing «VNC viewers may control screen with password» либо логинься
+  аккаунтом Mac. Доступ гейтит политика `vnc` в `<camp_id>/config.json`.
+
 ## Headless / автозапуск
 
 Если интерактивный picker не нужен (сервер без TTY, login-item, скрипт):
@@ -443,6 +469,8 @@ Loopback (`127.0.0.1:2202`):
 | GET | `/api/signal/stream` | SSE сигналов для браузера |
 | GET | `/api/shell/peers` | пиры, у кого remote-shell открыт нам (опрос по шине) |
 | GET | `/api/shell/ws` | WebSocket-мост браузер↔bus-стрим к PTY пира (`?peer=&session=&cols=&rows=`) |
+| GET | `/api/vnc/peers` | пиры с живым VNC-сервером (`vnc.status` по шине) |
+| GET | `/api/vnc/ws` | WebSocket-мост браузер(noVNC)↔bus-стрим к `:5900` пира (`?peer=`) |
 
 Tunnel listener (`<tunnel_ip>:2202`, поднимается с engine):
 
