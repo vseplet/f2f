@@ -99,7 +99,10 @@ func New(r Resolver) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bus: cert: %w", err)
 	}
-	qc := &quic.Config{MaxIdleTimeout: 90 * time.Second, KeepAlivePeriod: 20 * time.Second}
+	// Tight keepalive + idle so a broken link is detected and re-dialed in
+	// ~20s instead of lingering as a 90s zombie that blocks every bus op.
+	// Frequent keepalive (5s) also keeps marginal links from flapping.
+	qc := &quic.Config{MaxIdleTimeout: 20 * time.Second, KeepAlivePeriod: 5 * time.Second}
 	s := &Service{
 		resolver:       r,
 		tlsServer:      &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
@@ -161,7 +164,7 @@ func (s *Service) Start(overlayIP string) error {
 // pingLoop dials + probes every known peer over QUIC every few seconds, so
 // the mesh forms automatically and the traffic is visible in the logs.
 func (s *Service) pingLoop(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -434,6 +437,13 @@ func (s *Service) dial(ctx context.Context, pub string) (*quic.Conn, error) {
 	}
 	s.conns[pub] = conn
 	s.mu.Unlock()
+	// Reap the moment it dies (idle-timeout, peer close, …) so it never
+	// lingers in the cache as a zombie that blocks the next bus op — the
+	// inbound side is reaped by serveConn's accept loop, dialed ones weren't.
+	go func() {
+		<-conn.Context().Done()
+		s.forgetConn(pub, conn)
+	}()
 	return conn, nil
 }
 
