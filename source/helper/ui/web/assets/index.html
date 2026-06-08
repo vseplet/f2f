@@ -8,6 +8,23 @@
         <script src="/vendor/jquery.min.js"></script>
         <link rel="stylesheet" href="/vendor/bootstrap-icons/bootstrap-icons.min.css" />
         <link rel="stylesheet" href="/audio.css" />
+        <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+        <style>
+            #tab-term .ax-frame { display: flex; flex-direction: column; height: 100%; }
+            #term-status { color: #7f8a9e; margin-left: 10px; }
+            #term-close {
+                background: #2a1417;
+                color: #e88;
+                border: 1px solid #5a2630;
+                border-radius: 5px;
+                padding: 2px 10px;
+                cursor: pointer;
+                font: inherit;
+                margin-left: auto;
+            }
+            #term-body { flex: 1; min-height: 0; padding: 6px 8px; background: #0b0e14; }
+            #term-body .xterm { height: 100%; }
+        </style>
     </head>
     <body
         class="h-screen flex flex-col"
@@ -1036,6 +1053,20 @@
                 </div>
             </div>
             <!-- /#tab-chat -->
+            <!-- Remote terminal (services/shell over the bus), rendered in the
+                 main column like the other tabs. Opened from the sidebar
+                 "machines" rows (term.js). -->
+            <div id="tab-term" class="tab-panel hidden">
+                <div class="ax-frame">
+                    <div class="ax-section-title">
+                        <span id="term-title">— terminal</span>
+                        <span class="ax-meta" id="term-status"></span>
+                        <button id="term-close" type="button">close</button>
+                    </div>
+                    <div id="term-body"></div>
+                </div>
+            </div>
+
             <div id="tab-call" class="tab-panel hidden">
                 <div class="ax-frame ax-call">
                     <div class="ax-section-title ax-call-header">
@@ -1141,5 +1172,8 @@
         <script src="/app.js"></script>
         <script src="/meet2.js"></script>
         <script src="/call.js"></script>
+        <script src="/vendor/xterm/xterm.js"></script>
+        <script src="/vendor/xterm/addon-fit.js"></script>
+        <script src="/term.js"></script>
     </body>
 </html>

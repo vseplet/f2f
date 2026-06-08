@@ -31,7 +31,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/creack/pty"
 
@@ -122,20 +128,30 @@ func (s *Service) allowed(fromPub string) bool {
 	return s.allow[fromPub]
 }
 
-func (s *Service) cmd() string {
+func (s *Service) cmdArgs() []string {
 	s.pmu.Lock()
 	c := s.command
 	s.pmu.Unlock()
 	if c != "" {
-		return c
+		if f := strings.Fields(c); len(f) > 0 {
+			return f
+		}
 	}
+	// Secure default: the system `login`, so the connecting peer must
+	// authenticate as a real OS user (username + password). Runs as root —
+	// login drops privileges itself after a successful auth.
 	if p, err := exec.LookPath("login"); err == nil {
-		return p
+		if runtime.GOOS == "linux" {
+			return []string{p, "-p"} // -p: keep our env (TERM) for the post-login shell
+		}
+		return []string{p}
 	}
+	// Fallback when login is unavailable: an interactive shell (run as the
+	// invoking user via dropToInvokingUser, not root).
 	if sh := os.Getenv("SHELL"); sh != "" {
-		return sh
+		return []string{sh}
 	}
-	return "/bin/sh"
+	return []string{"/bin/sh"}
 }
 
 // handleStatus answers whether the shell is available to the caller (only
@@ -167,6 +183,12 @@ func (s *Service) handleOpen(fromPub string, open []byte, st *bus.Stream) {
 	se.attach(st)
 	defer se.detach(st)
 	se.resize(o.Cols, o.Rows)
+	// If the PTY dies, end this stream so the client sees a disconnect (and
+	// reattaches to a fresh session) instead of a silent dead terminal.
+	go func() {
+		<-se.done
+		_ = st.Close()
+	}()
 
 	// Pump client→server framed input until the stream ends.
 	for {
@@ -191,7 +213,7 @@ func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
 	if se := s.sessions[id]; se != nil {
 		return se, nil
 	}
-	se, err := newSession(id, s.cmd(), cols, rows)
+	se, err := newSession(id, s.cmdArgs(), cols, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +227,7 @@ func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
 		s.mu.Unlock()
 		log.Printf("shell: session %s ended", id)
 	}()
-	log.Printf("shell: session %s started (%s)", id, se.cmd.Path)
+	log.Printf("shell: session %s started %v", id, se.cmd.Args)
 	return se, nil
 }
 
@@ -222,9 +244,14 @@ type session struct {
 	attached io.Writer // current client output sink, or nil when detached
 }
 
-func newSession(id, command string, cols, rows uint16) (*session, error) {
-	c := exec.Command(command)
+func newSession(id string, argv []string, cols, rows uint16) (*session, error) {
+	c := exec.Command(argv[0], argv[1:]...)
 	c.Env = append(os.Environ(), "TERM=xterm-256color")
+	// `login` authenticates and switches user itself, so it must stay root;
+	// a raw shell fallback is dropped to the machine's owner instead.
+	if filepath.Base(argv[0]) != "login" {
+		dropToInvokingUser(c)
+	}
 	ptmx, err := pty.Start(c)
 	if err != nil {
 		return nil, fmt.Errorf("start pty: %w", err)
@@ -265,6 +292,36 @@ func (se *session) pump() {
 			return
 		}
 	}
+}
+
+// dropToInvokingUser makes the PTY run as $SUDO_USER (the human who started
+// f2f), not root. f2f runs as root via sudo, so it can setuid down. No-op
+// when not under sudo. pty.Start adds Setsid/Setctty to whatever
+// SysProcAttr we leave here, so the credential survives.
+//
+// This is privilege REDUCTION, not authentication — `login` (Shell.Command)
+// is the path that actually prompts for a password. Combined with the peer
+// allowlist, it keeps a remote shell at "the owner's account", not root.
+func dropToInvokingUser(c *exec.Cmd) {
+	su := os.Getenv("SUDO_USER")
+	if su == "" || su == "root" {
+		return
+	}
+	u, err := user.Lookup(su)
+	if err != nil {
+		return
+	}
+	uid, e1 := strconv.Atoi(u.Uid)
+	gid, e2 := strconv.Atoi(u.Gid)
+	if e1 != nil || e2 != nil {
+		return
+	}
+	c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	if u.HomeDir != "" {
+		c.Dir = u.HomeDir
+		c.Env = append(c.Env, "HOME="+u.HomeDir)
+	}
+	c.Env = append(c.Env, "USER="+su, "LOGNAME="+su)
 }
 
 func (se *session) appendRing(b []byte) {
