@@ -505,6 +505,12 @@
 .ax-tree-section:first-child {
     padding-top: 0;
 }
+/* Sub-section dividers take their parent category's accent colour (dimmed),
+   so meets/channels/direct read as part of "messages", etc. */
+.ax-tree-children[data-cat-children="messages"] .ax-tree-section { color: #e87ab8; opacity: 0.7; }
+.ax-tree-children[data-cat-children="tunnel"]   .ax-tree-section { color: #e08a4c; opacity: 0.7; }
+.ax-tree-children[data-cat-children="drop"]     .ax-tree-section { color: #e8c14e; opacity: 0.7; }
+.ax-tree-children[data-cat-children="domains"]  .ax-tree-section { color: #2fc7b0; opacity: 0.7; }
 /* A category placed directly under a section divider shouldn't add
    its own 8px top-margin — the section already provides spacing. */
 .ax-tree-section + .ax-tree-category {
