@@ -53,12 +53,23 @@
       term.loadAddon(fit);
     }
     term.open(elBody());
+    window.__term = term; // DEBUG: inspect term.modes.mouseTrackingMode in console
     term.onData((d) => {
+      // DEBUG: surface mouse reports xterm emits (ESC[< = SGR, ESC[M = X10).
+      if (d.indexOf('\x1b[<') === 0 || d.indexOf('\x1b[M') === 0) {
+        console.log('[term] mouse-out', JSON.stringify(d), 'mode=', term.modes && term.modes.mouseTrackingMode);
+      }
       if (ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d));
     });
     term.onResize(({ cols, rows }) => {
+      console.log('[term] resize', cols, rows); // DEBUG
       if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'resize', cols, rows }));
     });
+    // DEBUG: on every mousedown over the terminal, report what xterm thinks the
+    // mouse mode is — tells us if the mode was lost vs reports just not flowing.
+    elBody().addEventListener('mousedown', () => {
+      console.log('[term] mousedown · mouseTrackingMode=', term.modes && term.modes.mouseTrackingMode);
+    }, true);
     window.addEventListener('resize', () => {
       const t = document.getElementById('tab-term');
       if (t && !t.classList.contains('hidden')) doFit();
@@ -76,7 +87,17 @@
     }
   }
 
-  function doFit() { if (fit) { try { fit.fit(); } catch (_) {} } }
+  function doFit() {
+    if (!fit) return;
+    // Never fit a hidden/zero-size container: FitAddon then computes NaN cols/
+    // rows and xterm.resize(NaN, NaN) corrupts the grid geometry, which breaks
+    // mouse-coordinate mapping (mouse "stops working" after a tab switch). The
+    // term panel goes display:none when another tab is shown, and the
+    // ResizeObserver fires on that 0×0 transition.
+    const el = elBody();
+    if (!el || el.offsetWidth === 0 || el.offsetHeight === 0) return;
+    try { fit.fit(); } catch (_) {}
+  }
 
   // sendResize pushes the current grid to the host unconditionally. onResize
   // only fires when cols/rows CHANGE, so after a page reload (fresh xterm that
@@ -86,6 +107,16 @@
     if (term && ws && ws.readyState === 1) {
       ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
     }
+  }
+
+  // DEBUG: scan host→client bytes for sequences that would turn mouse tracking
+  // OFF — mouse DECRST (ESC[?1000l / 1002l / 1003l), full reset (ESC c) or soft
+  // reset (ESC[!p). Logs them so we can see exactly what kills the mouse.
+  function dbgScanIn(data) {
+    let s = data;
+    if (typeof s !== 'string') { try { s = new TextDecoder().decode(data); } catch (_) { return; } }
+    const hits = s.match(/\x1b\[\?(?:1000|1002|1003|1006)[hl]|\x1bc|\x1b\[!p/g);
+    if (hits) console.log('[term] IN mode-seq', hits.map((h) => JSON.stringify(h)).join(' '));
   }
 
   function connect() {
@@ -100,8 +131,8 @@
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { setStatus('connected'); doFit(); sendResize(); term.focus(); };
     ws.onmessage = (e) => {
-      if (typeof e.data === 'string') term.write(e.data);
-      else term.write(new Uint8Array(e.data));
+      if (typeof e.data === 'string') { dbgScanIn(e.data); term.write(e.data); }
+      else { const u = new Uint8Array(e.data); dbgScanIn(u); term.write(u); }
     };
     ws.onerror = () => { try { ws.close(); } catch (_) {} };
     ws.onclose = () => {
@@ -166,7 +197,12 @@
   function applyTermRoute() {
     const m = (location.hash || '').replace(/^#/, '').match(/^term:(.+)$/);
     if (m) open(decodeURIComponent(m[1]));
-    else if (curPub) disconnect(); // navigated away → drop client, host keeps the PTY
+    // Switching to another tab no longer drops the WS: the connection (and the
+    // live xterm state — mouse mode, alt-screen, …) is kept alive in the
+    // background, the panel just gets hidden. Reattaching would replay the ring
+    // WITHOUT the app's one-time mouse-enable, so the mouse would stop working
+    // on return. Teardown happens only via the explicit "leave"/"kill" button
+    // or when opening another peer.
   }
 
   // toggleFullscreen uses the native Fullscreen API on the terminal body
