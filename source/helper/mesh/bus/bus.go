@@ -31,6 +31,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -41,6 +42,17 @@ const (
 	alpn = "f2f-bus"
 	Port = "2203" // UDP port on the overlay IP
 )
+
+// debugOn gates verbose connection-lifecycle logging (dial/adopt/forget/drop
+// and the cause a connection died with). Off by default; set F2F_BUS_DEBUG=1
+// to trace why links flap without guessing. Read once at package load.
+var debugOn = os.Getenv("F2F_BUS_DEBUG") == "1"
+
+func dbg(format string, args ...any) {
+	if debugOn {
+		log.Printf("bus[dbg]: "+format, args...)
+	}
+}
 
 // Stream is the raw bidirectional stream handed to/returned by the stream
 // API (HandleStream / OpenStream). Aliased so callers needn't import
@@ -85,6 +97,7 @@ type Service struct {
 
 	mu             sync.Mutex
 	ln             *quic.Listener
+	ctx            context.Context // service lifetime; accept loops on dialed conns ride it
 	cancel         context.CancelFunc
 	running        bool
 	conns          map[string]*quic.Conn // pub → outbound connection (reused)
@@ -99,10 +112,7 @@ func New(r Resolver) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bus: cert: %w", err)
 	}
-	// Tight keepalive + idle so a broken link is detected and re-dialed in
-	// ~20s instead of lingering as a 90s zombie that blocks every bus op.
-	// Frequent keepalive (5s) also keeps marginal links from flapping.
-	qc := &quic.Config{MaxIdleTimeout: 20 * time.Second, KeepAlivePeriod: 5 * time.Second}
+	qc := &quic.Config{MaxIdleTimeout: 90 * time.Second, KeepAlivePeriod: 20 * time.Second}
 	s := &Service{
 		resolver:       r,
 		tlsServer:      &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
@@ -153,7 +163,7 @@ func (s *Service) Start(overlayIP string) error {
 		return fmt.Errorf("bus: listen %s: %w", addr, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ln, s.cancel, s.running = ln, cancel, true
+	s.ln, s.ctx, s.cancel, s.running = ln, ctx, cancel, true
 	s.mu.Unlock()
 	log.Printf("bus: QUIC listening on %s", addr)
 	go s.acceptLoop(ctx, ln)
@@ -164,7 +174,7 @@ func (s *Service) Start(overlayIP string) error {
 // pingLoop dials + probes every known peer over QUIC every few seconds, so
 // the mesh forms automatically and the traffic is visible in the logs.
 func (s *Service) pingLoop(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
+	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -258,9 +268,25 @@ func (s *Service) serveConn(ctx context.Context, conn *quic.Conn) {
 		s.adoptConn(fromPub, conn)
 		defer s.forgetConn(fromPub, conn)
 	}
+	s.acceptStreams(ctx, ip, fromPub, conn)
+}
+
+// acceptStreams runs a connection's inbound-stream loop, dispatching each
+// stream to its handler. Run for BOTH directions of a connection — the side
+// that accepted it (serveConn) AND the side that dialed it (dial) — because a
+// QUIC connection only carries streams in a direction if that end calls
+// AcceptStream. Without running it on dialed conns, the peer (which reuses the
+// same conn to send back to us) opens streams we'd never accept, so our
+// requests to it would silently time out. Returns when the conn dies.
+func (s *Service) acceptStreams(ctx context.Context, ip, fromPub string, conn *quic.Conn) {
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
+			// Why did this conn die? context.Cause exposes the QUIC reason
+			// (idle timeout vs peer CONNECTION_CLOSE vs path error) — the signal
+			// we need to tell a real fault from our own redial.
+			dbg("conn %s (%s) closed: accept=%v cause=%v",
+				ip, short(fromPub), err, context.Cause(conn.Context()))
 			return
 		}
 		go s.serveStream(fromPub, stream)
@@ -342,6 +368,13 @@ func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) 
 		return nil, err
 	}
 	defer st.Close()
+	// Bound the WHOLE exchange by ctx — crucially the response read. Without a
+	// stream deadline, readChunk blocks on a half-dead conn until the QUIC
+	// idle-timeout (tens of seconds), not the caller's ctx, which hangs callers
+	// (e.g. the 2s discovery poll) and lets requests pile up on a dying conn.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = st.SetDeadline(dl)
+	}
 	if err := writeFrame(st, header{Type: typ}, payload); err != nil {
 		return nil, err
 	}
@@ -425,10 +458,14 @@ func (s *Service) dial(ctx context.Context, pub string) (*quic.Conn, error) {
 	if ip == "" {
 		return nil, fmt.Errorf("bus: no overlay ip for %s", short(pub))
 	}
+	dbg("dial %s (%s) …", ip, short(pub))
+	start := time.Now()
 	conn, err := quic.DialAddr(ctx, net.JoinHostPort(ip, Port), s.tlsClient, s.quicConf)
 	if err != nil {
+		dbg("dial %s (%s) failed after %s: %v", ip, short(pub), time.Since(start).Round(time.Millisecond), err)
 		return nil, fmt.Errorf("bus: dial %s: %w", ip, err)
 	}
+	dbg("dial %s (%s) ok in %s", ip, short(pub), time.Since(start).Round(time.Millisecond))
 	s.mu.Lock()
 	if existing := s.conns[pub]; existing != nil { // lost a race; keep the first
 		s.mu.Unlock()
@@ -436,13 +473,20 @@ func (s *Service) dial(ctx context.Context, pub string) (*quic.Conn, error) {
 		return existing, nil
 	}
 	s.conns[pub] = conn
+	sctx := s.ctx
 	s.mu.Unlock()
-	// Reap the moment it dies (idle-timeout, peer close, …) so it never
-	// lingers in the cache as a zombie that blocks the next bus op — the
-	// inbound side is reaped by serveConn's accept loop, dialed ones weren't.
+	// A dialed conn is bidirectional too: the peer (which ACCEPTED it) reuses it
+	// to open streams back to us. Only the accepting end runs an accept loop, so
+	// without this our dialed conns would silently never deliver the peer's
+	// streams and its requests to us would time out. Serve them on the service
+	// lifetime (not the dial ctx, which is request-scoped), and forget the conn
+	// when it dies so the next call re-dials.
+	if sctx == nil {
+		sctx = context.Background()
+	}
 	go func() {
-		<-conn.Context().Done()
-		s.forgetConn(pub, conn)
+		defer s.forgetConn(pub, conn)
+		s.acceptStreams(sctx, ip, pub, conn)
 	}()
 	return conn, nil
 }
@@ -453,6 +497,7 @@ func (s *Service) dropConn(pub string) {
 	delete(s.conns, pub)
 	s.mu.Unlock()
 	if c != nil {
+		dbg("drop %s: closing conn (cause=%v)", short(pub), context.Cause(c.Context()))
 		_ = c.CloseWithError(0, "redial")
 	}
 }
