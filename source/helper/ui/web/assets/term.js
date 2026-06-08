@@ -118,14 +118,26 @@
     setStatus('');
   }
 
-  // closeButton: leave the terminal tab and go back to the default tab.
-  function closeButton() {
+  // leaveTab drops the client view and returns to the default tab. The host
+  // PTY keeps running (reattach later) — this is detach, not terminate.
+  function leaveTab() {
     disconnect();
     if ((location.hash || '').indexOf('#term:') === 0) location.hash = '';
     const t = document.getElementById('tab-term');
     if (t) t.classList.add('hidden');
     const first = document.querySelector('.ax-tab');
     if (first) first.click(); // back to the default tab
+  }
+
+  // killSession actually terminates the PTY on the host, then leaves the tab.
+  // The persisted session id is dropped so the next open starts fresh rather
+  // than reattaching to a dead session.
+  function killSession() {
+    if (ws && ws.readyState === 1) {
+      try { ws.send(JSON.stringify({ t: 'kill' })); } catch (_) {}
+    }
+    if (curPub) { try { localStorage.removeItem('f2f.term.' + curPub); } catch (_) {} }
+    setTimeout(leaveTab, 150); // give the kill time to reach the host before we drop the WS
   }
 
   function applyTermRoute() {
@@ -146,8 +158,8 @@
   }
 
   function init() {
-    const close = document.getElementById('term-close');
-    if (close) close.addEventListener('click', closeButton);
+    const kill = document.getElementById('term-kill');
+    if (kill) kill.addEventListener('click', killSession);
     const fs = document.getElementById('term-fs');
     if (fs) fs.addEventListener('click', toggleFullscreen);
     document.addEventListener('fullscreenchange', () => setTimeout(doFit, 0));

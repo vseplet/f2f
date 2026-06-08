@@ -23,7 +23,7 @@
                 font: inherit;
             }
             #term-fs:hover { color: #cbd3e1; border-color: #3a4456; }
-            #term-close {
+            #term-kill {
                 background: #2a1417;
                 color: #e88;
                 border: 1px solid #5a2630;
@@ -33,6 +33,7 @@
                 font: inherit;
                 margin-left: 8px;
             }
+            #term-kill:hover { background: #3a1a1f; }
             #term-body { flex: 1; min-height: 0; padding: 6px 8px; background: #0b0e14; }
             #term-body .xterm { height: 100%; }
         </style>
@@ -1073,7 +1074,7 @@
                         <span id="term-title">— terminal</span>
                         <span class="ax-meta" id="term-status"></span>
                         <button id="term-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
-                        <button id="term-close" type="button">close</button>
+                        <button id="term-kill" type="button" title="terminate the session on the host">kill session</button>
                     </div>
                     <div id="term-body"></div>
                 </div>

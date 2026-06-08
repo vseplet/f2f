@@ -131,8 +131,14 @@ func (s *Server) handleShellWS(w http.ResponseWriter, r *http.Request) {
 				Cols uint16 `json:"cols"`
 				Rows uint16 `json:"rows"`
 			}
-			if json.Unmarshal(data, &c) == nil && c.T == "resize" {
+			if json.Unmarshal(data, &c) != nil {
+				continue
+			}
+			switch c.T {
+			case "resize":
 				_ = shell.WriteResize(st, c.Cols, c.Rows)
+			case "kill":
+				_ = shell.WriteKill(st)
 			}
 		}
 	}

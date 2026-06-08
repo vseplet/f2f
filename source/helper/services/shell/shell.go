@@ -54,6 +54,7 @@ const (
 const (
 	opData   = 'd'
 	opResize = 'r'
+	opKill   = 'k' // terminate the PTY session on the host
 )
 
 const ringCap = 128 * 1024 // recent output kept for repaint-on-reattach
@@ -203,8 +204,19 @@ func (s *Service) handleOpen(fromPub string, open []byte, st *bus.Stream) {
 			if len(data) >= 4 {
 				se.resize(be16(data[0:]), be16(data[2:]))
 			}
+		case opKill:
+			log.Printf("shell: session %s killed by %s", o.SessionID, short(fromPub))
+			se.kill()
+			return
 		}
 	}
+}
+
+func short(p string) string {
+	if len(p) > 12 {
+		return p[:12]
+	}
+	return p
 }
 
 func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
@@ -357,6 +369,18 @@ func (se *session) resize(cols, rows uint16) {
 	_ = pty.Setsize(se.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// kill terminates the whole PTY session (process group), so the shell and any
+// children it spawned go away. The pump then hits EOF and the session is
+// reaped from the map (see getOrCreate).
+func (se *session) kill() {
+	if se.cmd != nil && se.cmd.Process != nil {
+		pid := se.cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGKILL) // session leader → negative pid = the group
+		_ = se.cmd.Process.Kill()               // fallback: the leader itself
+	}
+	_ = se.ptmx.Close()
+}
+
 // --- client helpers (used by the web bridge) ---
 
 // Open dials a peer and attaches to (or creates) the given session,
@@ -393,6 +417,9 @@ func WriteResize(w io.Writer, cols, rows uint16) error {
 	binary.BigEndian.PutUint16(b[2:], rows)
 	return writeMsg(w, opResize, b[:])
 }
+
+// WriteKill asks the host to terminate the PTY session.
+func WriteKill(w io.Writer) error { return writeMsg(w, opKill, nil) }
 
 // --- framing (client→server) ---
 
