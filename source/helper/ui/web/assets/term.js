@@ -41,7 +41,9 @@
     if (term || !window.Terminal) return;
     term = new window.Terminal({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      // 'Symbols Nerd Font' last: a per-glyph fallback so powerline/devicon
+      // glyphs in TUIs render, while normal text stays in the system mono.
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "Symbols Nerd Font", monospace',
       fontSize: 13,
       scrollback: 5000,
       theme: { background: '#0b0e14', foreground: '#cbd3e1' },
@@ -61,9 +63,30 @@
       const t = document.getElementById('tab-term');
       if (t && !t.classList.contains('hidden')) doFit();
     });
+    // Refit on ANY container size change, not just window resize — dragging the
+    // sidebar resizes the main column without firing a window 'resize' event, so
+    // without this the grid keeps its old cols/rows and text spills off the edge.
+    if (window.ResizeObserver) {
+      let raf = 0;
+      const ro = new ResizeObserver(() => {
+        if (raf) return; // coalesce the burst of events during a drag
+        raf = requestAnimationFrame(() => { raf = 0; doFit(); });
+      });
+      ro.observe(elBody());
+    }
   }
 
   function doFit() { if (fit) { try { fit.fit(); } catch (_) {} } }
+
+  // sendResize pushes the current grid to the host unconditionally. onResize
+  // only fires when cols/rows CHANGE, so after a page reload (fresh xterm that
+  // happens to fit the same size the host already had) the host would never get
+  // told — push it explicitly on connect.
+  function sendResize() {
+    if (term && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+    }
+  }
 
   function connect() {
     if (closing || !term) return;
@@ -75,7 +98,7 @@
     setStatus('connecting…');
     ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { setStatus('connected'); doFit(); term.focus(); };
+    ws.onopen = () => { setStatus('connected'); doFit(); sendResize(); term.focus(); };
     ws.onmessage = (e) => {
       if (typeof e.data === 'string') term.write(e.data);
       else term.write(new Uint8Array(e.data));
