@@ -76,6 +76,9 @@ type Camp struct {
 	// long-term default is opt-in + an explicit allowlist of peer pubs.
 	// (Currently permissive-by-default for testing — see services/shell.)
 	Shell Shell `json:"shell"`
+	// Vnc gates the remote-desktop bridge (services/vnc). Permissive-by-
+	// default for testing too.
+	Vnc Vnc `json:"vnc"`
 }
 
 // Shell is the per-camp policy for the remote-terminal service. Command
@@ -86,6 +89,16 @@ type Shell struct {
 	Enabled bool     `json:"enabled"`
 	Allowed []string `json:"allowed,omitempty"` // peer pubs allowed to open a shell
 	Command string   `json:"command,omitempty"` // PTY program; empty = system login
+}
+
+// Vnc is the per-camp policy for the remote-desktop bridge (services/vnc),
+// which proxies a peer to the host's local VNC server (e.g. macOS Screen
+// Sharing on :5900). Auth is handled by that VNC server; Enabled/Allowed
+// gate who can reach it. Addr overrides the local VNC endpoint.
+type Vnc struct {
+	Enabled bool     `json:"enabled"`
+	Allowed []string `json:"allowed,omitempty"` // peer pubs allowed to open a desktop
+	Addr    string   `json:"addr,omitempty"`    // local VNC server; empty = 127.0.0.1:5900
 }
 
 // DefaultCampServerURL and DefaultCampStunAddr are the production

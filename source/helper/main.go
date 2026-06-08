@@ -36,6 +36,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
+	"github.com/vseplet/f2f/source/helper/services/vnc"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
 
@@ -178,7 +179,12 @@ func run(bind string, console bool, autostart bool) error {
 	shellSvc := shell.New(busSvc)
 	shellSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, bind)
+	// Remote-desktop bridge over the bus — proxies to the host's local VNC
+	// server (macOS Screen Sharing :5900 / x11vnc / …). noVNC in the UI.
+	vncSvc := vnc.New(busSvc)
+	vncSvc.Register()
+
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.

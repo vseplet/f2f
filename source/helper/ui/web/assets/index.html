@@ -36,6 +36,32 @@
             #term-kill:hover { background: #3a1a1f; }
             #term-body { flex: 1; min-height: 0; padding: 6px 8px; background: #0b0e14; }
             #term-body .xterm { height: 100%; }
+
+            #tab-vnc .ax-frame { display: flex; flex-direction: column; height: 100%; }
+            #vnc-status { color: #7f8a9e; margin-left: 10px; }
+            #vnc-fs {
+                margin-left: auto;
+                background: transparent;
+                color: #9aa6bb;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 9px;
+                cursor: pointer;
+                font: inherit;
+            }
+            #vnc-fs:hover { color: #cbd3e1; border-color: #3a4456; }
+            #vnc-disconnect {
+                background: #2a1417;
+                color: #e88;
+                border: 1px solid #5a2630;
+                border-radius: 5px;
+                padding: 2px 10px;
+                cursor: pointer;
+                font: inherit;
+                margin-left: 8px;
+            }
+            #vnc-disconnect:hover { background: #3a1a1f; }
+            #vnc-body { flex: 1; min-height: 0; background: #0b0e14; position: relative; overflow: hidden; }
         </style>
     </head>
     <body
@@ -1080,6 +1106,20 @@
                 </div>
             </div>
 
+            <!-- Remote desktop (services/vnc over the bus), noVNC viewer.
+                 Opened from the sidebar "desktops" rows (vnc.js). -->
+            <div id="tab-vnc" class="tab-panel hidden">
+                <div class="ax-frame">
+                    <div class="ax-section-title">
+                        <span id="vnc-title">— desktop</span>
+                        <span class="ax-meta" id="vnc-status"></span>
+                        <button id="vnc-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        <button id="vnc-disconnect" type="button">disconnect</button>
+                    </div>
+                    <div id="vnc-body"></div>
+                </div>
+            </div>
+
             <div id="tab-call" class="tab-panel hidden">
                 <div class="ax-frame ax-call">
                     <div class="ax-section-title ax-call-header">
@@ -1188,5 +1228,6 @@
         <script src="/vendor/xterm/xterm.js"></script>
         <script src="/vendor/xterm/addon-fit.js"></script>
         <script src="/term.js"></script>
+        <script type="module" src="/vnc.js"></script>
     </body>
 </html>

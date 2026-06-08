@@ -37,6 +37,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
+	"github.com/vseplet/f2f/source/helper/services/vnc"
 )
 
 //go:embed assets
@@ -62,6 +63,7 @@ type Server struct {
 	notify   *notify.Service
 	gossip   *gossip.Service
 	shell    *shell.Service
+	vnc      *vnc.Service
 	addr     string
 	srv      *http.Server
 
@@ -73,7 +75,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -88,6 +90,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		notify:      notifySvc,
 		gossip:      gossipSvc,
 		shell:       shellSvc,
+		vnc:         vncSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -204,6 +207,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// stream. Loopback-only — never exposed on the tunnel listener.
 	mux.HandleFunc("GET /api/shell/peers", s.handleShellPeers)
 	mux.HandleFunc("GET /api/shell/ws", s.handleShellWS)
+
+	// Remote desktop (services/vnc over the bus). /peers lists camp peers
+	// with a reachable VNC server; /ws bridges a browser noVNC to a bus
+	// stream. Loopback-only.
+	mux.HandleFunc("GET /api/vnc/peers", s.handleVncPeers)
+	mux.HandleFunc("GET /api/vnc/ws", s.handleVncWS)
 
 	// Local DNS / domain management. /api/my-domains is the UI side
 	// (read/write our own list); /api/domains is the read-only side
