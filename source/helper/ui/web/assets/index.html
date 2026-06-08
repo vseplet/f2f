@@ -8,6 +8,71 @@
         <script src="/vendor/jquery.min.js"></script>
         <link rel="stylesheet" href="/vendor/bootstrap-icons/bootstrap-icons.min.css" />
         <link rel="stylesheet" href="/audio.css" />
+        <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+        <style>
+            #tab-term .ax-frame { display: flex; flex-direction: column; height: 100%; }
+            #term-status { color: #7f8a9e; margin-left: 10px; }
+            #term-fs {
+                margin-left: auto;
+                background: transparent;
+                color: #9aa6bb;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 9px;
+                cursor: pointer;
+                font: inherit;
+            }
+            #term-fs:hover { color: #cbd3e1; border-color: #3a4456; }
+            #term-kill {
+                background: #2a1417;
+                color: #e88;
+                border: 1px solid #5a2630;
+                border-radius: 5px;
+                padding: 2px 10px;
+                cursor: pointer;
+                font: inherit;
+                margin-left: 8px;
+            }
+            #term-kill:hover { background: #3a1a1f; }
+            #term-body { flex: 1; min-height: 0; padding: 6px 8px; background: #0b0e14; }
+            #term-body .xterm { height: 100%; }
+
+            #tab-vnc .ax-frame { display: flex; flex-direction: column; height: 100%; }
+            #vnc-status { color: #7f8a9e; margin-left: 10px; }
+            #vnc-quality {
+                margin-left: auto;
+                background: #11151c;
+                color: #cbd3e1;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 6px;
+                font: inherit;
+                cursor: pointer;
+            }
+            #vnc-fs {
+                margin-left: 8px;
+                background: transparent;
+                color: #9aa6bb;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 9px;
+                cursor: pointer;
+                font: inherit;
+            }
+            #vnc-fs:hover { color: #cbd3e1; border-color: #3a4456; }
+            #vnc-disconnect {
+                background: #2a1417;
+                color: #e88;
+                border: 1px solid #5a2630;
+                border-radius: 5px;
+                padding: 2px 10px;
+                cursor: pointer;
+                font: inherit;
+                margin-left: 8px;
+            }
+            #vnc-disconnect:hover { background: #3a1a1f; }
+            #vnc-body { flex: 1; min-height: 0; background: #0b0e14; position: relative; overflow: hidden; }
+        </style>
     </head>
     <body
         class="h-screen flex flex-col"
@@ -1036,6 +1101,41 @@
                 </div>
             </div>
             <!-- /#tab-chat -->
+            <!-- Remote terminal (services/shell over the bus), rendered in the
+                 main column like the other tabs. Opened from the sidebar
+                 "machines" rows (term.js). -->
+            <div id="tab-term" class="tab-panel hidden">
+                <div class="ax-frame">
+                    <div class="ax-section-title">
+                        <span id="term-title">— terminal</span>
+                        <span class="ax-meta" id="term-status"></span>
+                        <button id="term-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        <button id="term-kill" type="button" title="terminate the session on the host">kill session</button>
+                    </div>
+                    <div id="term-body"></div>
+                </div>
+            </div>
+
+            <!-- Remote desktop (services/vnc over the bus), noVNC viewer.
+                 Opened from the sidebar "desktops" rows (vnc.js). -->
+            <div id="tab-vnc" class="tab-panel hidden">
+                <div class="ax-frame">
+                    <div class="ax-section-title">
+                        <span id="vnc-title">— desktop</span>
+                        <span class="ax-meta" id="vnc-status"></span>
+                        <select id="vnc-quality" title="picture quality / bandwidth">
+                            <option value="high">high</option>
+                            <option value="medium" selected>medium</option>
+                            <option value="low">low</option>
+                            <option value="ultra">ultra low</option>
+                        </select>
+                        <button id="vnc-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        <button id="vnc-disconnect" type="button">disconnect</button>
+                    </div>
+                    <div id="vnc-body"></div>
+                </div>
+            </div>
+
             <div id="tab-call" class="tab-panel hidden">
                 <div class="ax-frame ax-call">
                     <div class="ax-section-title ax-call-header">
@@ -1141,5 +1241,9 @@
         <script src="/app.js"></script>
         <script src="/meet2.js"></script>
         <script src="/call.js"></script>
+        <script src="/vendor/xterm/xterm.js"></script>
+        <script src="/vendor/xterm/addon-fit.js"></script>
+        <script src="/term.js"></script>
+        <script type="module" src="/vnc.js"></script>
     </body>
 </html>

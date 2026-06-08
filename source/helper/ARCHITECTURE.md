@@ -124,7 +124,7 @@ source/helper/
 │   │   ├── camp.go                # Service: announce-клиент, ростер → eng.ApplyCampRoster, персист PeerCatalog
 │   │   └── rendezvous/            # camp UDP announce (ростер в ответе; PeerInfo wire-формат)
 │   ├── bus/                     # ТРАНСПОРТ (L7): QUIC overlay:2203 — типизир. обмен по pub
-│   │   └── bus.go                 # Service: listener+dial, auto-mesh, tie-break, Request/Notify/Handle
+│   │   └── bus.go                 # Service: listener+dial, auto-mesh, tie-break, Request/Notify/Handle + OpenStream/HandleStream (raw bidi stream под PTY/файлы)
 │   └── gossip/                  # репликация NodeState (platform + peer-view) по шине
 │       └── gossip.go              # Service: Announce/Peer/All/OnChange; generic для app, типизир. для fabric
 │
@@ -150,12 +150,18 @@ source/helper/
 │   │   └── egress.go              # NAT install + ip-forwarding (бывший engine/egress)
 │   ├── messenger/              # пер-камповая SQLite (~/.f2f/<camp_id>/messenger.db)
 │   │   └── messenger.go          # Store: messages/channels, modernc sqlite (no cgo)
-│   └── notify/                 # хаб уведомлений (in-memory ring + SSE), слушает шину
-│       └── notify.go            # Service: Push/Recent/Subscribe, FromBus
+│   ├── notify/                 # хаб уведомлений (in-memory ring + SSE), слушает шину
+│   │   └── notify.go            # Service: Push/Recent/Subscribe, FromBus
+│   ├── shell/                  # remote-terminal (mosh-подобный PTY по шине)
+│   │   └── shell.go             # Service: HandleStream("shell.open") — PTY + detached-сессии (session_id) + ring-buffer reattach + kill; login/drop-to-user
+│   └── vnc/                    # remote-desktop (тонкий TCP-прокси к VNC-серверу хоста)
+│       └── vnc.go               # Service: HandleStream("vnc.open") — bus-стрим ⟷ localhost:5900; vnc.status (dial-тест)
 │
 └── ui/web/                    # HTTP UI + reverse-proxy
     ├── server.go                # роутер, statusView мерджит engine.Status + service-данные
-    └── assets/                  # SPA (embed'ятся в бинарь)
+    ├── shell.go                 # /api/shell/peers (discovery по шине) + /api/shell/ws (мост браузер↔bus-стрим к PTY)
+    ├── vnc.go                   # /api/vnc/peers + /api/vnc/ws (мост браузер↔bus-стрим к VNC-серверу пира)
+    └── assets/                  # SPA (embed'ятся; vendor/xterm — терминал; noVNC завендорен)
 ```
 
 **Тиры.** `mesh/` — **фабрика пиров**: всё про связь узлов, без app logic.
@@ -313,6 +319,8 @@ SetAWGAllowedCIDRsHook(fn)                // services/tunnel инжектит in
 | **bus** | **QUIC data bus** на `overlay-IP:2203` — единый пир-к-пир транспорт (заменяет HTTP-over-tunnel). Авто-меш: пинг всех достижимых пиров раз в 30с, tie-break (младший pub дозванивается → одно соединение на пару), кэш коннектов (вход/исход переиспользуются — стримы двунаправленные). API: `Request`/`Notify`/`Handle(type, fn)`. TLS — self-signed + skip-verify: **аутентичность/шифрование уже даёт оверлей** (overlay-IP ≡ pub, WireGuard), идентичность пира = overlay-IP входящего коннекта. `Events`-хук отдаёт пинги в notify. |
 | **messenger** | Пер-камповая SQLite `~/.f2f/<camp_id>/messenger.db` (драйвер `modernc.org/sqlite`, без cgo), ленивое открытие + кэш хендлов. Таблицы `messages` (dm/channel) и `channels`. Локальное хранилище чата; обмен — поверх шины. |
 | **notify** | Хаб уведомлений: in-memory кольцо (200) + fan-out в UI по SSE. Источники: шина (`Handle("notify")` — пир прислал) и bus-события (пинги). Отдаёт `/api/notifications` + `/api/notifications/stream`. Транспорт-агностичен (локальные сервисы зовут `Push` напрямую). |
+| **shell** | Remote-terminal по шине. `HandleStream("shell.open")` — спавнит PTY (по умолчанию системный `login`; fallback-шелл дропается до `SUDO_USER`), держит **detached-сессии** по `session_id` с ring-буфером (reattach перерисовывает экран — переживает сон/reload). Протокол на стриме: сервер→клиент сырой вывод PTY, клиент→сервер фреймы `d`/`r`/`k` (data/resize/kill). `shell.status` (Request) — discovery. Доступ гейтит `config.Camp.Shell` (enabled + allowlist пабов). Web-слой мостит браузерный xterm.js (WS) в этот стрим. |
+| **vnc** | Remote-desktop по шине — **тонкий TCP-прокси**, не свой захват. `HandleStream("vnc.open")` — переливает RFB между bus-стримом и локальным VNC-сервером ОС (`127.0.0.1:5900`: macOS Screen Sharing / x11vnc / wayvnc). Захват/кодирование/аутентификацию делает сам сервер. `vnc.status` (Request) — dial-тест `:5900` (показываем в списке только машины с живым десктопом). Доступ гейтит `config.Camp.Vnc`. Web-слой мостит браузерный noVNC (WS) в этот стрим; качество (`qualityLevel`/`compressionLevel`) и auth (VNC-пароль / Apple ARD) — на стороне noVNC (завендорен под `/vendor/novnc`). |
 
 ### config/ + identity/ + platform/
 

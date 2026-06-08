@@ -11,6 +11,7 @@
 //
 // Routes mirror chats:  #call:dm:<pub>  /  #call:group:<id>
 $(function () {
+  console.log('%c[grp] call.js INSTRUMENTED build loaded', 'color:#7fc474;font-weight:bold');
   const PUB_RE = /^[0-9a-f]{64}$/;
 
   // ---- DOM ----
@@ -310,7 +311,7 @@ $(function () {
 
     // start a NEW outgoing call.
     async start(kind, idOrName, title) {
-      if (this.active) this.hangup(true); // one call at a time
+      if (this.active) await this.hangup(true); // one call at a time — fully tear the old one down BEFORE joining the new (shared Group singleton)
       if (kind === 'dm') {
         let pub = idOrName;
         if (!PUB_RE.test(idOrName)) {
@@ -334,19 +335,19 @@ $(function () {
 
     // hang up. For dm we notify the peer over the p2p channel; for group the
     // SFU leave happens in Group.leave (via endLocal).
-    hangup(silent) {
+    async hangup(silent) {
       if (this.active && this.active.kind === 'dm') {
         let pub = this.active.pub || currentPeerPub;
         if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
       }
-      this.endLocal(silent);
+      await this.endLocal(silent);
     },
 
     // tear everything down locally without signalling (used on a remote hangup).
     // silent = we're switching to another call, so skip the "ended" screen.
-    endLocal(silent) {
+    async endLocal(silent) {
       const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
-      if (this.active && this.active.kind === 'group') Group.leave(true);
+      if (this.active && this.active.kind === 'group') await Group.leave(true);
       else teardown();
       clearCall();
       this.active = null;
@@ -402,17 +403,38 @@ $(function () {
       return r.json();
     },
 
-    async start() {
+    async start(target) {
       try {
         const s = await (await fetch('/api/status')).json();
         this.myIP = (s && s.local_ip) || '';
         this.myName = (s && s.camp_name) || 'you';
       } catch (_) {}
-      let calls = [];
-      try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
-      const existing = calls.find(c => c.sfu_host);
-      if (existing) { this.sfuHost = existing.sfu_host; await this.join(); }
+      // Resolve the clicked target to an existing call and JOIN it — this is
+      // the meet2 behaviour that the port dropped. `target` may be a call_id,
+      // an sfu_host IP, or a bare channel name (there is no backend room
+      // binding yet). A specific target (digit-leading: call_id or IP) is
+      // worth a few discovery retries because a peer's call may not have been
+      // polled yet; a channel name only falls back to the camp's single
+      // active call, else we create a fresh one.
+      const specific = /^\d/.test(target || '');
+      const call = await this.findCall(target, specific ? 4 : 1);
+      console.log('[grp] start target=%s myIP=%s → %s', target, this.myIP, call ? 'JOIN host ' + call.sfu_host : 'CREATE new (no existing call found)');
+      if (call) { this.sfuHost = call.sfu_host; await this.join(); }
       else { await this.create(); }
+    },
+    // findCall locates the call to join: first an exact match on the target
+    // (call_id or sfu_host), then any active call in the camp. Retries to ride
+    // out the ~3s remote-call discovery lag before we give up and create one.
+    async findCall(target, tries) {
+      for (let i = 0; i < tries; i++) {
+        let calls = [];
+        try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
+        const c = calls.find(x => x.call_id === target || x.sfu_host === target)
+               || calls.find(x => x.sfu_host);
+        if (c) return c;
+        if (i < tries - 1) await new Promise(r => setTimeout(r, 1200));
+      }
+      return null;
     },
 
     async create() {
@@ -426,10 +448,13 @@ $(function () {
       const target = this.sfuHost;
       if (this.inCall) await this.leave(true);
       this.sfuHost = target;
-      await this.jget('/api/call/join', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tunnel_ip: this.myIP, name: this.myName, sfu_host: this.sfuHost }),
-      });
+      try {
+        await this.jget('/api/call/join', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tunnel_ip: this.myIP, name: this.myName, sfu_host: this.sfuHost }),
+        });
+        console.log('[grp] join POST ok → sfu', this.sfuHost);
+      } catch (e) { console.warn('[grp] join POST FAILED to', this.sfuHost, ':', e.message); throw e; }
       await this.joinSFU();
     },
     async joinSFU() {
@@ -464,9 +489,10 @@ $(function () {
         if (this.sfuHost !== this.myIP && this.myIP && e.candidate.candidate.indexOf(this.myIP) === -1) return;
         this.sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
       };
-      conn.ontrack = (e) => { if (e.streams && e.streams[0]) this.addRemoteStream(e.streams[0]); };
+      conn.ontrack = (e) => { console.log('[grp] ontrack', e.track.kind, e.streams[0] && e.streams[0].id); if (e.streams && e.streams[0]) this.addRemoteStream(e.streams[0]); };
       conn.onconnectionstatechange = () => {
         const st = conn.connectionState;
+        console.log('[grp] pc', st);
         if (st === 'connected') this.reconnectAttempts = 0;
         else if (st === 'failed') this.scheduleReconnect();
         else if (st === 'closed') Call.hangup();
@@ -490,9 +516,10 @@ $(function () {
     async sendSignal(msg) {
       try {
         const r = await fetch('/api/call/signal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
-        if (r.status === 204 || !r.ok) return null;
+        if (!r.ok) { console.warn('[grp] signal', msg.kind, '→ HTTP', r.status, await r.text().catch(() => '')); return null; }
+        if (r.status === 204) return null;
         return r.json();
-      } catch (_) { return null; }
+      } catch (e) { console.warn('[grp] signal send failed', e.message); return null; }
     },
     startSignalStream() {
       if (this.signalES) return;
@@ -506,6 +533,7 @@ $(function () {
 
     async handleSignal(msg) {
       const pc = this.pc;
+      console.log('[grp] <sfu', msg.kind, 'from=' + msg.from, 'pc=' + (pc && pc.signalingState));
       if (!pc || msg.from !== 'sfu') return;
       if (msg.kind === 'offer') {
         if (pc.signalingState === 'have-local-offer') { try { await pc.setLocalDescription({ type: 'rollback' }); } catch (_) {} }
@@ -661,7 +689,7 @@ $(function () {
       this.stopPolling();
       if (this.screenStream) this.stopShare();
       this.stopSignalStream();
-      if (this.pc) { try { this.pc.close(); } catch (_) {} this.pc = null; }
+      if (this.pc) { try { this.pc.onconnectionstatechange = null; this.pc.ontrack = null; this.pc.close(); } catch (_) {} this.pc = null; }
       if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
       this.clearTiles();
       videoSelf.srcObject = null; tileSelf.classList.remove('has-video');
@@ -941,12 +969,20 @@ $(function () {
     if (!m) return;
     const [, kind, id] = m;
     const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
+    // Paint the stage FIRST so the tiles window is shown regardless of join
+    // timing — Call.start below sets the same hash, so it would NOT re-fire this
+    // router, and the stage must already be up by then.
     activateCallTab();
     showStageView();
     // The fixed p2p peer tile is dm-only; group renders dynamic participant tiles.
     $('#call-tile-peer').toggle(kind === 'dm');
     $('#call-title').text((kind === 'group' ? '# ' : '') + title);
     $('#call-peer-name').text((kind === 'group' ? '# ' : '') + title);
+    // A group route we're not already in means the user navigated here (clicked
+    // a meet in the sidebar, or reloaded mid-call) WITHOUT joining — join now.
+    if (kind === 'group' && !(Call.active && Call.active.kind === 'group' && Call.active.id === id)) {
+      Call.start('group', id, id);
+    }
   }
   window.addEventListener('hashchange', applyCallRoute);
   applyCallRoute();
@@ -973,7 +1009,8 @@ $(function () {
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null'); } catch (_) {}
     if (!saved) return;
-    if (saved.kind === 'group') { Call.start('group', saved.id, saved.title); return; }
+    // Group calls re-join via the URL hash through applyCallRoute() above, so
+    // only dm needs explicit rejoin here (avoids a double Call.start on reload).
     if (saved.kind !== 'dm') return;
     const pub = PUB_RE.test(saved.pub || '') ? saved.pub : saved.id; // reconnect by pub
     Call.start('dm', pub, saved.title);

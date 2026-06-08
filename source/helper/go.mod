@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/amnezia-vpn/amneziawg-go v1.0.4
 	github.com/charmbracelet/huh v1.0.0
+	github.com/creack/pty v1.1.24
 	github.com/pion/interceptor v0.1.40
 	github.com/pion/webrtc/v4 v4.0.0
 	github.com/quic-go/quic-go v0.59.1
@@ -78,7 +79,7 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/gorilla/websocket v1.5.0
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.3 // indirect
 	github.com/mattn/go-isatty v0.0.20

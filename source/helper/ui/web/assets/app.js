@@ -400,6 +400,8 @@ $(function () {
 
   let liveIntercepts = []; // last seen from /api/status
   let livePeers = [];      // last seen camp peers from /api/status
+  let shellPeers = [];     // peers whose remote shell is open to us (/api/shell/peers)
+  let vncPeers = [];       // peers with a reachable VNC desktop (/api/vnc/peers)
   const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
   // Camp identity is loaded from the backend (/api/status) on render;
@@ -861,8 +863,23 @@ $(function () {
       section('intercepts') + addRow('add/remove intercept', 'tunnel') + interceptsBody
       + section('ports')      + portsBody;
 
+    // shells — peers whose remote shell (services/shell) is open to us.
+    // Each row opens a terminal (term.js) over the bus. Populated by the
+    // /api/shell/peers poll below.
+    const shellsBody = (shellPeers && shellPeers.length)
+      ? shellPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'term:' + p.pub)).join('')
+      : empty('none');
+
+    // desktops — peers with a reachable VNC server (services/vnc). Each row
+    // opens a noVNC viewer (vnc.js) over the bus.
+    const desktopsBody = (vncPeers && vncPeers.length)
+      ? vncPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
+      : empty('none');
+
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
+      + category('shells',    'shells',    shellPeers.length || null, shellsBody)
+      + category('desktops',  'desktops',  vncPeers.length || null, desktopsBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
           section('available') + peerFilesBody
@@ -2108,6 +2125,22 @@ $(function () {
   refreshMyFiles();
   refreshDownloads();
   refreshFirewall();
+  function refreshShellPeers() {
+    $.getJSON('/api/shell/peers', (list) => {
+      shellPeers = Array.isArray(list) ? list : [];
+      if (lastStatus) renderSidebarTree(lastStatus);
+    }).fail(() => {});
+  }
+  function refreshVncPeers() {
+    $.getJSON('/api/vnc/peers', (list) => {
+      vncPeers = Array.isArray(list) ? list : [];
+      if (lastStatus) renderSidebarTree(lastStatus);
+    }).fail(() => {});
+  }
+  refreshShellPeers();
+  refreshVncPeers();
+  setInterval(refreshShellPeers, 5000);
+  setInterval(refreshVncPeers, 5000);
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);
