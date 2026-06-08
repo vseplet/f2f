@@ -400,8 +400,23 @@ $(function () {
 
   let liveIntercepts = []; // last seen from /api/status
   let livePeers = [];      // last seen camp peers from /api/status
-  let shellPeers = [];     // peers whose remote shell is open to us (/api/shell/peers)
-  let vncPeers = [];       // peers with a reachable VNC desktop (/api/vnc/peers)
+  // Shell/VNC discovery is STICKY: bus links flap, so we keep a peer listed
+  // for a short TTL after it was last seen reachable instead of dropping it
+  // the instant one poll comes back without it. {pub → {name, ts}}.
+  const PEER_TTL_MS = 35000;
+  let shellSeen = {};      // /api/shell/peers
+  let vncSeen = {};        // /api/vnc/peers
+  function markSeen(seen, list) {
+    if (!Array.isArray(list)) return;
+    const now = Date.now();
+    for (const p of list) { if (p && p.pub) seen[p.pub] = { name: p.name, ts: now }; }
+  }
+  function freshPeers(seen) {
+    const now = Date.now();
+    return Object.keys(seen)
+      .filter((pub) => now - seen[pub].ts < PEER_TTL_MS)
+      .map((pub) => ({ pub, name: seen[pub].name }));
+  }
   const expandedIntercepts = new Set(); // keys (spec|peer) currently expanded
 
   // Camp identity is loaded from the backend (/api/status) on render;
@@ -866,20 +881,22 @@ $(function () {
     // shells — peers whose remote shell (services/shell) is open to us.
     // Each row opens a terminal (term.js) over the bus. Populated by the
     // /api/shell/peers poll below.
-    const shellsBody = (shellPeers && shellPeers.length)
-      ? shellPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'term:' + p.pub)).join('')
+    const shellList = freshPeers(shellSeen);
+    const shellsBody = shellList.length
+      ? shellList.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'term:' + p.pub)).join('')
       : empty('none');
 
     // desktops — peers with a reachable VNC server (services/vnc). Each row
     // opens a noVNC viewer (vnc.js) over the bus.
-    const desktopsBody = (vncPeers && vncPeers.length)
-      ? vncPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
+    const vncList = freshPeers(vncSeen);
+    const desktopsBody = vncList.length
+      ? vncList.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
       : empty('none');
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
-      + category('shells',    'shells',    shellPeers.length || null, shellsBody)
-      + category('desktops',  'desktops',  vncPeers.length || null, desktopsBody)
+      + category('shells',    'shells',    shellList.length || null, shellsBody)
+      + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
           section('available') + peerFilesBody
@@ -2127,13 +2144,13 @@ $(function () {
   refreshFirewall();
   function refreshShellPeers() {
     $.getJSON('/api/shell/peers', (list) => {
-      shellPeers = Array.isArray(list) ? list : [];
+      markSeen(shellSeen, list); // sticky: never clears, only refreshes last-seen
       if (lastStatus) renderSidebarTree(lastStatus);
     }).fail(() => {});
   }
   function refreshVncPeers() {
     $.getJSON('/api/vnc/peers', (list) => {
-      vncPeers = Array.isArray(list) ? list : [];
+      markSeen(vncSeen, list);
       if (lastStatus) renderSidebarTree(lastStatus);
     }).fail(() => {});
   }
