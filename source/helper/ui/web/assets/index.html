@@ -12,6 +12,17 @@
         <style>
             #tab-term .ax-frame { display: flex; flex-direction: column; height: 100%; }
             #term-status { color: #7f8a9e; margin-left: 10px; }
+            #term-fs {
+                margin-left: auto;
+                background: transparent;
+                color: #9aa6bb;
+                border: 1px solid #2a3140;
+                border-radius: 5px;
+                padding: 2px 9px;
+                cursor: pointer;
+                font: inherit;
+            }
+            #term-fs:hover { color: #cbd3e1; border-color: #3a4456; }
             #term-close {
                 background: #2a1417;
                 color: #e88;
@@ -20,7 +31,7 @@
                 padding: 2px 10px;
                 cursor: pointer;
                 font: inherit;
-                margin-left: auto;
+                margin-left: 8px;
             }
             #term-body { flex: 1; min-height: 0; padding: 6px 8px; background: #0b0e14; }
             #term-body .xterm { height: 100%; }
@@ -1061,6 +1072,7 @@
                     <div class="ax-section-title">
                         <span id="term-title">— terminal</span>
                         <span class="ax-meta" id="term-status"></span>
+                        <button id="term-fs" type="button" title="fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                         <button id="term-close" type="button">close</button>
                     </div>
                     <div id="term-body"></div>

@@ -134,9 +134,23 @@
     else if (curPub) disconnect(); // navigated away → drop client, host keeps the PTY
   }
 
+  // toggleFullscreen uses the native Fullscreen API on the terminal body
+  // (like the video tiles in calls); xterm is refit after the mode change.
+  function toggleFullscreen() {
+    const el = elBody();
+    if (document.fullscreenElement) {
+      if (document.exitFullscreen) document.exitFullscreen();
+    } else if (el && el.requestFullscreen) {
+      el.requestFullscreen().catch(() => {});
+    }
+  }
+
   function init() {
-    const btn = document.getElementById('term-close');
-    if (btn) btn.addEventListener('click', closeButton);
+    const close = document.getElementById('term-close');
+    if (close) close.addEventListener('click', closeButton);
+    const fs = document.getElementById('term-fs');
+    if (fs) fs.addEventListener('click', toggleFullscreen);
+    document.addEventListener('fullscreenchange', () => setTimeout(doFit, 0));
     window.addEventListener('hashchange', applyTermRoute);
     applyTermRoute();
   }

@@ -862,16 +862,16 @@ $(function () {
       section('intercepts') + addRow('add/remove intercept', 'tunnel') + interceptsBody
       + section('ports')      + portsBody;
 
-    // machines — peers whose remote shell (services/shell) is open to us.
+    // shells — peers whose remote shell (services/shell) is open to us.
     // Each row opens a terminal (term.js) over the bus. Populated by the
     // /api/shell/peers poll below.
-    const machinesBody = (shellPeers && shellPeers.length)
-      ? shellPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), 'shell', null, 'term:' + p.pub)).join('')
+    const shellsBody = (shellPeers && shellPeers.length)
+      ? shellPeers.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'term:' + p.pub)).join('')
       : empty('none');
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
-      + category('machines',  'machines',  shellPeers.length || null, machinesBody)
+      + category('shells',    'shells',    shellPeers.length || null, shellsBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
           section('available') + peerFilesBody
