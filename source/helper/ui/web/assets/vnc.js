@@ -6,7 +6,14 @@
 // offline like the other libs). RFB opens its own WebSocket to our local
 // bridge, which pipes the raw RFB stream over the bus to the peer's VNC
 // server — the RFB handshake (incl. password auth) is end-to-end.
-import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/lib/rfb.js';
+// noVNC's npm `lib/` is CommonJS (exports.default = RFB), so CDN ESM-shims
+// can wrap it one level deep — unwrap until we have the actual constructor.
+import * as NoVNC from 'https://esm.sh/@novnc/novnc@1.5.0/lib/rfb.js';
+const RFB = (function resolve(m) {
+  let c = (m && m.default) != null ? m.default : m;
+  if (typeof c !== 'function' && c && typeof c.default === 'function') c = c.default;
+  return c;
+})(NoVNC);
 
 (function () {
   let rfb = null, curPub = '';
@@ -45,9 +52,24 @@ import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/lib/rfb.js';
     rfb.addEventListener('disconnect', (e) => {
       setStatus(e.detail && e.detail.clean ? 'disconnected' : 'disconnected (error)');
     });
-    rfb.addEventListener('credentialsrequired', () => {
-      const pw = window.prompt('VNC password:');
-      try { rfb.sendCredentials({ password: pw || '' }); } catch (_) {}
+    rfb.addEventListener('credentialsrequired', (e) => {
+      // macOS Screen Sharing (Apple ARD, security type 30) needs username +
+      // password; plain VNC auth needs only a password. Ask exactly what the
+      // server requested, and treat Cancel as "give up" (sending incomplete
+      // creds would just re-trigger this event forever).
+      const types = (e.detail && e.detail.types) || ['password'];
+      const creds = {};
+      if (types.includes('username')) {
+        const u = window.prompt('VNC username (the machine account):');
+        if (u === null) { setStatus('auth cancelled'); try { rfb.disconnect(); } catch (_) {} return; }
+        creds.username = u;
+      }
+      if (types.includes('password')) {
+        const p = window.prompt('VNC password:');
+        if (p === null) { setStatus('auth cancelled'); try { rfb.disconnect(); } catch (_) {} return; }
+        creds.password = p;
+      }
+      try { rfb.sendCredentials(creds); } catch (_) {}
     });
     rfb.addEventListener('securityfailure', (e) => {
       setStatus('auth failed' + (e.detail && e.detail.reason ? ': ' + e.detail.reason : ''));
