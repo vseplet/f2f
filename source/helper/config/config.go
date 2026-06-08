@@ -71,6 +71,21 @@ type Camp struct {
 	Firewall     []Firewall    `json:"firewall"`
 	TrustedPeers []TrustedPeer `json:"trusted_peers"`
 	PeerCatalog  []Peer        `json:"peer_catalog"`
+	// Shell gates the remote-terminal service (services/shell). Opening a
+	// shell on this machine is the single most dangerous capability, so the
+	// long-term default is opt-in + an explicit allowlist of peer pubs.
+	// (Currently permissive-by-default for testing — see services/shell.)
+	Shell Shell `json:"shell"`
+}
+
+// Shell is the per-camp policy for the remote-terminal service. Command
+// overrides what the PTY runs (default: the system `login`, so OS
+// authentication still applies). Enabled/Allowed will gate access once we
+// flip off the testing default.
+type Shell struct {
+	Enabled bool     `json:"enabled"`
+	Allowed []string `json:"allowed,omitempty"` // peer pubs allowed to open a shell
+	Command string   `json:"command,omitempty"` // PTY program; empty = system login
 }
 
 // DefaultCampServerURL and DefaultCampStunAddr are the production

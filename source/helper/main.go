@@ -34,6 +34,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
+	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/ui/web"
 )
@@ -171,7 +172,13 @@ func run(bind string, console bool, autostart bool) error {
 		return ns
 	})
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, bind)
+	// Remote-terminal service over the bus (mosh-like PTY, survives sleep).
+	// Registers its bus handlers now; the web layer bridges a browser
+	// xterm.js WebSocket to a bus stream opened here.
+	shellSvc := shell.New(busSvc)
+	shellSvc.Register()
+
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, bind)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.

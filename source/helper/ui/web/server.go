@@ -35,6 +35,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/pki"
+	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 )
 
@@ -60,6 +61,7 @@ type Server struct {
 	msg      *messenger.Store
 	notify   *notify.Service
 	gossip   *gossip.Service
+	shell    *shell.Service
 	addr     string
 	srv      *http.Server
 
@@ -71,7 +73,7 @@ type Server struct {
 	signalHTTP  *http.Client
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -85,6 +87,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		msg:         msgSvc,
 		notify:      notifySvc,
 		gossip:      gossipSvc,
+		shell:       shellSvc,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -195,6 +198,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
+
+	// Remote terminal (services/shell over the bus). /peers lists camp peers
+	// whose shell is open to us; /ws bridges a browser xterm.js to a bus
+	// stream. Loopback-only — never exposed on the tunnel listener.
+	mux.HandleFunc("GET /api/shell/peers", s.handleShellPeers)
+	mux.HandleFunc("GET /api/shell/ws", s.handleShellWS)
 
 	// Local DNS / domain management. /api/my-domains is the UI side
 	// (read/write our own list); /api/domains is the read-only side

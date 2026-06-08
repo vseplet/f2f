@@ -42,6 +42,11 @@ const (
 	Port = "2203" // UDP port on the overlay IP
 )
 
+// Stream is the raw bidirectional stream handed to/returned by the stream
+// API (HandleStream / OpenStream). Aliased so callers needn't import
+// quic-go directly.
+type Stream = quic.Stream
+
 // Resolver maps between a peer's f2f identity pub and its overlay IP, and
 // lists the peers we should keep a QUIC connection to.
 type Resolver interface {
@@ -57,6 +62,15 @@ type Resolver interface {
 // stream is reset.
 type HandlerFunc func(fromPub string, payload []byte) ([]byte, error)
 
+// StreamHandlerFunc handles an inbound long-lived stream (vs the one-shot
+// request/response of HandlerFunc). open is the initial frame's payload
+// (open parameters); st is the raw bidirectional QUIC stream, which the
+// handler OWNS for its whole lifetime — it must read/write and Close it
+// itself. Used for streaming workloads (PTY/shell, file transfer) where
+// request/response framing doesn't fit. fromPub is the authenticated
+// sender (by overlay IP).
+type StreamHandlerFunc func(fromPub string, open []byte, st *quic.Stream)
+
 // Service owns the QUIC listener and the per-peer outbound connections.
 type Service struct {
 	// Events, if set, is called for notable bus activity (ping results,
@@ -69,13 +83,14 @@ type Service struct {
 	tlsClient *tls.Config
 	quicConf  *quic.Config
 
-	mu       sync.Mutex
-	ln       *quic.Listener
-	cancel   context.CancelFunc
-	running  bool
-	conns    map[string]*quic.Conn // pub → outbound connection (reused)
-	handlers map[string]HandlerFunc
-	linkUp   map[string]bool // pub → last ping outcome (for up/down notifications)
+	mu             sync.Mutex
+	ln             *quic.Listener
+	cancel         context.CancelFunc
+	running        bool
+	conns          map[string]*quic.Conn // pub → outbound connection (reused)
+	handlers       map[string]HandlerFunc
+	streamHandlers map[string]StreamHandlerFunc
+	linkUp         map[string]bool // pub → last ping outcome (for up/down notifications)
 }
 
 // New builds the service. The self-signed cert is generated once.
@@ -86,13 +101,14 @@ func New(r Resolver) (*Service, error) {
 	}
 	qc := &quic.Config{MaxIdleTimeout: 90 * time.Second, KeepAlivePeriod: 20 * time.Second}
 	s := &Service{
-		resolver:  r,
-		tlsServer: &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
-		tlsClient: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13}, // overlay already authenticates
-		quicConf:  qc,
-		conns:     make(map[string]*quic.Conn),
-		handlers:  make(map[string]HandlerFunc),
-		linkUp:    make(map[string]bool),
+		resolver:       r,
+		tlsServer:      &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
+		tlsClient:      &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13}, // overlay already authenticates
+		quicConf:       qc,
+		conns:          make(map[string]*quic.Conn),
+		handlers:       make(map[string]HandlerFunc),
+		streamHandlers: make(map[string]StreamHandlerFunc),
+		linkUp:         make(map[string]bool),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
 	s.handlers["ping"] = func(_ string, payload []byte) ([]byte, error) { return payload, nil }
@@ -103,6 +119,16 @@ func New(r Resolver) (*Service, error) {
 func (s *Service) Handle(typ string, fn HandlerFunc) {
 	s.mu.Lock()
 	s.handlers[typ] = fn
+	s.mu.Unlock()
+}
+
+// HandleStream registers a stream handler for a message type. An inbound
+// stream whose header type matches is handed to fn as a raw bidirectional
+// QUIC stream (fn owns its lifetime, including Close), instead of going
+// through the one-shot request/response path. Use for streaming workloads.
+func (s *Service) HandleStream(typ string, fn StreamHandlerFunc) {
+	s.mu.Lock()
+	s.streamHandlers[typ] = fn
 	s.mu.Unlock()
 }
 
@@ -257,14 +283,22 @@ func (s *Service) forgetConn(pub string, conn *quic.Conn) {
 }
 
 func (s *Service) serveStream(fromPub string, st *quic.Stream) {
-	defer st.Close()
 	hdr, payload, err := readFrame(st)
 	if err != nil {
+		st.Close()
 		return
 	}
 	s.mu.Lock()
+	sfn := s.streamHandlers[hdr.Type]
 	fn := s.handlers[hdr.Type]
 	s.mu.Unlock()
+	// Stream handler: hand off the raw stream — it owns the lifetime (incl.
+	// Close), so we must NOT close it here.
+	if sfn != nil {
+		sfn(fromPub, payload, st)
+		return
+	}
+	defer st.Close()
 	if fn == nil {
 		log.Printf("bus: no handler for type %q from %s", hdr.Type, short(fromPub))
 		return
@@ -278,6 +312,23 @@ func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 		return
 	}
 	_ = writeChunk(st, resp)
+}
+
+// OpenStream opens a long-lived bidirectional stream to pub, writes the
+// open frame (type + open params), and returns the raw QUIC stream for the
+// caller to read/write directly. The caller OWNS the stream and must Close
+// it. Counterpart of HandleStream. Use for PTY/file-transfer style traffic
+// that doesn't fit Request/Notify.
+func (s *Service) OpenStream(ctx context.Context, pub, typ string, open []byte) (*quic.Stream, error) {
+	st, err := s.openStream(ctx, pub, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFrame(st, header{Type: typ}, open); err != nil {
+		st.Close()
+		return nil, err
+	}
+	return st, nil
 }
 
 // Request opens a stream to pub, sends a typed message and waits for the
