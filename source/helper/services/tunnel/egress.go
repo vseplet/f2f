@@ -20,12 +20,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/netip"
 	"os"
 	"sync"
 	"syscall"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -82,7 +82,7 @@ func (e *egress) ensureTargets(ips []netip.Addr, skipIface string) {
 		}
 		iface, err := platform.RouteGetIface(ip)
 		if err != nil {
-			log.Printf("egress: route lookup %s: %v", ip, err)
+			clog.Warn("egress", "route lookup %s: %v", ip, err)
 			continue
 		}
 		if iface == e.state.EgressIface || iface == skipIface || iface == "" {
@@ -93,7 +93,7 @@ func (e *egress) ensureTargets(ips []netip.Addr, skipIface string) {
 		}
 		e.targets[ip] = iface
 		changed = true
-		log.Printf("egress: per-target NAT %s via %s", ip, iface)
+		clog.Info("egress", "per-target NAT %s via %s", ip, iface)
 	}
 	if !changed {
 		e.mu.Unlock()
@@ -102,7 +102,7 @@ func (e *egress) ensureTargets(ips []netip.Addr, skipIface string) {
 	rules := e.natRulesLocked()
 	e.mu.Unlock()
 	if err := platform.InstallNAT(rules); err != nil {
-		log.Printf("egress: reinstall NAT with targets: %v", err)
+		clog.Warn("egress", "reinstall NAT with targets: %v", err)
 	}
 }
 
@@ -111,7 +111,7 @@ func (e *egress) ensureTargets(ips []netip.Addr, skipIface string) {
 // error returns.
 func openEgress(iface string, subnet netip.Prefix) (*egress, error) {
 	if err := sweepEgressLeftover(); err != nil {
-		log.Printf("WARN: pre-flight egress cleanup: %v", err)
+		clog.Warn("egress", "pre-flight egress cleanup: %v", err)
 	}
 
 	oldFwd, err := platform.GetIPForwarding()
@@ -147,7 +147,7 @@ func openEgress(iface string, subnet netip.Prefix) (*egress, error) {
 	}
 
 	if err := writeEgressState(e.state); err != nil {
-		log.Printf("WARN: write egress state file: %v", err)
+		clog.Warn("egress", "write egress state file: %v", err)
 	}
 	return e, nil
 }
@@ -190,18 +190,18 @@ func sweepEgressLeftover() error {
 		return fmt.Errorf("state file references running pid %d — refusing to touch; "+
 			"another f2f is using egress, or remove %s manually", s.PID, egressStatePath)
 	}
-	log.Printf("found stale egress state from pid %d, rolling back", s.PID)
+	clog.Info("egress", "found stale egress state from pid %d, rolling back", s.PID)
 	if err := platform.RemoveNAT(); err != nil {
-		log.Printf("WARN: sweep remove NAT: %v", err)
+		clog.Warn("egress", "sweep remove NAT: %v", err)
 	}
 	if s.FilterToken != "" {
 		if err := platform.DisableFilterEngine(platform.FilterEngineToken(s.FilterToken)); err != nil {
-			log.Printf("WARN: sweep disable filter engine: %v", err)
+			clog.Warn("egress", "sweep disable filter engine: %v", err)
 		}
 	}
 	if s.OldForwarding != "" {
 		if err := platform.SetIPForwarding(s.OldForwarding); err != nil {
-			log.Printf("WARN: sweep restore forwarding: %v", err)
+			clog.Warn("egress", "sweep restore forwarding: %v", err)
 		}
 	}
 	return os.Remove(egressStatePath)

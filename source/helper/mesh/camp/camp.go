@@ -20,12 +20,12 @@ package camp
 import (
 	"context"
 	"errors"
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/mesh/camp/rendezvous"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
@@ -131,7 +131,7 @@ func (s *Service) Start(c *config.Camp) error {
 					if reflex == "" {
 						reflex = self.PublicIP
 					}
-					log.Printf("camp: registered as %s in camp %s, reflex=%s", campName, campID, reflex)
+					clog.Info("camp", "registered as %s in camp %s, reflex=%s", campName, campID, reflex)
 				}
 			}
 		}
@@ -179,7 +179,7 @@ func (s *Service) Stop() error {
 		select {
 		case <-announceDone:
 		case <-time.After(2 * time.Second):
-			log.Printf("WARN: camp announce loop did not exit in 2s")
+			clog.Warn("camp", "announce loop did not exit in 2s")
 		}
 	}
 	return nil
@@ -285,7 +285,7 @@ func (s *Service) persistCatalog(peers []rendezvous.PeerInfo) {
 	if err := s.store.UpdateCamp(*idp, func(c *config.Camp) {
 		mergeRoster(c, peers)
 	}); err != nil {
-		log.Printf("camp: persist peer catalog: %v", err)
+		clog.Warn("camp", "persist peer catalog: %v", err)
 	}
 }
 

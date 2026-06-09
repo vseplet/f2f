@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
@@ -33,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
@@ -128,7 +128,7 @@ func (s *Service) Register() {
 		if eg != nil {
 			eg.ensureTargets(addrs, s.eng.UtunName())
 		}
-		log.Printf("resolve: %s → %s (asked over bus)", name, strings.Join(out, ", "))
+		clog.Info("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
 		return json.Marshal(out)
 	})
 }
@@ -168,7 +168,7 @@ func (s *Service) Stop() {
 	}
 	if eg != nil {
 		if err := eg.close(); err != nil {
-			log.Printf("egress close: %v", err)
+			clog.Warn("tunnel", "egress close: %v", err)
 		}
 	}
 	s.eng.SetAWGAllowedCIDRsHook(nil)
@@ -182,19 +182,19 @@ func (s *Service) Stop() {
 func (s *Service) startEgress() {
 	iface, err := platform.DefaultEgressInterface()
 	if err != nil {
-		log.Printf("egress: %v; skipping NAT (peers won't reach internet through this node)", err)
+		clog.Warn("egress", "%v; skipping NAT (peers won't reach internet through this node)", err)
 		return
 	}
 	subnet := netip.MustParsePrefix(engine.V4Subnet)
 	eg, err := openEgress(iface, subnet)
 	if err != nil {
-		log.Printf("egress: %v (peers won't reach internet through this node)", err)
+		clog.Warn("egress", "%v (peers won't reach internet through this node)", err)
 		return
 	}
 	s.mu.Lock()
 	s.egress = eg
 	s.mu.Unlock()
-	log.Printf("egress: NAT %s → %s, ip-forwarding=1", subnet, iface)
+	clog.Info("egress", "NAT %s → %s, ip-forwarding=1", subnet, iface)
 }
 
 // EgressActive reports whether NAT is currently installed for the
@@ -270,10 +270,10 @@ func (s *Service) Remove(id string) error {
 			continue
 		}
 		if err := routes.Remove(p); err != nil {
-			log.Printf("WARN: remove route %s: %v", prefStr, err)
+			clog.Warn("tunnel", "remove route %s: %v", prefStr, err)
 		}
 	}
-	log.Printf("removed intercept %s (%s)", id, info.Spec)
+	clog.Info("tunnel", "removed intercept %s (%s)", id, info.Spec)
 	if isDomainSpec(info.Spec) && s.OnDomainUnpinned != nil {
 		s.OnDomainUnpinned(strings.ToLower(info.Spec))
 	}
@@ -319,19 +319,19 @@ func (s *Service) addLocked(spec, peer string) (InterceptInfo, error) {
 	for _, p := range prefixes {
 		if p.Addr().Is6() {
 			if err := routes.AddReject(p); err != nil {
-				log.Printf("WARN: route -reject %s: %v", p, err)
+				clog.Warn("tunnel", "route -reject %s: %v", p, err)
 				continue
 			}
 			info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
-			log.Printf("route %s → reject (IPv6 fallback to IPv4)", p)
+			clog.Info("tunnel", "route %s → reject (IPv6 fallback to IPv4)", p)
 			continue
 		}
 		if err := routes.Add(p); err != nil {
-			log.Printf("WARN: route %s: %v", p, err)
+			clog.Warn("tunnel", "route %s: %v", p, err)
 			continue
 		}
 		info.Prefixes = append(info.Prefixes, p.String())
-		log.Printf("route %s → %s", p, utunName)
+		clog.Info("tunnel", "route %s → %s", p, utunName)
 	}
 	if len(info.Prefixes) == 0 {
 		return InterceptInfo{}, fmt.Errorf("%q: all route adds failed", spec)
@@ -402,7 +402,7 @@ func (s *Service) resolvePrefixes(spec, peer string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		log.Printf("resolved %s → %s (on %s)", spec, a, peer)
+		clog.Info("tunnel", "resolved %s → %s (on %s)", spec, a, peer)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("exit peer %s resolved %q to no usable addresses", peer, spec)
@@ -483,7 +483,7 @@ func (s *Service) restoreFromStore() {
 			continue
 		}
 		if !s.eng.HasPeerName(it.Peer) {
-			log.Printf("config: intercept %q via %s skipped (peer not in catalog)", it.Spec, it.Peer)
+			clog.Info("config", "intercept %q via %s skipped (peer not in catalog)", it.Spec, it.Peer)
 			continue
 		}
 		if _, err := s.addLocked(it.Spec, it.Peer); err != nil {
@@ -492,10 +492,10 @@ func (s *Service) restoreFromStore() {
 				// after hole punch). Keep the entry route-less; the
 				// RefreshDomainRoutes ticker retries every minute.
 				s.addPendingLocked(it.Spec, it.Peer)
-				log.Printf("config: intercept %q via %s pending (%v); will retry", it.Spec, it.Peer, err)
+				clog.Info("config", "intercept %q via %s pending (%v); will retry", it.Spec, it.Peer, err)
 				continue
 			}
-			log.Printf("config: restore intercept %q via %s: %v", it.Spec, it.Peer, err)
+			clog.Warn("config", "restore intercept %q via %s: %v", it.Spec, it.Peer, err)
 		}
 	}
 	s.eng.SyncAWG()
@@ -542,7 +542,7 @@ func (s *Service) refreshOnce() {
 	for _, d := range domains {
 		newPrefixes, err := s.resolvePrefixes(d.spec, d.peer)
 		if err != nil {
-			log.Printf("WARN: refresh %s: %v", d.spec, err)
+			clog.Warn("tunnel", "refresh %s: %v", d.spec, err)
 			continue
 		}
 		newSet := make(map[string]netip.Prefix, len(newPrefixes))
@@ -576,7 +576,7 @@ func (s *Service) refreshOnce() {
 			prefStr = strings.TrimSuffix(prefStr, " (reject)")
 			if p, err := netip.ParsePrefix(prefStr); err == nil {
 				if err := routes.Remove(p); err != nil {
-					log.Printf("WARN: refresh remove route %s: %v", p, err)
+					clog.Warn("tunnel", "refresh remove route %s: %v", p, err)
 				}
 			}
 		}
@@ -584,20 +584,20 @@ func (s *Service) refreshOnce() {
 		for _, p := range newPrefixes {
 			if p.Addr().Is6() {
 				if err := routes.AddReject(p); err != nil {
-					log.Printf("WARN: refresh route -reject %s: %v", p, err)
+					clog.Warn("tunnel", "refresh route -reject %s: %v", p, err)
 					continue
 				}
 				info.Prefixes = append(info.Prefixes, p.String()+" (reject)")
 				continue
 			}
 			if err := routes.Add(p); err != nil {
-				log.Printf("WARN: refresh route %s: %v", p, err)
+				clog.Warn("tunnel", "refresh route %s: %v", p, err)
 				continue
 			}
 			info.Prefixes = append(info.Prefixes, p.String())
 		}
 		newPinned := append([]string(nil), info.Prefixes...)
-		log.Printf("refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
+		clog.Info("tunnel", "refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
 		s.mu.Unlock()
 		s.pinDomain(d.spec, newPinned)
 	}
@@ -628,7 +628,7 @@ func resolveSpec(spec string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		log.Printf("resolved %s → %s", spec, a)
+		clog.Info("tunnel", "resolved %s → %s", spec, a)
 	}
 	return out, nil
 }

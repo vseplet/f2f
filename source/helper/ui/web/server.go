@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -164,7 +163,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) routes(mux *http.ServeMux) {
 	if devDir := os.Getenv("F2F_DEV_ASSETS"); devDir != "" {
-		log.Printf("web: serving assets from disk (F2F_DEV_ASSETS=%s)", devDir)
+		clog.Info("web", "serving assets from disk (F2F_DEV_ASSETS=%s)", devDir)
 		mux.Handle("/", http.FileServer(http.Dir(devDir)))
 	} else {
 		sub, err := fs.Sub(assetsFS, "assets")
@@ -1343,7 +1342,7 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 			if pub := s.pubForOverlayIP(sfuHost); pub != "" {
 				rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				if _, err := s.bus.Request(rctx, pub, calls.BusTypeLeave, nil); err != nil {
-					log.Printf("call: leave %s: %v", sfuHost, err)
+					clog.Warn("call", "leave %s: %v", sfuHost, err)
 				}
 				cancel()
 			}

@@ -251,12 +251,12 @@ func run(bind string, console bool, autostart bool) error {
 				go func() {
 					defer func() {
 						if r := recover(); r != nil {
-							log.Printf("drop: PANIC during startup: %v", r)
+							clog.Error("drop", "PANIC during startup: %v", r)
 						}
 					}()
-					log.Printf("drop: initialising torrent client …")
+					clog.Info("drop", "initialising torrent client …")
 					if err := dropSvc.Start(st.CampID, localIP); err != nil {
-						log.Printf("drop: %v (file sharing disabled)", err)
+						clog.Warn("drop", "%v (file sharing disabled)", err)
 					}
 				}()
 				return nil
@@ -279,7 +279,7 @@ func run(bind string, console bool, autostart bool) error {
 		// Route logs into the per-camp dir for the lifetime of this camp.
 		if st.CampID != "" {
 			if err := clog.SwitchTo(filepath.Join(store.CampDir(st.CampID), "f2f.log")); err != nil {
-				log.Printf("WARN: switch camp log: %v", err)
+				clog.Warn("main", "switch camp log: %v", err)
 			}
 		}
 		for _, s := range services {
@@ -287,17 +287,17 @@ func run(bind string, console bool, autostart bool) error {
 				continue
 			}
 			if err := s.start(localIP, st); err != nil {
-				log.Printf("%s: %v", s.name, err)
+				clog.Error("main", "%s start: %v", s.name, err)
 			}
 		}
 		// After services: pki has loaded the CA, so the proxy can bind
 		// :443 with on-demand leaf certs (not just :80).
 		if err := proxySvc.Start(localIP, st.CampID); err != nil {
-			log.Printf("WARN: bind http proxies: %v", err)
+			clog.Warn("main", "bind http proxies: %v", err)
 		}
 		// QUIC data bus on the overlay IP — auto-meshes with peers.
 		if err := busSvc.Start(localIP); err != nil {
-			log.Printf("WARN: start bus: %v", err)
+			clog.Warn("main", "start bus: %v", err)
 		}
 		gossipSvc.Start() // replicate NodeState across the mesh
 		if st.CampID != "" && st.CampID != lastPortalCamp {
@@ -315,7 +315,7 @@ func run(bind string, console bool, autostart bool) error {
 				continue
 			}
 			if err := s.stop(); err != nil {
-				log.Printf("WARN: %s stop: %v", s.name, err)
+				clog.Warn("main", "%s stop: %v", s.name, err)
 			}
 		}
 		// Camp-less again — route logs back to the bootstrap file.
@@ -374,19 +374,19 @@ func run(bind string, console bool, autostart bool) error {
 	}
 
 	<-ctx.Done()
-	log.Println("shutting down…")
+	clog.Info("main", "shutting down…")
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
 	if err := eng.Stop(); err != nil {
-		log.Printf("WARN: engine stop: %v", err)
+		clog.Warn("main", "engine stop: %v", err)
 	}
 	for _, d := range workerDone {
 		select {
 		case <-d:
 		case <-time.After(2 * time.Second):
-			log.Printf("WARN: service worker did not exit in 2s")
+			clog.Warn("main", "service worker did not exit in 2s")
 		}
 	}
 	return nil

@@ -28,14 +28,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/vseplet/f2f/source/helper/clog"
+	"github.com/vseplet/f2f/source/helper/identity"
 )
 
 const (
@@ -43,15 +43,11 @@ const (
 	Port = "2203" // UDP port on the overlay IP
 )
 
-// debugOn gates verbose connection-lifecycle logging (dial/adopt/forget/drop
-// and the cause a connection died with). Off by default; set F2F_BUS_DEBUG=1
-// to trace why links flap without guessing. Read once at package load.
-var debugOn = os.Getenv("F2F_BUS_DEBUG") == "1"
-
+// dbg logs verbose connection-lifecycle diagnostics (dial/adopt/forget/drop
+// and the cause a connection died with) to trace why links flap. Shown at
+// F2F_LOG=debug.
 func dbg(format string, args ...any) {
-	if debugOn {
-		log.Printf("bus[dbg]: "+format, args...)
-	}
+	clog.Debug("bus", format, args...)
 }
 
 // Stream is the raw bidirectional stream handed to/returned by the stream
@@ -165,7 +161,7 @@ func (s *Service) Start(overlayIP string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.ln, s.ctx, s.cancel, s.running = ln, ctx, cancel, true
 	s.mu.Unlock()
-	log.Printf("bus: QUIC listening on %s", addr)
+	clog.Info("bus", "QUIC listening on %s", addr)
 	go s.acceptLoop(ctx, ln)
 	go s.pingLoop(ctx) // auto-mesh: keep a QUIC link to every peer alive
 	return nil
@@ -200,9 +196,9 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	ok := err == nil
 	rtt := time.Since(start).Round(time.Millisecond)
 	if ok {
-		log.Printf("bus: ping %s ok via QUIC (%s)", short(pub), rtt)
+		clog.Debug("bus", "ping %s ok via QUIC (%s)", short(pub), rtt)
 	} else {
-		log.Printf("bus: ping %s failed: %v", short(pub), err)
+		clog.Warn("bus", "ping %s failed: %v", short(pub), err)
 		s.dropConn(pub) // force a fresh dial next round
 	}
 
@@ -289,7 +285,7 @@ func (s *Service) serveConn(ctx context.Context, conn *quic.Conn) {
 	// Identity = the overlay IP we received the connection from (AWG-attested).
 	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	fromPub := s.resolver.PubForIP(ip)
-	log.Printf("bus: inbound QUIC from %s (%s)", ip, short(fromPub))
+	clog.Debug("bus", "inbound QUIC from %s (%s)", ip, short(fromPub))
 	// Reuse this inbound connection for our own outbound sends too — QUIC
 	// streams are bidirectional, so one connection per pair serves both ways.
 	if fromPub != "" {
@@ -357,7 +353,7 @@ func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 	}
 	defer st.Close()
 	if fn == nil {
-		log.Printf("bus: no handler for type %q from %s", hdr.Type, short(fromPub))
+		clog.Warn("bus", "no handler for type %q from %s", hdr.Type, short(fromPub))
 		return
 	}
 	resp, err := fn(fromPub, payload)
@@ -616,9 +612,8 @@ func selfSignedCert() (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
+// short renders a peer pubkey for logs as its canonical fingerprint (the
+// bus only ever knows peers by pubkey, never name — see identity.Label).
 func short(p string) string {
-	if len(p) > 12 {
-		return p[:12]
-	}
-	return p
+	return identity.Label("", p)
 }

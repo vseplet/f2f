@@ -21,11 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
@@ -295,7 +295,7 @@ func (s *Service) Create() (*State, error) {
 		s.clearCall()
 		return nil, fmt.Errorf("add self to sfu: %w", err)
 	}
-	log.Printf("call: created %s, sfu host %s", cc.state.CallID, st.LocalIP)
+	clog.Info("call", "created %s, sfu host %s", cc.state.CallID, st.LocalIP)
 	return s.LocalCall(), nil
 }
 
@@ -320,14 +320,14 @@ func (s *Service) Leave(tunnelIP string) {
 	if tunnelIP == cc.state.SFUHost {
 		cc.sfu.Close()
 		s.clearCall()
-		log.Printf("call: ended (host left)")
+		clog.Info("call", "ended (host left)")
 		return
 	}
 	cc.sfu.RemoveParticipant(tunnelIP)
 	if len(cc.sfu.Participants()) == 0 {
 		cc.sfu.Close()
 		s.clearCall()
-		log.Printf("call: ended (last participant left)")
+		clog.Info("call", "ended (last participant left)")
 	}
 }
 
@@ -339,7 +339,7 @@ func (s *Service) End() {
 	}
 	cc.sfu.Close()
 	s.clearCall()
-	log.Printf("call: ended")
+	clog.Info("call", "ended")
 }
 
 // HandleSignal forwards a peer-originated SFU signal into the local
@@ -374,12 +374,12 @@ func (s *Service) deliverSignal(to string, msg []byte) {
 	}
 	pub := s.pubForIP(to)
 	if s.bus == nil || pub == "" {
-		log.Printf("call: deliver signal to %s: no bus route", to)
+		clog.Info("call", "deliver signal to %s: no bus route", to)
 		return
 	}
 	go func() {
 		if err := s.bus.Notify(pub, BusTypeSignal, msg); err != nil {
-			log.Printf("call: deliver signal to %s: %v", to, err)
+			clog.Warn("call", "deliver signal to %s: %v", to, err)
 		}
 	}()
 }

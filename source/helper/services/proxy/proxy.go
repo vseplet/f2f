@@ -15,7 +15,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -26,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/pki"
@@ -107,7 +107,7 @@ func (s *Service) startListener(addr string, tlsCfg *tls.Config) {
 		if tlsCfg != nil {
 			scheme = "HTTPS"
 		}
-		log.Printf("proxy: bind %s %s: %v (skipping)", scheme, addr, err)
+		clog.Info("proxy", "bind %s %s: %v (skipping)", scheme, addr, err)
 		return
 	}
 	if tlsCfg != nil {
@@ -121,9 +121,9 @@ func (s *Service) startListener(addr string, tlsCfg *tls.Config) {
 		if tlsCfg != nil {
 			scheme = "HTTPS"
 		}
-		log.Printf("proxy: %s listening on %s", scheme, addr)
+		clog.Info("proxy", "%s listening on %s", scheme, addr)
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("WARN: proxy %s: %v", addr, err)
+			clog.Warn("proxy", "proxy %s: %v", addr, err)
 		}
 	}()
 }
@@ -138,7 +138,7 @@ func (s *Service) Stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = srv.Shutdown(ctx)
 		cancel()
-		log.Printf("proxy: stopped %s", srv.Addr)
+		clog.Info("proxy", "stopped %s", srv.Addr)
 	}
 	return nil
 }
@@ -238,7 +238,7 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 		}
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy: %s → %s: %v", host, target, err)
+		clog.Warn("proxy", "%s → %s: %v", host, target, err)
 		http.Error(w, "upstream unreachable", http.StatusBadGateway)
 	}
 	proxy.ServeHTTP(w, r)

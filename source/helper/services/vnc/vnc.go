@@ -16,11 +16,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
+	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
 
@@ -121,11 +122,11 @@ func (s *Service) handleOpen(fromPub string, _ []byte, st *bus.Stream) {
 	}
 	conn, err := net.DialTimeout("tcp", s.target(), 4*time.Second)
 	if err != nil {
-		log.Printf("vnc: dial %s: %v", s.target(), err)
+		clog.Warn("vnc", "dial %s: %v", s.target(), err)
 		return
 	}
 	defer conn.Close()
-	log.Printf("vnc: %s → %s", short(fromPub), s.target())
+	clog.Info("vnc", "%s → %s", short(fromPub), s.target())
 
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(conn, st); done <- struct{}{} }() // peer → VNC server
@@ -154,9 +155,5 @@ func (s *Service) Available(ctx context.Context, pub string) bool {
 	return r.Available
 }
 
-func short(p string) string {
-	if len(p) > 12 {
-		return p[:12]
-	}
-	return p
-}
+// short renders a peer pubkey as its canonical fingerprint for logs.
+func short(p string) string { return identity.Label("", p) }

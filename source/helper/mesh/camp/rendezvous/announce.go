@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"sync/atomic"
 	"time"
+
+	"github.com/vseplet/f2f/source/helper/clog"
 )
 
 // AnnounceClient is the UDP rendezvous client. It piggybacks on the
@@ -74,12 +75,12 @@ func (a *AnnounceClient) resolve() {
 	addr, err := net.ResolveUDPAddr("udp4", a.campAddrStr)
 	if err != nil {
 		if cur == nil {
-			log.Printf("camp: resolve %q failed (%v) — will retry", a.campAddrStr, err)
+			clog.Warn("camp", "resolve %q failed (%v) — will retry", a.campAddrStr, err)
 		}
 		return
 	}
 	if cur == nil || cur.String() != addr.String() {
-		log.Printf("camp: resolved %q → %s", a.campAddrStr, addr)
+		clog.Info("camp", "resolved %q → %s", a.campAddrStr, addr)
 	}
 	a.campAddr.Store(addr)
 }
@@ -166,7 +167,7 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 // handler) — Run never reads from the socket itself.
 func (a *AnnounceClient) Run(ctx context.Context, every time.Duration) {
 	if err := a.sendAnnounce(); err != nil {
-		log.Printf("camp: announce: %v", err)
+		clog.Warn("camp", "announce: %v", err)
 	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -176,7 +177,7 @@ func (a *AnnounceClient) Run(ctx context.Context, every time.Duration) {
 			return
 		case <-ticker.C:
 			if err := a.sendAnnounce(); err != nil {
-				log.Printf("camp: announce: %v", err)
+				clog.Warn("camp", "announce: %v", err)
 			}
 		}
 	}
@@ -192,7 +193,7 @@ func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
 		return false
 	}
 	if perr != nil {
-		log.Printf("camp: announce reply: %v", perr)
+		clog.Warn("camp", "announce reply: %v", perr)
 		return true
 	}
 	now := time.Now().UnixMilli()

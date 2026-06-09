@@ -29,7 +29,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
@@ -123,7 +123,7 @@ func (s *Service) Start(campID string) error {
 	s.campID = campID
 	s.mu.Unlock()
 	if err := s.ensureMyCA(campID); err != nil {
-		log.Printf("ca: %v (https disabled)", err)
+		clog.Info("ca", "%v (https disabled)", err)
 	}
 	s.loadPeerCAs()
 	return nil
@@ -159,11 +159,11 @@ func (s *Service) ensureMyCA(campID string) error {
 
 	loaded, err := LoadCA(myCADir)
 	if err != nil {
-		log.Printf("ca: load: %v (will regenerate)", err)
+		clog.Info("ca", "load: %v (will regenerate)", err)
 		loaded = nil
 	}
 	if loaded != nil && !loaded.MatchesZone(zone) {
-		log.Printf("ca: existing CA pinned to a different camp_id; rotating")
+		clog.Info("ca", "existing CA pinned to a different camp_id; rotating")
 		_ = loaded.RemoveSystemTrust()
 		loaded = nil
 	}
@@ -175,17 +175,17 @@ func (s *Service) ensureMyCA(campID string) error {
 		if serr := fresh.Save(myCADir); serr != nil {
 			return fmt.Errorf("save: %w", serr)
 		}
-		log.Printf("ca: generated %s (fp %s)", fresh.CommonName(), fresh.Fingerprint())
+		clog.Info("ca", "generated %s (fp %s)", fresh.CommonName(), fresh.Fingerprint())
 		loaded = fresh
 	} else {
-		log.Printf("ca: loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
+		clog.Info("ca", "loaded %s (fp %s)", loaded.CommonName(), loaded.Fingerprint())
 	}
 	if loaded.IsSystemTrusted() {
-		log.Printf("ca: already in system trust store (fp %s) — skipping install", loaded.Fingerprint())
+		clog.Info("ca", "already in system trust store (fp %s) — skipping install", loaded.Fingerprint())
 	} else if err := loaded.EnsureSystemTrust(CACertPath(myCADir)); err != nil {
-		log.Printf("ca: install in system trust store: %v (https will show warnings)", err)
+		clog.Info("ca", "install in system trust store: %v (https will show warnings)", err)
 	} else {
-		log.Printf("ca: installed in system trust store (fp %s)", loaded.Fingerprint())
+		clog.Info("ca", "installed in system trust store (fp %s)", loaded.Fingerprint())
 	}
 	s.mu.Lock()
 	s.myCA = loaded
@@ -309,7 +309,7 @@ func (s *Service) pollOnce(ctx context.Context) {
 		}
 		body, err := s.fetchCACert(ctx, t.Pub)
 		if err != nil {
-			log.Printf("ca-poll: peer %s: %v", t.Name, err)
+			clog.Warn("ca-poll", "peer %s: %v", t.Name, err)
 			continue
 		}
 		s.discover(t.Name, body)
@@ -338,7 +338,7 @@ func (s *Service) fetchCACert(ctx context.Context, pub string) ([]byte, error) {
 func (s *Service) discover(peerName string, pemBytes []byte) {
 	cert, err := parseCACert(pemBytes)
 	if err != nil {
-		log.Printf("ca: peer %s: parse: %v", peerName, err)
+		clog.Warn("ca", "peer %s: parse: %v", peerName, err)
 		return
 	}
 	fp := certFingerprint(cert)
@@ -352,12 +352,12 @@ func (s *Service) discover(peerName string, pemBytes []byte) {
 
 	dir := s.peerCAsDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		log.Printf("ca: mkdir %s: %v", dir, err)
+		clog.Warn("ca", "mkdir %s: %v", dir, err)
 		return
 	}
 	certPath := filepath.Join(dir, peerName+".crt")
 	if err := os.WriteFile(certPath, pemBytes, 0o644); err != nil {
-		log.Printf("ca: write %s: %v", certPath, err)
+		clog.Warn("ca", "write %s: %v", certPath, err)
 		return
 	}
 
@@ -378,7 +378,7 @@ func (s *Service) discover(peerName string, pemBytes []byte) {
 	campID := s.campID
 	s.mu.Unlock()
 	s.upsertPeerInCamp(campID, entry)
-	log.Printf("ca: discovered peer %s CA (fp %s, installed=%v)", peerName, fp, installed)
+	clog.Warn("ca", "discovered peer %s CA (fp %s, installed=%v)", peerName, fp, installed)
 }
 
 // InstallPeerCA adds a previously-discovered peer CA to the system
@@ -395,7 +395,7 @@ func (s *Service) InstallPeerCA(fp string) error {
 		return nil
 	}
 	certPath := filepath.Join(s.peerCAsDir(), entry.PeerName+".crt")
-	log.Printf("ca: installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
+	clog.Info("ca", "installing peer %s CA (fp %s) — macOS will prompt for password", entry.PeerName, fp)
 	if err := platform.TrustStoreAdd(certPath); err != nil {
 		return fmt.Errorf("install peer %s: %w", entry.PeerName, err)
 	}
@@ -406,7 +406,7 @@ func (s *Service) InstallPeerCA(fp string) error {
 	campID := s.campID
 	s.mu.Unlock()
 	s.upsertPeerInCamp(campID, entry)
-	log.Printf("ca: installed peer %s CA", entry.PeerName)
+	clog.Info("ca", "installed peer %s CA", entry.PeerName)
 	return nil
 }
 
@@ -429,10 +429,10 @@ func (s *Service) RemovePeerCA(fingerprint string) error {
 	}
 	certPath := filepath.Join(s.peerCAsDir(), entry.PeerName+".crt")
 	if err := os.Remove(certPath); err != nil && !os.IsNotExist(err) {
-		log.Printf("ca: remove %s: %v", certPath, err)
+		clog.Warn("ca", "remove %s: %v", certPath, err)
 	}
 	if err := platform.TrustStoreRemove(entry.CommonName); err != nil {
-		log.Printf("ca: trust store remove %s: %v", entry.CommonName, err)
+		clog.Warn("ca", "trust store remove %s: %v", entry.CommonName, err)
 	}
 	if campID != "" {
 		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {

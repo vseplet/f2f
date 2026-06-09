@@ -28,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -41,6 +40,8 @@ import (
 
 	"github.com/creack/pty"
 
+	"github.com/vseplet/f2f/source/helper/clog"
+	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
 
@@ -205,19 +206,15 @@ func (s *Service) handleOpen(fromPub string, open []byte, st *bus.Stream) {
 				se.resize(be16(data[0:]), be16(data[2:]))
 			}
 		case opKill:
-			log.Printf("shell: session %s killed by %s", o.SessionID, short(fromPub))
+			clog.Info("shell", "session %s killed by %s", o.SessionID, short(fromPub))
 			se.kill()
 			return
 		}
 	}
 }
 
-func short(p string) string {
-	if len(p) > 12 {
-		return p[:12]
-	}
-	return p
-}
+// short renders a peer pubkey as its canonical fingerprint for logs.
+func short(p string) string { return identity.Label("", p) }
 
 func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
 	s.mu.Lock()
@@ -237,9 +234,9 @@ func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
 			delete(s.sessions, id)
 		}
 		s.mu.Unlock()
-		log.Printf("shell: session %s ended", id)
+		clog.Info("shell", "session %s ended", id)
 	}()
-	log.Printf("shell: session %s started %v", id, se.cmd.Args)
+	clog.Warn("shell", "session %s started %v", id, se.cmd.Args)
 	return se, nil
 }
 

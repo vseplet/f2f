@@ -24,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net"
 	"sort"
 	"strconv"
@@ -33,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
@@ -143,11 +143,11 @@ func (s *Service) SetPinned(domain string, v4s []string) {
 		return // installed on next Start via reinstallPinnedLocked
 	}
 	if err := platform.InstallDomainResolver(domain, srv.Addr()); err != nil {
-		log.Printf("dns: install resolver for %s: %v", domain, err)
+		clog.Warn("dns", "install resolver for %s: %v", domain, err)
 		return
 	}
 	_ = platform.FlushDNSCache()
-	log.Printf("dns: pinned %s → %s", domain, strings.Join(v4s, ", "))
+	clog.Info("dns", "pinned %s → %s", domain, strings.Join(v4s, ", "))
 }
 
 // RemovePinned drops a pinned domain and its OS resolver entry.
@@ -164,7 +164,7 @@ func (s *Service) RemovePinned(domain string) {
 		return
 	}
 	if err := platform.RemoveDomainResolver(domain); err != nil {
-		log.Printf("dns: remove resolver for %s: %v", domain, err)
+		clog.Warn("dns", "remove resolver for %s: %v", domain, err)
 	}
 	_ = platform.FlushDNSCache()
 }
@@ -212,9 +212,9 @@ func (s *Service) Start(campID, zone string) error {
 	s.zone = zone
 	addr := srv.Addr()
 	if rerr := platform.InstallZoneResolver(zone, addr); rerr != nil {
-		log.Printf("dns: install zone resolver: %v", rerr)
+		clog.Warn("dns", "install zone resolver: %v", rerr)
 	} else {
-		log.Printf("dns: serving %s.f2f on %s", zone, addr)
+		clog.Info("dns", "serving %s.f2f on %s", zone, addr)
 		_ = platform.FlushDNSCache()
 	}
 	// Re-point per-domain resolver entries for pins that survived a
@@ -222,7 +222,7 @@ func (s *Service) Start(campID, zone string) error {
 	s.pinMu.RLock()
 	for domain := range s.pinned {
 		if err := platform.InstallDomainResolver(domain, addr); err != nil {
-			log.Printf("dns: reinstall resolver for %s: %v", domain, err)
+			clog.Warn("dns", "reinstall resolver for %s: %v", domain, err)
 		}
 	}
 	s.pinMu.RUnlock()
@@ -262,7 +262,7 @@ func (s *Service) seedFromStore() error {
 	s.peerDomsMu.Lock()
 	s.peerDoms = pd
 	s.peerDomsMu.Unlock()
-	log.Printf("dns: seeded %d my-domains + %d peers with cached domains", len(mine), len(pd))
+	clog.Info("dns", "seeded %d my-domains + %d peers with cached domains", len(mine), len(pd))
 	return nil
 }
 
@@ -277,7 +277,7 @@ func (s *Service) Stop() error {
 	s.srvMu.Unlock()
 	if zone != "" {
 		if err := platform.RemoveZoneResolver(zone); err != nil {
-			log.Printf("dns: remove zone resolver: %v", err)
+			clog.Warn("dns", "remove zone resolver: %v", err)
 		}
 	}
 	// Drop per-domain resolver files — with the server down they'd
@@ -285,7 +285,7 @@ func (s *Service) Stop() error {
 	s.pinMu.RLock()
 	for domain := range s.pinned {
 		if err := platform.RemoveDomainResolver(domain); err != nil {
-			log.Printf("dns: remove resolver for %s: %v", domain, err)
+			clog.Warn("dns", "remove resolver for %s: %v", domain, err)
 		}
 	}
 	s.pinMu.RUnlock()
