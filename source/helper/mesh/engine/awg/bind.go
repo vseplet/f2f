@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
 )
@@ -51,6 +52,14 @@ type inboxItem struct {
 // device.NewDevice, and feed incoming AWG packets via Deliver().
 type Bind struct {
 	udp *net.UDPConn // shared with engine; NOT owned
+
+	// Wire-level traffic counters for everything that flows through
+	// this Bind (handshakes, keepalives, transport). Engine.Status sums
+	// these into its tx/rx totals — when the AWG device is active the
+	// engine's own tun/udp loops don't run, so this is the only place
+	// data-plane bytes can be observed.
+	txBytes, rxBytes     atomic.Uint64
+	txPackets, rxPackets atomic.Uint64
 
 	mu     sync.Mutex
 	open   bool
@@ -156,11 +165,22 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		if len(buf) == 0 {
 			continue
 		}
-		if _, err := b.udp.WriteToUDP(buf, addr); err != nil {
+		if n, err := b.udp.WriteToUDP(buf, addr); err != nil {
 			return err
+		} else {
+			b.txBytes.Add(uint64(n))
+			b.txPackets.Add(1)
 		}
 	}
 	return nil
+}
+
+// Stats returns wire-level byte/packet totals seen by this Bind since
+// construction. rx counts every AWG packet handed in via Deliver
+// (including ones later dropped on inbox overflow — they were still
+// received from the network); tx counts successful UDP writes.
+func (b *Bind) Stats() (txBytes, rxBytes, txPackets, rxPackets uint64) {
+	return b.txBytes.Load(), b.rxBytes.Load(), b.txPackets.Load(), b.rxPackets.Load()
 }
 
 // ParseEndpoint accepts "host:port" (IPv4 or IPv6) and returns an
@@ -189,6 +209,8 @@ func (b *Bind) BatchSize() int { return 1 }
 // AWG keepalive will retransmit. data is copied before queuing so
 // the caller can reuse its read buffer.
 func (b *Bind) Deliver(data []byte, src netip.AddrPort) {
+	b.rxBytes.Add(uint64(len(data)))
+	b.rxPackets.Add(1)
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	select {
