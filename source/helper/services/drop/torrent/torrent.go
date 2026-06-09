@@ -269,16 +269,35 @@ func (c *Client) AddDownload(magnetOrHash string, peerAddrs []string) (*Download
 	c.mu.Lock()
 	c.loading[d.InfoHash] = d
 	c.mu.Unlock()
-	// Start downloading in the background once metadata arrives.
+	// Start downloading in the background once metadata arrives. With no
+	// DHT/trackers anacrolix only knows the peers we feed it, and if the
+	// first dial misses (overlay path to the source still cold — hole
+	// punch / AWG handshake not warmed up) it won't retry on its own for
+	// a while. So re-feed every few seconds until metadata lands, which
+	// makes the "fetching metadata…" wait short instead of stuck until
+	// the 30s service refeed. Bounded — after that the service-level
+	// refeed takes over (or the catalog check retires it as a zombie).
 	go func() {
-		<-t.GotInfo()
-		c.mu.Lock()
-		if existing, ok := c.loading[d.InfoHash]; ok {
-			existing.Name = t.Info().Name
-			existing.Size = t.Info().TotalLength()
+		nudge := time.NewTicker(3 * time.Second)
+		defer nudge.Stop()
+		giveUp := time.After(90 * time.Second)
+		for {
+			select {
+			case <-t.GotInfo():
+				c.mu.Lock()
+				if existing, ok := c.loading[d.InfoHash]; ok {
+					existing.Name = t.Info().Name
+					existing.Size = t.Info().TotalLength()
+				}
+				c.mu.Unlock()
+				t.DownloadAll()
+				return
+			case <-nudge.C:
+				feedPeers(t, peerAddrs)
+			case <-giveUp:
+				return
+			}
 		}
-		c.mu.Unlock()
-		t.DownloadAll()
 	}()
 	return d, nil
 }
