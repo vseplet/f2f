@@ -88,7 +88,9 @@
     max-width: 600px;
     flex-shrink: 0;
     position: relative;
-    background: var(--frame);
+    /* A touch darker than the main column (--frame) so the sidebars recede and
+       the main workspace reads as the focused area. */
+    background: var(--bg);
     border-right: 1px dotted var(--border);
     color: var(--text);
     font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
@@ -357,6 +359,31 @@
 .ax-tree-category.collapsed .ax-tree-caret {
     transform: rotate(-90deg);
 }
+.ax-tree-cat-icon {
+    font-size: 12px;
+    color: var(--accent-dim);
+    flex: 0 0 auto;
+}
+/* Per-category accent colours, so the lists are distinguishable at a glance —
+   icon and label share the colour. */
+.ax-tree-category[data-cat="peers"]    .ax-tree-cat-icon,
+.ax-tree-category[data-cat="peers"]    .ax-tree-label { color: #5aa9e6; }
+.ax-tree-category[data-cat="shells"]   .ax-tree-cat-icon,
+.ax-tree-category[data-cat="shells"]   .ax-tree-label { color: #5fbf7f; }
+.ax-tree-category[data-cat="desktops"] .ax-tree-cat-icon,
+.ax-tree-category[data-cat="desktops"] .ax-tree-label { color: #b18cf0; }
+.ax-tree-category[data-cat="messages"] .ax-tree-cat-icon,
+.ax-tree-category[data-cat="messages"] .ax-tree-label { color: #e87ab8; }
+.ax-tree-category[data-cat="drop"]     .ax-tree-cat-icon,
+.ax-tree-category[data-cat="drop"]     .ax-tree-label { color: #e8c14e; }
+.ax-tree-category[data-cat="domains"]  .ax-tree-cat-icon,
+.ax-tree-category[data-cat="domains"]  .ax-tree-label { color: #2fc7b0; }
+.ax-tree-category[data-cat="tunnel"]   .ax-tree-cat-icon,
+.ax-tree-category[data-cat="tunnel"]   .ax-tree-label { color: #e08a4c; }
+.ax-tree-category[data-cat="policies"] .ax-tree-cat-icon,
+.ax-tree-category[data-cat="policies"] .ax-tree-label { color: #e0686e; }
+.ax-tree-category[data-cat="apps"]     .ax-tree-cat-icon,
+.ax-tree-category[data-cat="apps"]     .ax-tree-label { color: #9aa6bb; }
 .ax-tree-label {
     /* grow to push the meta right, but never shrink: the label stays
        fully readable; the right-hand meta yields instead. */
@@ -480,6 +507,12 @@
 .ax-tree-section:first-child {
     padding-top: 0;
 }
+/* Sub-section dividers take their parent category's accent colour (dimmed),
+   so meets/channels/direct read as part of "messages", etc. */
+.ax-tree-children[data-cat-children="messages"] .ax-tree-section { color: #e87ab8; opacity: 0.7; }
+.ax-tree-children[data-cat-children="tunnel"]   .ax-tree-section { color: #e08a4c; opacity: 0.7; }
+.ax-tree-children[data-cat-children="drop"]     .ax-tree-section { color: #e8c14e; opacity: 0.7; }
+.ax-tree-children[data-cat-children="domains"]  .ax-tree-section { color: #2fc7b0; opacity: 0.7; }
 /* A category placed directly under a section divider shouldn't add
    its own 8px top-margin — the section already provides spacing. */
 .ax-tree-section + .ax-tree-category {

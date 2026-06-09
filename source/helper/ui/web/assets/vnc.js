@@ -165,7 +165,10 @@ import RFB from '/vendor/novnc/core/rfb.js';
   function applyVncRoute() {
     const m = (location.hash || '').replace(/^#/, '').match(/^vnc:(.+)$/);
     if (m) open(decodeURIComponent(m[1]));
-    else if (curPub) disconnect(); // navigated away
+    // Switching to another tab no longer disconnects: the RFB session (and its
+    // authenticated VNC connection) is kept alive in the background — the panel
+    // just gets hidden — so coming back doesn't force a re-login. It's torn down
+    // only by the explicit "disconnect" button or when opening another peer.
   }
 
   function init() {

@@ -24,15 +24,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 )
+
+// busTypeFirewall is the bus message type serving our allow list to
+// peers. Response shape matches the loopback HTTP endpoint:
+// {"active":…, "builtin":[…], "user":[…]}.
+const busTypeFirewall = "firewall"
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
 // hasn't been Start'ed yet (no camp loaded → no per-camp config file
@@ -43,17 +47,15 @@ var ErrEngineNotRunning = errors.New("firewall: engine not running")
 // tunnel. They are always allowed by the inbound filter regardless
 // of user settings, because the engine itself is the consumer:
 //
-//   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer
-//     signal polling over utun.
-//   - 2203/udp — the QUIC peer-to-peer data bus (mesh/bus).
+//   - 2203/udp — the QUIC peer-to-peer data bus (mesh/bus); all
+//     service-to-service traffic rides it.
 //   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
 //     locally-registered domains.
 //   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the
 //     drop subsystem.
 //
-// Keep in sync with web.Server, mesh/bus (Port) and the torrent client.
+// Keep in sync with mesh/bus (Port) and the torrent client.
 var BuiltinRules = []PortRule{
-	{Port: 2202, Protocol: "tcp"},
 	{Port: 2203, Protocol: "udp"}, // QUIC data bus
 	{Port: 80, Protocol: "tcp"},
 	{Port: 443, Protocol: "tcp"},
@@ -66,8 +68,6 @@ var BuiltinRules = []PortRule{
 // Returns "" for non-builtin combinations.
 func BuiltinLabel(port int, proto string) string {
 	switch {
-	case port == 2202 && proto == "tcp":
-		return "f2f HTTP API"
 	case port == 2203 && proto == "udp":
 		return "f2f data bus (QUIC)"
 	case port == 80 && proto == "tcp":
@@ -87,7 +87,8 @@ func BuiltinLabel(port int, proto string) string {
 // tunnelIP, campID) so the service is camp-independent until then.
 type Service struct {
 	store *config.Store
-	eng   *engine.Engine // for OnlinePeersForCAPoll + TunnelHTTPPort
+	eng   *engine.Engine // for OnlinePeersForCAPoll
+	bus   *bus.Service
 
 	mu     sync.Mutex
 	anchor *anchor
@@ -102,12 +103,28 @@ type Service struct {
 }
 
 // New constructs a Service. The store and engine must outlive it.
-func New(store *config.Store, eng *engine.Engine) *Service {
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store:     store,
 		eng:       eng,
+		bus:       b,
 		peerPorts: map[string][]config.Firewall{},
 	}
+}
+
+// Register installs the bus handler that serves our allow list to
+// peers. Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeFirewall, func(string, []byte) ([]byte, error) {
+		return json.Marshal(map[string]any{
+			"active":  s.Active(),
+			"builtin": s.BuiltinPorts(),
+			"user":    s.UserPorts(),
+		})
+	})
 }
 
 // PeerPorts returns a copy of one peer's most recently-polled
@@ -148,8 +165,7 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
+	if s.bus == nil {
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
@@ -159,27 +175,16 @@ func (s *Service) pollOnce(ctx context.Context) {
 	s.mu.Lock()
 	campID := s.campID
 	s.mu.Unlock()
-	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/firewall"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
+		if t.Pub == "" {
 			continue
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var body struct {
-			User []config.Firewall `json:"user"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
+		user, err := s.fetchPeerPorts(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
 		s.peerMu.Lock()
-		s.peerPorts[t.Pub] = body.User
+		s.peerPorts[t.Pub] = user
 		s.peerMu.Unlock()
 		if campID == "" || t.Pub == "" {
 			continue
@@ -187,12 +192,29 @@ func (s *Service) pollOnce(ctx context.Context) {
 		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
 			for i := range c.PeerCatalog {
 				if c.PeerCatalog[i].Pub == t.Pub {
-					c.PeerCatalog[i].Firewall = append([]config.Firewall(nil), body.User...)
+					c.PeerCatalog[i].Firewall = append([]config.Firewall(nil), user...)
 					return
 				}
 			}
 		})
 	}
+}
+
+// fetchPeerPorts pulls one peer's user allow list over the bus.
+func (s *Service) fetchPeerPorts(ctx context.Context, pub string) ([]config.Firewall, error) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, busTypeFirewall, nil)
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		User []config.Firewall `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	return body.User, nil
 }
 
 // Start installs the pf anchor on iface scoped to tunnelIP with the

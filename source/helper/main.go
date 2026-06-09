@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -110,11 +109,25 @@ func run(bind string, console bool, autostart bool) error {
 	}
 	defer logCloser.Close()
 
-	fwSvc := firewall.New(store, eng)
-	pkiSvc := pki.New(store, eng)
-	dnsSvc := dns.New(store, eng)
-	dropSvc := drop.New(eng, store.CampDir)
-	callsSvc := calls.New(store, eng)
+	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
+	// comes up (OnStarted); it auto-meshes with every reachable peer. All
+	// peer↔peer service traffic rides it.
+	busSvc, err := bus.New(busResolver{eng: eng})
+	if err != nil {
+		return fmt.Errorf("bus: %w", err)
+	}
+	defer busSvc.Stop()
+
+	fwSvc := firewall.New(store, eng, busSvc)
+	fwSvc.Register()
+	pkiSvc := pki.New(store, eng, busSvc)
+	pkiSvc.Register()
+	dnsSvc := dns.New(store, eng, busSvc)
+	dnsSvc.Register()
+	dropSvc := drop.New(eng, store.CampDir, busSvc)
+	dropSvc.Register()
+	callsSvc := calls.New(store, eng, busSvc)
+	callsSvc.Register()
 	tunnelSvc := tunnel.New(store, eng)
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
@@ -123,14 +136,6 @@ func run(bind string, console bool, autostart bool) error {
 	// (<camp_id>.messenger.db), opened lazily.
 	msgSvc := messenger.New(store.CampDir)
 	defer msgSvc.Close()
-
-	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
-	// comes up (OnStarted); it auto-meshes with every reachable peer.
-	busSvc, err := bus.New(busResolver{eng: eng})
-	if err != nil {
-		return fmt.Errorf("bus: %w", err)
-	}
-	defer busSvc.Stop()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); bus activity (pings)
@@ -185,6 +190,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc.Register()
 
 	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, bind)
+	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -270,9 +276,6 @@ func run(bind string, console bool, autostart bool) error {
 				log.Printf("WARN: switch camp log: %v", err)
 			}
 		}
-		if err := srv.BindTunnel(localIP); err != nil {
-			log.Printf("WARN: bind tunnel inbox: %v", err)
-		}
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -297,7 +300,6 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}
 	eng.OnStopped = func() {
-		_ = srv.UnbindTunnel()
 		gossipSvc.Stop()
 		_ = busSvc.Stop()
 		_ = proxySvc.Stop()
@@ -313,10 +315,6 @@ func run(bind string, console bool, autostart bool) error {
 		// Camp-less again — route logs back to the bootstrap file.
 		_ = clog.SwitchTo(filepath.Join(store.Dir(), "f2f.log"))
 	}
-	if _, port, err := net.SplitHostPort(bind); err == nil {
-		eng.SetTunnelHTTPPort(port)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -417,6 +415,12 @@ func (r busResolver) Peers() []string {
 	var out []string
 	for _, p := range st.Peers {
 		if p.Self || p.Pub == "" || p.OverlayV4 == "" || !p.InCamp {
+			continue
+		}
+		// Skip offline members: dialing them just burns the 5s ping
+		// timeout and spams "ping failed" — they reappear here as soon
+		// as the camp roster marks them online again.
+		if !p.Online {
 			continue
 		}
 		// Defensive self-exclusion: the camp-owner entry can appear without

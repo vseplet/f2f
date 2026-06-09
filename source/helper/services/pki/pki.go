@@ -6,8 +6,8 @@
 //     <name>.<camp>.f2f). Loaded from disk or generated fresh on each
 //     camp Start, then installed into the system trust store so the
 //     OS recognises it as a root.
-//   - "peer CAs": every camp peer publishes its own local CA at
-//     /api/ca-cert. PollPeers fetches each one, persists it on disk
+//   - "peer CAs": every camp peer serves its own local CA over the
+//     bus. PollPeers fetches each one, persists it on disk
 //     plus records metadata in the camp config; Install adds a
 //     discovered CA to the system trust store on explicit user click
 //     (because the keychain prompt is intrusive); Remove is the
@@ -29,10 +29,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,9 +39,14 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
+
+// busTypeCACert is the bus message type serving our CA cert (PEM) to
+// peers.
+const busTypeCACert = "ca-cert"
 
 // myCADir is where the local CA's ca.crt/ca.key live. Persisted
 // across runs so leaf certs issued in one session remain valid in
@@ -72,6 +74,7 @@ type PeerEntry struct {
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine
+	bus   *bus.Service
 
 	mu     sync.Mutex
 	myCA   *CA                  // current camp's local CA (HTTPS termination)
@@ -82,12 +85,28 @@ type Service struct {
 // New constructs a Service. store and engine must outlive it.
 // store holds persisted peer-CA metadata; engine is consulted only
 // for live peer iteration + the tunnel HTTP port at poll time.
-func New(store *config.Store, eng *engine.Engine) *Service {
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store: store,
 		eng:   eng,
+		bus:   b,
 		peers: make(map[string]PeerEntry),
 	}
+}
+
+// Register installs the bus handler that serves our CA cert to peers.
+// Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeCACert, func(string, []byte) ([]byte, error) {
+		ca := s.MyCA()
+		if ca == nil {
+			return nil, fmt.Errorf("ca not initialized")
+		}
+		return ca.CertPEM, nil
+	})
 }
 
 // Start ensures the local CA is loaded (or freshly generated for
@@ -277,42 +296,38 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		log.Printf("ca-poll: tunnel HTTP port not set — skipping")
+	if s.bus == nil {
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		if t.Host == "" {
+		if t.Pub == "" {
 			continue
 		}
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/ca-cert"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		body, err := s.fetchCACert(ctx, t.Pub)
 		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("ca-poll: peer %s: GET %s: %v", t.Name, url, err)
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		resp.Body.Close()
-		if err != nil {
-			log.Printf("ca-poll: peer %s: read body: %v", t.Name, err)
-			continue
-		}
-		if resp.StatusCode != 200 {
-			log.Printf("ca-poll: peer %s: HTTP %d (peer running an old f2f-mac without /api/ca-cert?)", t.Name, resp.StatusCode)
+			log.Printf("ca-poll: peer %s: %v", t.Name, err)
 			continue
 		}
 		s.discover(t.Name, body)
 	}
+}
+
+// fetchCACert pulls one peer's CA cert over the bus.
+func (s *Service) fetchCACert(ctx context.Context, pub string) ([]byte, error) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, err := s.bus.Request(rctx, pub, busTypeCACert, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty ca-cert reply")
+	}
+	return body, nil
 }
 
 // discover parses the PEM body, computes a fingerprint, persists the

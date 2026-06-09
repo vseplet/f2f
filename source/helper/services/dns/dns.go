@@ -15,9 +15,9 @@
 //     MyDomains, peer-domain poll, TCP health check.
 //
 // The service reads/writes camp state through *config.Store directly
-// — engine is consulted only for live peer iteration and the tunnel
-// HTTP port. This keeps config persistence centralised and avoids
-// engine accumulating per-service proxy setters.
+// — engine is consulted only for live peer iteration. This keeps
+// config persistence centralised and avoids engine accumulating
+// per-service proxy setters.
 package dns
 
 import (
@@ -26,7 +26,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,9 +34,14 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
+
+// busTypeDomains is the bus message type serving our published domain
+// catalog to peers.
+const busTypeDomains = "domains"
 
 // Entry is one (name, port, proto) record this peer publishes inside
 // the camp's <camp>.f2f zone. Port and proto are advisory: DNS only
@@ -78,6 +82,7 @@ type healthSnapshot struct {
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine
+	bus   *bus.Service
 
 	my atomic.Pointer[[]Entry]
 
@@ -101,13 +106,25 @@ type Service struct {
 // service. The camp identity is picked up from engine.Status() at
 // Start time — the service is "the current camp's DNS", not bound
 // to a specific id, so camp switches just require Stop+Start.
-func New(store *config.Store, eng *engine.Engine) *Service {
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store:    store,
 		eng:      eng,
+		bus:      b,
 		health:   make(map[string]healthSnapshot),
 		peerDoms: make(map[string][]Entry),
 	}
+}
+
+// Register installs the bus handler that serves our domain catalog to
+// peers. Call once after construction (like shell/vnc Register).
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeDomains, func(string, []byte) ([]byte, error) {
+		return json.Marshal(s.MyDomains())
+	})
 }
 
 // Start opens the DNS server on a free loopback port, installs the
@@ -482,9 +499,7 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		// log.Printf("dns-poll: tunnel HTTP port not set — skipping")
+	if s.bus == nil {
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
@@ -492,27 +507,32 @@ func (s *Service) pollOnce(ctx context.Context) {
 		// log.Printf("dns-poll: 0 peers online — skipping tick")
 		return
 	}
-	// log.Printf("dns-poll: polling %d peer(s) on port %s", len(targets), port)
-	client := &http.Client{Timeout: 3 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
+		if t.Pub == "" {
 			continue
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var list []Entry
-		err = json.NewDecoder(resp.Body).Decode(&list)
-		resp.Body.Close()
+		list, err := s.fetchDomains(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
 		s.upsertPeer(t.Pub, t.Name, list)
 		// log.Printf("dns: peer %s published %d domain(s)", t.Name, len(list))
 	}
+}
+
+// fetchDomains asks one peer for its domain catalog over the bus.
+func (s *Service) fetchDomains(ctx context.Context, pub string) ([]Entry, error) {
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, busTypeDomains, nil)
+	if err != nil {
+		return nil, err
+	}
+	var list []Entry
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // upsertPeer mirrors a peer's just-polled domain list into both the

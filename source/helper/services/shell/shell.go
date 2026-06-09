@@ -254,6 +254,15 @@ type session struct {
 	mu       sync.Mutex
 	ring     []byte
 	attached io.Writer // current client output sink, or nil when detached
+
+	// Mouse/paste mode tracking, so a reattaching client restores them even
+	// after the app's one-time enable scrolled out of the ring (otherwise the
+	// mouse "stops working" on reattach). We track ONLY mouse, deliberately:
+	// re-emitting alt-screen or several tracking levels at once corrupts state.
+	mouseTrack int    // active tracking mode: 0=off, or 1000/1002/1003
+	mouseEnc   int    // active coordinate encoding: 0=default, or 1005/1006/1015
+	bracketed  bool   // bracketed paste (2004)
+	modeTail   []byte // partial escape seq carried across PTY reads
 }
 
 func newSession(id string, argv []string, cols, rows uint16) (*session, error) {
@@ -337,10 +346,102 @@ func dropToInvokingUser(c *exec.Cmd) {
 }
 
 func (se *session) appendRing(b []byte) {
+	se.scanModes(b)
 	se.ring = append(se.ring, b...)
 	if len(se.ring) > ringCap {
 		se.ring = se.ring[len(se.ring)-ringCap:]
 	}
+}
+
+// scanModes watches PTY output for the DECSET/DECRST private-mode sequences
+// (ESC [ ? <params> h|l) that toggle mouse reporting and bracketed paste, and
+// records the latest state — so modePreamble can restore them on reattach.
+// Tracking levels (1000/1002/1003) are mutually exclusive: the last one set
+// wins, any reset clears it. Sequences split across PTY reads carry in
+// modeTail. Called under se.mu (via appendRing).
+func (se *session) scanModes(b []byte) {
+	data := b
+	if len(se.modeTail) > 0 {
+		data = append(se.modeTail, b...)
+		se.modeTail = nil
+	}
+	for i := 0; i < len(data); {
+		if data[i] != 0x1b {
+			i++
+			continue
+		}
+		if i+2 >= len(data) { // not enough for "ESC [ ?"
+			se.carry(data[i:])
+			return
+		}
+		if data[i+1] != '[' || data[i+2] != '?' {
+			i++
+			continue
+		}
+		j := i + 3
+		for j < len(data) && (data[j] == ';' || (data[j] >= '0' && data[j] <= '9')) {
+			j++
+		}
+		if j >= len(data) { // params not terminated yet — carry the partial seq
+			se.carry(data[i:])
+			return
+		}
+		if final := data[j]; final == 'h' || final == 'l' {
+			set := final == 'h'
+			for _, p := range strings.Split(string(data[i+3:j]), ";") {
+				if n, err := strconv.Atoi(p); err == nil {
+					se.applyMode(n, set)
+				}
+			}
+		}
+		i = j + 1
+	}
+}
+
+func (se *session) applyMode(n int, set bool) {
+	switch n {
+	case 1000, 1002, 1003: // mouse tracking level (mutually exclusive)
+		if set {
+			se.mouseTrack = n
+		} else if se.mouseTrack == n {
+			se.mouseTrack = 0
+		}
+	case 1005, 1006, 1015: // mouse coordinate encoding
+		if set {
+			se.mouseEnc = n
+		} else if se.mouseEnc == n {
+			se.mouseEnc = 0
+		}
+	case 2004: // bracketed paste
+		se.bracketed = set
+	}
+}
+
+// carry stashes an incomplete trailing escape sequence for the next read,
+// bounded so a stray ESC can't grow it without limit.
+func (se *session) carry(b []byte) {
+	if len(b) > 64 {
+		return // not a real DECSET seq; drop it
+	}
+	se.modeTail = append([]byte(nil), b...)
+}
+
+// modePreamble builds the sequences to restore mouse/paste state on reattach:
+// encoding first (so it's in effect when tracking turns on), then the single
+// active tracking level, then bracketed paste. Empty when nothing is on. NOTE:
+// deliberately minimal — no alt-screen, no multiple tracking levels.
+func (se *session) modePreamble() []byte {
+	var b []byte
+	if se.mouseEnc != 0 {
+		b = append(b, []byte(fmt.Sprintf("\x1b[?%dh", se.mouseEnc))...)
+	}
+	if se.mouseTrack != 0 {
+		b = append(b, []byte(fmt.Sprintf("\x1b[?%dh", se.mouseTrack))...)
+	}
+	if se.bracketed {
+		b = append(b, []byte("\x1b[?2004h")...)
+	}
+	return b
 }
 
 // attach makes w the live output sink and repaints the recent screen.
@@ -351,6 +452,11 @@ func (se *session) attach(w io.Writer) {
 	// matches the live PTY — no garbage, no replayed keystroke stream.
 	_, _ = w.Write([]byte("\x1b[2J\x1b[H"))
 	_, _ = w.Write(se.ring)
+	// Restore mouse/paste modes in case the app's one-time enable scrolled out
+	// of the ring (without this, mouse "stops working" after a reattach).
+	if pre := se.modePreamble(); pre != nil {
+		_, _ = w.Write(pre)
+	}
 	se.attached = w
 }
 

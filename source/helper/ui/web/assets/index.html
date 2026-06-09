@@ -10,6 +10,14 @@
         <link rel="stylesheet" href="/audio.css" />
         <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
         <style>
+            /* Nerd Font symbols (vendored, offline) — used only as a fallback
+               after the system mono so powerline/devicon glyphs in TUIs
+               (zellij, bpytop, starship) render instead of tofu boxes. */
+            @font-face {
+                font-family: 'Symbols Nerd Font';
+                src: url('/vendor/nerd-fonts/symbols-nerd-font.woff2') format('woff2');
+                font-display: swap;
+            }
             #tab-term .ax-frame { display: flex; flex-direction: column; height: 100%; }
             #term-status { color: #7f8a9e; margin-left: 10px; }
             #term-fs {

@@ -181,9 +181,13 @@ func (s *Service) pingLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, pub := range s.resolver.Peers() {
+			peers := s.resolver.Peers()
+			known := make(map[string]bool, len(peers))
+			for _, pub := range peers {
+				known[pub] = true
 				go s.pingOne(ctx, pub)
 			}
+			s.evictStale(known)
 		}
 	}
 }
@@ -214,6 +218,30 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 		s.emit("ping", pub, "QUIC link up · "+rtt.String())
 	case !ok && had && prev:
 		s.emit("ping", pub, "QUIC link down")
+	}
+}
+
+// evictStale closes cached connections to peers that left the roster.
+// pingLoop only probes current peers, and QUIC keepalives hold an unused
+// connection open indefinitely — without this sweep a departed peer's
+// conn (and its buffers) would live for the rest of the process.
+func (s *Service) evictStale(known map[string]bool) {
+	s.mu.Lock()
+	var stale []string
+	for pub := range s.conns {
+		if !known[pub] {
+			stale = append(stale, pub)
+		}
+	}
+	for pub := range s.linkUp {
+		if !known[pub] {
+			delete(s.linkUp, pub)
+		}
+	}
+	s.mu.Unlock()
+	for _, pub := range stale {
+		dbg("evict %s: peer left roster", short(pub))
+		s.dropConn(pub)
 	}
 }
 

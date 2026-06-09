@@ -8,7 +8,7 @@
 //   - Reconciliation loops: prune missing files, re-feed peer
 //     addresses to stalled downloads, chown root-owned writes back
 //     to the invoking user.
-//   - Cross-peer file discovery via /api/files (PollPeers).
+//   - Cross-peer file discovery over the bus (PollPeers).
 //
 // Constructed once in main.go; Start runs on eng.OnStarted and Stop
 // on eng.OnStopped. The peers' file lists are cached in-memory and
@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -30,9 +29,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
 )
+
+// busTypeFiles is the bus message type serving our seeded-file catalog
+// to peers.
+const busTypeFiles = "files"
 
 // PeerFile is one file entry as published by a peer's /api/files.
 // Path is stripped — peer-facing data only.
@@ -48,6 +52,7 @@ type PeerFile struct {
 // transitions; Start/Stop are driven by engine lifecycle hooks.
 type Service struct {
 	eng     *engine.Engine
+	bus     *bus.Service
 	campDir func(campID string) string // ~/.f2f/<camp_id>/ (creates it)
 
 	mu        sync.Mutex
@@ -62,12 +67,36 @@ type Service struct {
 
 // New constructs a Service. campDir resolves a camp's directory
 // (config.Store.CampDir). The engine must outlive the service.
-func New(eng *engine.Engine, campDir func(campID string) string) *Service {
+func New(eng *engine.Engine, campDir func(campID string) string, b *bus.Service) *Service {
 	return &Service{
 		eng:       eng,
+		bus:       b,
 		campDir:   campDir,
 		peerFiles: map[string][]PeerFile{},
 	}
+}
+
+// Register installs the bus handler that serves our seeded-file list
+// to peers (Path never leaves the machine — PeerFile has no such
+// field). Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeFiles, func(string, []byte) ([]byte, error) {
+		c := s.Client()
+		if c == nil {
+			return nil, fmt.Errorf("torrent client not running")
+		}
+		out := []PeerFile{}
+		for _, h := range c.ListSeeds() {
+			out = append(out, PeerFile{
+				Name: h.Name, Size: h.Size,
+				InfoHash: h.InfoHash, Magnet: h.Magnet,
+			})
+		}
+		return json.Marshal(out)
+	})
 }
 
 // Start binds the BT client on the overlay v4 alias for the given
@@ -224,28 +253,18 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
+	if s.bus == nil {
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/files"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
+		if t.Pub == "" {
 			continue
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var files []PeerFile
-		err = json.NewDecoder(resp.Body).Decode(&files)
-		resp.Body.Close()
+		files, err := s.fetchPeerFiles(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
@@ -253,6 +272,21 @@ func (s *Service) pollOnce(ctx context.Context) {
 		s.peerFiles[t.Pub] = files
 		s.peerMu.Unlock()
 	}
+}
+
+// fetchPeerFiles pulls one peer's published file list over the bus.
+func (s *Service) fetchPeerFiles(ctx context.Context, pub string) ([]PeerFile, error) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, busTypeFiles, nil)
+	if err != nil {
+		return nil, err
+	}
+	var files []PeerFile
+	if err := json.Unmarshal(raw, &files); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // --- persistence ---

@@ -636,14 +636,32 @@ $(function () {
   // category(key, label, count, body) builds <div.ax-tree-category>
   // + <div.ax-tree-children>. key uniquely identifies the category in
   // localStorage so collapse state is stable across reloads.
+  // catIcons maps a category key → its bootstrap-icons glyph (rendered next to
+  // the label). Keep in sync with the category() calls below.
+  const catIcons = {
+    peers:    'bi-people-fill',
+    shells:   'bi-terminal-fill',
+    desktops: 'bi-display-fill',
+    messages: 'bi-chat-dots-fill',
+    drop:     'bi-folder-fill',
+    domains:  'bi-globe2',
+    tunnel:   'bi-hdd-network-fill',
+    policies: 'bi-shield-lock-fill',
+    apps:     'bi-grid-3x3-gap-fill',
+  };
+
   function category(key, label, count, body) {
     const collapsed = collapsedCats.has(key) ? ' collapsed' : '';
     const badge = count != null
       ? `<span class="ax-tree-badge">${count}</span>`
       : '';
+    const icon = catIcons[key]
+      ? `<i class="bi ${catIcons[key]} ax-tree-cat-icon"></i>`
+      : '';
     return (
       `<div class="ax-tree-category${collapsed}" data-cat="${esc(key)}">`
         + `<span class="ax-tree-caret">▾</span>`
+        + icon
         + `<span class="ax-tree-label">${esc(label)}</span>`
         + badge
       + `</div>`

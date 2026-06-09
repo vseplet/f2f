@@ -360,11 +360,6 @@ type Engine struct {
 	// the intercept catalog. nil disables the feature.
 	awgAllowedHook func(peerName string) []string
 
-	// tunnelHTTPPort is the port other peers expose their /api/domains
-	// on (= our UI bind port, since both sides run f2f-mac). Wired by
-	// main via SetTunnelHTTPPort.
-	tunnelHTTPPort string
-
 	// defaultListen is the UDP address autostart binds the peer
 	// transport to. Wired by main via SetDefaultListen (default
 	// ":9000") so multiple helpers on one host can pick disjoint
@@ -704,20 +699,10 @@ func (e *Engine) SetAWGAllowedCIDRsHook(fn func(peerName string) []string) {
 	e.awgAllowedHook = fn
 }
 
-// TunnelHTTPPort is the port other peers expose their /api/* on over
-// utun (same value we host the UI on). Empty when the engine wasn't
-// started with a UI bind. Exposed for services/trust and any future
-// peer-poll service.
-func (e *Engine) TunnelHTTPPort() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.tunnelHTTPPort
-}
-
-// OnlinePeerHTTPInfo is one peer reachable over utun for any
+// OnlinePeerHTTPInfo is one peer reachable over the overlay for any
 // service-level poll loop (CA poll, domain poll, etc.). The shape is
-// intentionally minimal — just what a poller needs to dial the peer
-// and key things back to the camp catalog.
+// intentionally minimal — just what a poller needs to address the
+// peer (bus by Pub) and key things back to the camp catalog.
 type OnlinePeerHTTPInfo struct {
 	Pub  string // Ed25519 hex pubkey, stable identity (used as map key)
 	Name string
@@ -966,10 +951,6 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 // 0 or stale by >25s), then once per ~25s as keepalive once we've
 // seen a packet from them. The single tick drives both modes, so a
 // peer that goes silent automatically reverts to burst mode.
-
-func (e *Engine) SetTunnelHTTPPort(port string) {
-	e.tunnelHTTPPort = port
-}
 
 // SetDefaultListen wires the UDP listen address autostart should use
 // when bringing the last camp up. Empty falls back to ":0" so the

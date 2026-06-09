@@ -41,7 +41,9 @@
     if (term || !window.Terminal) return;
     term = new window.Terminal({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      // 'Symbols Nerd Font' last: a per-glyph fallback so powerline/devicon
+      // glyphs in TUIs render, while normal text stays in the system mono.
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "Symbols Nerd Font", monospace',
       fontSize: 13,
       scrollback: 5000,
       theme: { background: '#0b0e14', foreground: '#cbd3e1' },
@@ -51,19 +53,82 @@
       term.loadAddon(fit);
     }
     term.open(elBody());
+    window.__term = term; // DEBUG: inspect term.modes.mouseTrackingMode in console
     term.onData((d) => {
+      // DEBUG: surface mouse reports xterm emits (ESC[< = SGR, ESC[M = X10).
+      if (d.indexOf('\x1b[<') === 0 || d.indexOf('\x1b[M') === 0) {
+        console.log('[term] mouse-out', JSON.stringify(d), 'mode=', term.modes && term.modes.mouseTrackingMode);
+      }
       if (ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d));
     });
     term.onResize(({ cols, rows }) => {
+      console.log('[term] resize', cols, rows); // DEBUG
       if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'resize', cols, rows }));
     });
+    // DEBUG: on every mousedown over the terminal, report what xterm thinks the
+    // mouse mode is — tells us if the mode was lost vs reports just not flowing.
+    elBody().addEventListener('mousedown', () => {
+      console.log('[term] mousedown · mouseTrackingMode=', term.modes && term.modes.mouseTrackingMode);
+    }, true);
     window.addEventListener('resize', () => {
       const t = document.getElementById('tab-term');
       if (t && !t.classList.contains('hidden')) doFit();
     });
+    // Refit on ANY container size change, not just window resize — dragging the
+    // sidebar resizes the main column without firing a window 'resize' event, so
+    // without this the grid keeps its old cols/rows and text spills off the edge.
+    if (window.ResizeObserver) {
+      let raf = 0;
+      const ro = new ResizeObserver(() => {
+        if (raf) return; // coalesce the burst of events during a drag
+        raf = requestAnimationFrame(() => { raf = 0; doFit(); });
+      });
+      ro.observe(elBody());
+    }
   }
 
-  function doFit() { if (fit) { try { fit.fit(); } catch (_) {} } }
+  function doFit() {
+    if (!fit) return;
+    // Never fit a hidden/zero-size container: FitAddon then computes NaN cols/
+    // rows and xterm.resize(NaN, NaN) corrupts the grid geometry, which breaks
+    // mouse-coordinate mapping (mouse "stops working" after a tab switch). The
+    // term panel goes display:none when another tab is shown, and the
+    // ResizeObserver fires on that 0×0 transition.
+    const el = elBody();
+    if (!el || el.offsetWidth === 0 || el.offsetHeight === 0) return;
+    try { fit.fit(); } catch (_) {}
+  }
+
+  // sendResize pushes the current grid to the host unconditionally. onResize
+  // only fires when cols/rows CHANGE, so after a page reload (fresh xterm that
+  // happens to fit the same size the host already had) the host would never get
+  // told — push it explicitly on connect.
+  function sendResize() {
+    if (term && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+    }
+  }
+
+  // redraw forces xterm to repaint every row from its own buffer. While a
+  // browser tab is hidden the renderer is throttled, so writes update the
+  // buffer but the DOM lags; on return the screen can look garbled. A refresh
+  // fixes it client-side — no reattach, so no mouse-mode loss.
+  function redraw() {
+    if (!term) return;
+    const t = document.getElementById('tab-term');
+    if (t && t.classList.contains('hidden')) return; // not visible; refresh on show
+    try { term.refresh(0, term.rows - 1); } catch (_) {}
+  }
+
+  // DEBUG: scan host→client bytes for sequences that would turn mouse tracking
+  // OFF — mouse DECRST (ESC[?1000l / 1002l / 1003l), full reset (ESC c) or soft
+  // reset (ESC[!p). Logs them so we can see exactly what kills the mouse.
+  function dbgScanIn(data) {
+    let s = data;
+    if (typeof s !== 'string') { try { s = new TextDecoder().decode(data); } catch (_) { return; } }
+    const hits = s.match(/\x1b\[\?(?:1000|1002|1003|1006)[hl]|\x1bc|\x1b\[!p/g);
+    if (hits) console.log('[term] IN mode-seq', hits.map((h) => JSON.stringify(h)).join(' '));
+  }
 
   function connect() {
     if (closing || !term) return;
@@ -75,10 +140,10 @@
     setStatus('connecting…');
     ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { setStatus('connected'); doFit(); term.focus(); };
+    ws.onopen = () => { setStatus('connected'); doFit(); sendResize(); term.focus(); };
     ws.onmessage = (e) => {
-      if (typeof e.data === 'string') term.write(e.data);
-      else term.write(new Uint8Array(e.data));
+      if (typeof e.data === 'string') { dbgScanIn(e.data); term.write(e.data); }
+      else { const u = new Uint8Array(e.data); dbgScanIn(u); term.write(u); }
     };
     ws.onerror = () => { try { ws.close(); } catch (_) {} };
     ws.onclose = () => {
@@ -104,7 +169,7 @@
     curPub = pub;
     curSession = sessionFor(pub);
     elTitle().textContent = '— terminal · ' + pub.slice(0, 12);
-    setTimeout(doFit, 0);
+    setTimeout(() => { doFit(); redraw(); }, 0); // repaint when the panel re-shows
     if (!ws) connect();
   }
 
@@ -143,7 +208,12 @@
   function applyTermRoute() {
     const m = (location.hash || '').replace(/^#/, '').match(/^term:(.+)$/);
     if (m) open(decodeURIComponent(m[1]));
-    else if (curPub) disconnect(); // navigated away → drop client, host keeps the PTY
+    // Switching to another tab no longer drops the WS: the connection (and the
+    // live xterm state — mouse mode, alt-screen, …) is kept alive in the
+    // background, the panel just gets hidden. Reattaching would replay the ring
+    // WITHOUT the app's one-time mouse-enable, so the mouse would stop working
+    // on return. Teardown happens only via the explicit "leave"/"kill" button
+    // or when opening another peer.
   }
 
   // toggleFullscreen uses the native Fullscreen API on the terminal body
@@ -163,6 +233,11 @@
     const fs = document.getElementById('term-fs');
     if (fs) fs.addEventListener('click', toggleFullscreen);
     document.addEventListener('fullscreenchange', () => setTimeout(doFit, 0));
+    // When the browser tab becomes visible again, repaint: the renderer was
+    // throttled while hidden so the screen may be stale.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) setTimeout(redraw, 0);
+    });
     window.addEventListener('hashchange', applyTermRoute);
     applyTermRoute();
   }

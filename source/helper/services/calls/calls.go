@@ -18,20 +18,26 @@
 package calls
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/services/calls/sfu"
+)
+
+// Bus message types for call discovery, membership and signalling.
+const (
+	BusTypeState  = "call.state"
+	BusTypeJoin   = "call.join"
+	BusTypeLeave  = "call.leave"
+	BusTypeSignal = "call.signal"
 )
 
 // State is one row in the UI's "active calls" list. Local + remote
@@ -58,6 +64,7 @@ type callCtx struct {
 type Service struct {
 	eng   *engine.Engine
 	store *config.Store
+	bus   *bus.Service
 
 	// OnLocalSignal delivers SFU signal messages destined for the
 	// local browser, bypassing HTTP-through-tunnel. Set by main.go
@@ -74,8 +81,87 @@ type Service struct {
 }
 
 // New constructs a Service. The engine and store must outlive it.
-func New(store *config.Store, eng *engine.Engine) *Service {
-	return &Service{store: store, eng: eng}
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
+	return &Service{store: store, eng: eng, bus: b}
+}
+
+// Register installs the call.* bus handlers. The sender's identity
+// arrives as a pub; SFU participants are keyed by overlay IP, so each
+// handler resolves pub → IP through the engine roster. Call once
+// after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(BusTypeState, func(string, []byte) ([]byte, error) {
+		return json.Marshal(s.LocalCall())
+	})
+	s.bus.Handle(BusTypeJoin, func(fromPub string, payload []byte) ([]byte, error) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(payload, &req)
+		ip := s.ipForPub(fromPub)
+		if ip == "" {
+			return nil, fmt.Errorf("unknown caller %s", fromPub)
+		}
+		if err := s.Join(ip, req.Name); err != nil {
+			return nil, err
+		}
+		return json.Marshal(s.LocalCall())
+	})
+	s.bus.Handle(BusTypeLeave, func(fromPub string, _ []byte) ([]byte, error) {
+		if ip := s.ipForPub(fromPub); ip != "" {
+			s.Leave(ip)
+		}
+		return nil, nil
+	})
+	s.bus.Handle(BusTypeSignal, func(fromPub string, payload []byte) ([]byte, error) {
+		// Same dual role as the tunnel listener's /api/call/signal:
+		// signals FROM an SFU go to the local browser; everything else
+		// is a participant's signal into our locally-hosted SFU.
+		var peek struct {
+			From string `json:"from"`
+		}
+		_ = json.Unmarshal(payload, &peek)
+		if peek.From == "sfu" {
+			if s.OnLocalSignal != nil {
+				s.OnLocalSignal(payload)
+			}
+			return nil, nil
+		}
+		from := s.ipForPub(fromPub)
+		if from == "" {
+			return nil, fmt.Errorf("unknown caller %s", fromPub)
+		}
+		return s.HandleSignal(from, payload)
+	})
+}
+
+// ipForPub resolves a peer pub to its overlay v4 (empty if unknown).
+func (s *Service) ipForPub(pub string) string {
+	if pub == "" {
+		return ""
+	}
+	for _, p := range s.eng.Status().Peers {
+		if !p.Self && p.Pub == pub {
+			return p.OverlayV4
+		}
+	}
+	return ""
+}
+
+// pubForIP resolves an overlay v4 to the peer's pub (empty if unknown).
+func (s *Service) pubForIP(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	for _, p := range s.eng.Status().Peers {
+		if !p.Self && p.OverlayV4 == ip {
+			return p.Pub
+		}
+	}
+	return ""
 }
 
 // --- state helpers ---
@@ -286,19 +372,15 @@ func (s *Service) deliverSignal(to string, msg []byte) {
 		s.OnLocalSignal(msg)
 		return
 	}
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		port = "2202"
+	pub := s.pubForIP(to)
+	if s.bus == nil || pub == "" {
+		log.Printf("call: deliver signal to %s: no bus route", to)
+		return
 	}
-	url := "http://" + to + ":" + port + "/api/call/signal"
 	go func() {
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Post(url, "application/json", bytes.NewReader(msg))
-		if err != nil {
+		if err := s.bus.Notify(pub, BusTypeSignal, msg); err != nil {
 			log.Printf("call: deliver signal to %s: %v", to, err)
-			return
 		}
-		resp.Body.Close()
 	}()
 }
 
@@ -321,8 +403,7 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
+	if s.bus == nil {
 		return
 	}
 	targets := s.eng.OnlinePeersForCAPoll()
@@ -330,28 +411,34 @@ func (s *Service) pollOnce(ctx context.Context) {
 		s.storeRemoteCalls(nil)
 		return
 	}
-	client := &http.Client{Timeout: 3 * time.Second}
 	var found []State
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/call/state"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if t.Pub == "" {
+			continue
+		}
+		cs, err := s.fetchCallState(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var cs State
-		if err := json.NewDecoder(resp.Body).Decode(&cs); err != nil {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
 		if cs.CallID != "" {
 			cs.Remote = true
 			found = append(found, cs)
 		}
 	}
 	s.storeRemoteCalls(found)
+}
+
+// fetchCallState asks one peer for the call it's hosting over the bus.
+func (s *Service) fetchCallState(ctx context.Context, pub string) (State, error) {
+	var cs State
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, BusTypeState, nil)
+	if err != nil {
+		return cs, err
+	}
+	if err := json.Unmarshal(raw, &cs); err != nil {
+		return cs, err
+	}
+	return cs, nil
 }
