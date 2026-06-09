@@ -88,7 +88,9 @@
     max-width: 600px;
     flex-shrink: 0;
     position: relative;
-    background: var(--frame);
+    /* A touch darker than the main column (--frame) so the sidebars recede and
+       the main workspace reads as the focused area. */
+    background: var(--bg);
     border-right: 1px dotted var(--border);
     color: var(--text);
     font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco,
