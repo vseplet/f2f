@@ -30,9 +30,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
 )
+
+// busTypeFiles is the bus message type serving our seeded-file catalog
+// — the QUIC counterpart of GET /api/files on the tunnel listener
+// (kept for peers on pre-bus builds).
+const busTypeFiles = "files"
 
 // PeerFile is one file entry as published by a peer's /api/files.
 // Path is stripped — peer-facing data only.
@@ -48,6 +54,8 @@ type PeerFile struct {
 // transitions; Start/Stop are driven by engine lifecycle hooks.
 type Service struct {
 	eng     *engine.Engine
+	bus     *bus.Service
+	http    *http.Client
 	campDir func(campID string) string // ~/.f2f/<camp_id>/ (creates it)
 
 	mu        sync.Mutex
@@ -62,12 +70,37 @@ type Service struct {
 
 // New constructs a Service. campDir resolves a camp's directory
 // (config.Store.CampDir). The engine must outlive the service.
-func New(eng *engine.Engine, campDir func(campID string) string) *Service {
+func New(eng *engine.Engine, campDir func(campID string) string, b *bus.Service) *Service {
 	return &Service{
 		eng:       eng,
+		bus:       b,
+		http:      &http.Client{Timeout: 5 * time.Second},
 		campDir:   campDir,
 		peerFiles: map[string][]PeerFile{},
 	}
+}
+
+// Register installs the bus handler that serves our seeded-file list
+// to peers (Path never leaves the machine — PeerFile has no such
+// field). Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeFiles, func(string, []byte) ([]byte, error) {
+		c := s.Client()
+		if c == nil {
+			return nil, fmt.Errorf("torrent client not running")
+		}
+		out := []PeerFile{}
+		for _, h := range c.ListSeeds() {
+			out = append(out, PeerFile{
+				Name: h.Name, Size: h.Size,
+				InfoHash: h.InfoHash, Magnet: h.Magnet,
+			})
+		}
+		return json.Marshal(out)
+	})
 }
 
 // Start binds the BT client on the overlay v4 alias for the given
@@ -224,28 +257,13 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		return
-	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	port := s.eng.TunnelHTTPPort()
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/files"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var files []PeerFile
-		err = json.NewDecoder(resp.Body).Decode(&files)
-		resp.Body.Close()
+		files, err := s.fetchPeerFiles(ctx, t, port)
 		if err != nil {
 			continue
 		}
@@ -253,6 +271,41 @@ func (s *Service) pollOnce(ctx context.Context) {
 		s.peerFiles[t.Pub] = files
 		s.peerMu.Unlock()
 	}
+}
+
+// fetchPeerFiles pulls one peer's published file list: bus first,
+// legacy HTTP endpoint as fallback for peers on pre-bus builds. Remove
+// the HTTP leg once every peer in the camp has upgraded.
+func (s *Service) fetchPeerFiles(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]PeerFile, error) {
+	if s.bus != nil && t.Pub != "" {
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, err := s.bus.Request(rctx, t.Pub, busTypeFiles, nil)
+		cancel()
+		if err == nil {
+			var files []PeerFile
+			if jerr := json.Unmarshal(raw, &files); jerr == nil {
+				return files, nil
+			}
+		}
+	}
+	if port == "" {
+		return nil, fmt.Errorf("drop: peer unreachable over bus, no tunnel HTTP fallback")
+	}
+	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/files"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var files []PeerFile
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // --- persistence ---

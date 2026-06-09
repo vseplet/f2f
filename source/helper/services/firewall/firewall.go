@@ -31,8 +31,15 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 )
+
+// busTypeFirewall is the bus message type serving our allow list —
+// the QUIC counterpart of GET /api/firewall on the tunnel listener
+// (kept for peers on pre-bus builds). Response shape matches the HTTP
+// endpoint: {"active":…, "builtin":[…], "user":[…]}.
+const busTypeFirewall = "firewall"
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
 // hasn't been Start'ed yet (no camp loaded → no per-camp config file
@@ -88,6 +95,8 @@ func BuiltinLabel(port int, proto string) string {
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine // for OnlinePeersForCAPoll + TunnelHTTPPort
+	bus   *bus.Service
+	http  *http.Client
 
 	mu     sync.Mutex
 	anchor *anchor
@@ -102,12 +111,29 @@ type Service struct {
 }
 
 // New constructs a Service. The store and engine must outlive it.
-func New(store *config.Store, eng *engine.Engine) *Service {
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store:     store,
 		eng:       eng,
+		bus:       b,
+		http:      &http.Client{Timeout: 5 * time.Second},
 		peerPorts: map[string][]config.Firewall{},
 	}
+}
+
+// Register installs the bus handler that serves our allow list to
+// peers. Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeFirewall, func(string, []byte) ([]byte, error) {
+		return json.Marshal(map[string]any{
+			"active":  s.Active(),
+			"builtin": s.BuiltinPorts(),
+			"user":    s.UserPorts(),
+		})
+	})
 }
 
 // PeerPorts returns a copy of one peer's most recently-polled
@@ -148,38 +174,21 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		return
-	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
+	port := s.eng.TunnelHTTPPort()
 	s.mu.Lock()
 	campID := s.campID
 	s.mu.Unlock()
-	client := &http.Client{Timeout: 5 * time.Second}
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/firewall"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var body struct {
-			User []config.Firewall `json:"user"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
+		user, err := s.fetchPeerPorts(ctx, t, port)
 		if err != nil {
 			continue
 		}
 		s.peerMu.Lock()
-		s.peerPorts[t.Pub] = body.User
+		s.peerPorts[t.Pub] = user
 		s.peerMu.Unlock()
 		if campID == "" || t.Pub == "" {
 			continue
@@ -187,12 +196,48 @@ func (s *Service) pollOnce(ctx context.Context) {
 		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
 			for i := range c.PeerCatalog {
 				if c.PeerCatalog[i].Pub == t.Pub {
-					c.PeerCatalog[i].Firewall = append([]config.Firewall(nil), body.User...)
+					c.PeerCatalog[i].Firewall = append([]config.Firewall(nil), user...)
 					return
 				}
 			}
 		})
 	}
+}
+
+// fetchPeerPorts pulls one peer's user allow list: bus first, legacy
+// HTTP endpoint as fallback for peers on pre-bus builds. Remove the
+// HTTP leg once every peer in the camp has upgraded.
+func (s *Service) fetchPeerPorts(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]config.Firewall, error) {
+	var body struct {
+		User []config.Firewall `json:"user"`
+	}
+	if s.bus != nil && t.Pub != "" {
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, err := s.bus.Request(rctx, t.Pub, busTypeFirewall, nil)
+		cancel()
+		if err == nil {
+			if jerr := json.Unmarshal(raw, &body); jerr == nil {
+				return body.User, nil
+			}
+		}
+	}
+	if port == "" {
+		return nil, errors.New("firewall: peer unreachable over bus, no tunnel HTTP fallback")
+	}
+	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/firewall"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.User, nil
 }
 
 // Start installs the pf anchor on iface scoped to tunnelIP with the

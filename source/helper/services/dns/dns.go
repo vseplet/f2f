@@ -35,9 +35,15 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
+
+// busTypeDomains is the bus message type serving our published domain
+// catalog — the QUIC counterpart of GET /api/domains on the tunnel
+// listener (kept for peers on pre-bus builds).
+const busTypeDomains = "domains"
 
 // Entry is one (name, port, proto) record this peer publishes inside
 // the camp's <camp>.f2f zone. Port and proto are advisory: DNS only
@@ -78,6 +84,8 @@ type healthSnapshot struct {
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine
+	bus   *bus.Service
+	http  *http.Client
 
 	my atomic.Pointer[[]Entry]
 
@@ -101,13 +109,26 @@ type Service struct {
 // service. The camp identity is picked up from engine.Status() at
 // Start time — the service is "the current camp's DNS", not bound
 // to a specific id, so camp switches just require Stop+Start.
-func New(store *config.Store, eng *engine.Engine) *Service {
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store:    store,
 		eng:      eng,
+		bus:      b,
+		http:     &http.Client{Timeout: 3 * time.Second},
 		health:   make(map[string]healthSnapshot),
 		peerDoms: make(map[string][]Entry),
 	}
+}
+
+// Register installs the bus handler that serves our domain catalog to
+// peers. Call once after construction (like shell/vnc Register).
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeDomains, func(string, []byte) ([]byte, error) {
+		return json.Marshal(s.MyDomains())
+	})
 }
 
 // Start opens the DNS server on a free loopback port, installs the
@@ -482,37 +503,55 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
-	port := s.eng.TunnelHTTPPort()
-	if port == "" {
-		// log.Printf("dns-poll: tunnel HTTP port not set — skipping")
-		return
-	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		// log.Printf("dns-poll: 0 peers online — skipping tick")
 		return
 	}
-	// log.Printf("dns-poll: polling %d peer(s) on port %s", len(targets), port)
-	client := &http.Client{Timeout: 3 * time.Second}
+	port := s.eng.TunnelHTTPPort()
 	for _, t := range targets {
-		url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var list []Entry
-		err = json.NewDecoder(resp.Body).Decode(&list)
-		resp.Body.Close()
+		list, err := s.fetchDomains(ctx, t, port)
 		if err != nil {
 			continue
 		}
 		s.upsertPeer(t.Pub, t.Name, list)
 		// log.Printf("dns: peer %s published %d domain(s)", t.Name, len(list))
 	}
+}
+
+// fetchDomains asks one peer for its domain catalog: bus first, falling
+// back to the legacy HTTP endpoint for peers on pre-bus builds. Remove
+// the HTTP leg once every peer in the camp has upgraded.
+func (s *Service) fetchDomains(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]Entry, error) {
+	if s.bus != nil && t.Pub != "" {
+		rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		raw, err := s.bus.Request(rctx, t.Pub, busTypeDomains, nil)
+		cancel()
+		if err == nil {
+			var list []Entry
+			if jerr := json.Unmarshal(raw, &list); jerr == nil {
+				return list, nil
+			}
+		}
+	}
+	if port == "" {
+		return nil, errors.New("dns: peer unreachable over bus, no tunnel HTTP port for fallback")
+	}
+	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var list []Entry
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // upsertPeer mirrors a peer's just-polled domain list into both the
