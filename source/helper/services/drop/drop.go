@@ -216,6 +216,97 @@ func (s *Service) RemoveDownload(infoHash string) bool {
 	return removed
 }
 
+// metaVerdict is what to do with a download still fetching metadata,
+// decided from its source peers' online state + published catalogs.
+type metaVerdict int
+
+const (
+	metaWait     metaVerdict = iota // online source still lists it (or not polled yet) — keep fetching
+	metaUnshared                    // online source no longer lists it — gone, remove
+	metaOffline                     // no source online — keep pending, resumes when it returns
+)
+
+// metadataVerdict maps a download's source addresses to online peers
+// and inspects their last-polled file catalogs:
+//   - any online source still lists this info hash      → metaWait
+//   - online source(s) present, catalog known, none list it → metaUnshared
+//   - online source(s) present but catalog not polled yet   → metaWait (give it time)
+//   - no source online                                   → metaOffline
+func (s *Service) metadataVerdict(d *internaltorrent.Download) metaVerdict {
+	onlinePub := map[string]string{} // overlay v4 host → pub, online peers only
+	for _, p := range s.eng.OnlinePeersForCAPoll() {
+		if p.Host != "" {
+			onlinePub[p.Host] = p.Pub
+		}
+	}
+	var anyOnline, anyShares, anyCatalog bool
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	for _, addr := range d.Peers {
+		host := addr
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			host = h
+		}
+		pub, ok := onlinePub[host]
+		if !ok || pub == "" {
+			continue // this source is offline
+		}
+		anyOnline = true
+		files, polled := s.peerFiles[pub]
+		if !polled {
+			continue // online but we haven't polled its catalog yet
+		}
+		anyCatalog = true
+		for _, f := range files {
+			if f.InfoHash == d.InfoHash {
+				anyShares = true
+			}
+		}
+	}
+	switch {
+	case !anyOnline:
+		return metaOffline
+	case anyShares:
+		return metaWait
+	case anyCatalog:
+		return metaUnshared // online, catalog known, file not in it → un-shared
+	default:
+		return metaWait // online but not polled yet
+	}
+}
+
+// SourceOnline reports whether a download (by info hash) has at least
+// one source peer online right now. Surfaced in the UI so a
+// metadata-stuck download reads as "source offline" instead of a
+// perpetual "fetching…". Unknown hash → false.
+func (s *Service) SourceOnline(infoHash string) bool {
+	c := s.Client()
+	if c == nil {
+		return false
+	}
+	onlinePub := map[string]struct{}{}
+	for _, p := range s.eng.OnlinePeersForCAPoll() {
+		if p.Host != "" {
+			onlinePub[p.Host] = struct{}{}
+		}
+	}
+	for _, d := range c.ListDownloads() {
+		if d.InfoHash != infoHash {
+			continue
+		}
+		for _, addr := range d.Peers {
+			host := addr
+			if h, _, err := net.SplitHostPort(addr); err == nil {
+				host = h
+			}
+			if _, ok := onlinePub[host]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // PeerFiles returns the cached list of files published by one peer
 // (empty before the first successful poll).
 func (s *Service) PeerFiles(pub string) []PeerFile {
@@ -231,8 +322,12 @@ func (s *Service) PeerFiles(pub string) []PeerFile {
 }
 
 // PollPeers blocks until ctx is done, walking every online peer
-// every 60s and pulling /api/files. First poll after 7s (let the
-// camp poller discover peers). Resilient to engine being down.
+// every 15s and pulling their file catalog over the bus. First poll
+// after 7s (let the camp poller discover peers). Resilient to engine
+// being down. The cadence also bounds how fast we notice a peer
+// un-sharing a file (→ a stuck download is dropped as a zombie) and
+// how fast a peer's newly-shared files show up in the camp library —
+// cheap over QUIC, so kept tighter than the old 60s.
 func (s *Service) PollPeers(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -240,7 +335,7 @@ func (s *Service) PollPeers(ctx context.Context) {
 	case <-time.After(7 * time.Second):
 	}
 	s.pollOnce(ctx)
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -404,7 +499,20 @@ func (s *Service) refeedActiveDownloads(c *internaltorrent.Client) {
 	now := time.Now()
 	for _, d := range c.ListDownloads() {
 		if d.Torrent == nil || d.Torrent.Info() == nil {
-			c.FeedPeers(d)
+			// Still fetching metadata. Decide by the source's published
+			// catalog, NOT by mere online/offline: an offline source is
+			// just temporarily away (will reshare), but a source that's
+			// online and no longer lists the file has genuinely
+			// un-shared it — only then is the download a dead zombie.
+			switch s.metadataVerdict(d) {
+			case metaUnshared:
+				log.Printf("downloads: %s no longer shared by any online peer — removing", d.InfoHash)
+				s.RemoveDownload(d.InfoHash)
+			case metaWait:
+				c.FeedPeers(d) // online source still offers it (or catalog not polled yet)
+			case metaOffline:
+				// source away — keep pending, resumes when it returns.
+			}
 			continue
 		}
 		total := d.Torrent.Info().TotalLength()

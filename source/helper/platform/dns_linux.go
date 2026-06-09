@@ -34,3 +34,14 @@ func ZoneResolverInstalled(zone string) bool { return false }
 // RemoveZoneResolver mirrors InstallZoneResolver. No-op while the
 // install path is unimplemented.
 func RemoveZoneResolver(zone string) error { return nil }
+
+// InstallDomainResolver mirrors the darwin per-domain resolver
+// install. Linux needs systemd-resolved routing-domain support —
+// stubbed alongside InstallZoneResolver.
+func InstallDomainResolver(domain, bindAddr string) error {
+	return fmt.Errorf("InstallDomainResolver on linux: %w", ErrUnsupported)
+}
+
+// RemoveDomainResolver mirrors InstallDomainResolver. No-op while
+// the install path is unimplemented.
+func RemoveDomainResolver(domain string) error { return nil }

@@ -38,10 +38,21 @@ type FirewallPolicy struct {
 
 // NATRules describes outbound NAT for tunnel traffic: packets from
 // Subnet leaving via EgressIface get source-translated to that
-// interface's address.
+// interface's address. Targets add per-destination exceptions for
+// IPs that route via a different interface (e.g. a corporate VPN's
+// tun on a split-tunnel exit node) — those are matched first.
 type NATRules struct {
 	EgressIface string
 	Subnet      netip.Prefix
+	Targets     []TargetNAT
+}
+
+// TargetNAT is one per-destination NAT entry: traffic from the
+// overlay subnet to IP leaves via Iface and is translated to that
+// interface's address.
+type TargetNAT struct {
+	IP    netip.Addr
+	Iface string
 }
 
 // FilterEngineToken is an opaque per-OS handle for the OS packet

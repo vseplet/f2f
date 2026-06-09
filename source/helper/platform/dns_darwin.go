@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const resolverDir = "/etc/resolver"
@@ -69,4 +70,36 @@ func RemoveZoneResolver(zone string) error {
 
 func zoneResolverPath(zone string) string {
 	return filepath.Join(resolverDir, zone+".f2f")
+}
+
+// InstallDomainResolver drops /etc/resolver/<domain> so macOS routes
+// queries for that exact domain (and its subdomains) to our local
+// DNS server. Used for intercept domains that must resolve to the
+// exit-peer's view of the name instead of public DNS.
+func InstallDomainResolver(domain, bindAddr string) error {
+	if domain == "" || strings.ContainsAny(domain, "/\\ ") {
+		return fmt.Errorf("bad resolver domain %q", domain)
+	}
+	host, port, err := net.SplitHostPort(bindAddr)
+	if err != nil {
+		return fmt.Errorf("split bind addr %q: %w", bindAddr, err)
+	}
+	if err := os.MkdirAll(resolverDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", resolverDir, err)
+	}
+	body := fmt.Sprintf("nameserver %s\nport %s\nsearch_order 1\n", host, port)
+	return os.WriteFile(filepath.Join(resolverDir, domain), []byte(body), 0o644)
+}
+
+// RemoveDomainResolver deletes the per-domain resolver file. No-op
+// if not present.
+func RemoveDomainResolver(domain string) error {
+	if domain == "" || strings.ContainsAny(domain, "/\\ ") {
+		return nil
+	}
+	err := os.Remove(filepath.Join(resolverDir, domain))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

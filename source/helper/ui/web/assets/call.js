@@ -101,8 +101,11 @@ $(function () {
 
   // Wait until ICE gathering finishes so the local SDP carries every host
   // candidate; we then send that full SDP instead of trickling candidates.
-  // Capped so a stuck gatherer can't hang the handshake forever.
-  function waitIceComplete(conn, ms = 2000) {
+  // Capped so a stuck gatherer can't hang the handshake forever. 5s: on a
+  // mac with many interfaces (en0, awdl0, foreign utuns) 2s sometimes cut
+  // the gather short and the overlay (100.64.x) candidate missed the SDP —
+  // then media had no path over the tunnel at all.
+  function waitIceComplete(conn, ms = 5000) {
     if (conn.iceGatheringState === 'complete') return Promise.resolve();
     return new Promise((resolve) => {
       let done = false;
@@ -167,11 +170,27 @@ $(function () {
     conn.oniceconnectionstatechange = () => {
       const st = conn.iceConnectionState;
       console.log('[f2f call] ice', st);
-      if (st === 'failed') { Call.setState('weak'); restartIce(); }
+      if (st === 'failed') {
+        Call.setState('weak');
+        if (isOfferer) restartIce(); else requestIceRestart();
+      }
       else if (st === 'disconnected') Call.setState('weak');
       else if (st === 'connected' || st === 'completed') Call.setState('active');
     };
     return conn;
+  }
+
+  // The answerer can't restart ICE itself (a restart is an offer with fresh
+  // credentials, and offers stay on the caller's side to avoid glare), so it
+  // asks the offerer over the signalling channel — which rides the helper
+  // bus and stays up even when the media path is dead. Throttled so a
+  // flapping connection doesn't spam restart offers.
+  let lastRestartReq = 0;
+  function requestIceRestart() {
+    const now = Date.now();
+    if (now - lastRestartReq < 5000) return;
+    lastRestartReq = now;
+    sendSignal({ kind: 'restart' });
   }
 
   // ICE restart: on a failed connection the offerer re-offers with fresh ICE
@@ -246,6 +265,10 @@ $(function () {
       // We're non-trickle (candidates ride in the SDP); only honour a stray
       // trickled candidate if the connection is already up enough to take it.
       if (pc && pc.remoteDescription) { try { await pc.addIceCandidate(msg.candidate); } catch (_) {} }
+    } else if (msg.kind === 'restart') {
+      // The answerer noticed the media path died and asks us to re-offer
+      // with fresh ICE. No-op on the answerer side (restartIce guards).
+      restartIce();
     } else if (msg.kind === 'screen') {
       if (msg.on) {
         peerScreenStreamId = msg.sid || '';

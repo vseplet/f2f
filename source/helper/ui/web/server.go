@@ -1050,6 +1050,10 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 		// waiting on metadata forever" — shows up as just an info_hash.
 		if d.Torrent == nil || d.Torrent.Info() == nil {
 			row["fetching_metadata"] = true
+			// Whether the source peer is reachable right now: lets the UI
+			// say "source offline" instead of a hopeful "fetching…" when
+			// nobody can serve the metadata.
+			row["source_online"] = s.drop.SourceOnline(d.InfoHash)
 		} else {
 			info := d.Torrent.Info()
 			total := info.TotalLength()

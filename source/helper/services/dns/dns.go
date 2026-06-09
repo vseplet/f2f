@@ -96,6 +96,13 @@ type Service struct {
 	peerDomsMu sync.RWMutex
 	peerDoms   map[string][]Entry // pub → entries
 
+	// pinned are intercept domains answered with the exit-peer's
+	// resolved IPs (set by services/tunnel via SetPinned). Keyed by
+	// lowercase name without trailing dot. Each pinned name also gets
+	// a per-domain OS resolver entry so its queries reach our server.
+	pinMu  sync.RWMutex
+	pinned map[string][]string
+
 	srvMu  sync.Mutex
 	srv    *Server
 	zone   string
@@ -113,7 +120,62 @@ func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 		bus:      b,
 		health:   make(map[string]healthSnapshot),
 		peerDoms: make(map[string][]Entry),
+		pinned:   make(map[string][]string),
 	}
+}
+
+// SetPinned answers domain with the given A records (exit-peer
+// resolved intercept IPs) and routes the OS's queries for that name
+// to our server via a per-domain resolver entry. Replaces any prior
+// pin for the same name.
+func (s *Service) SetPinned(domain string, v4s []string) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" || len(v4s) == 0 {
+		return
+	}
+	s.pinMu.Lock()
+	s.pinned[domain] = append([]string(nil), v4s...)
+	s.pinMu.Unlock()
+	s.srvMu.Lock()
+	srv := s.srv
+	s.srvMu.Unlock()
+	if srv == nil {
+		return // installed on next Start via reinstallPinnedLocked
+	}
+	if err := platform.InstallDomainResolver(domain, srv.Addr()); err != nil {
+		log.Printf("dns: install resolver for %s: %v", domain, err)
+		return
+	}
+	_ = platform.FlushDNSCache()
+	log.Printf("dns: pinned %s → %s", domain, strings.Join(v4s, ", "))
+}
+
+// RemovePinned drops a pinned domain and its OS resolver entry.
+func (s *Service) RemovePinned(domain string) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		return
+	}
+	s.pinMu.Lock()
+	_, had := s.pinned[domain]
+	delete(s.pinned, domain)
+	s.pinMu.Unlock()
+	if !had {
+		return
+	}
+	if err := platform.RemoveDomainResolver(domain); err != nil {
+		log.Printf("dns: remove resolver for %s: %v", domain, err)
+	}
+	_ = platform.FlushDNSCache()
+}
+
+// PinnedLookup returns the pinned A records for an exact name ("" dot
+// trimmed, lowercase) — the DNS server consults it for queries outside
+// the camp zone. nil = not pinned.
+func (s *Service) PinnedLookup(name string) []string {
+	s.pinMu.RLock()
+	defer s.pinMu.RUnlock()
+	return s.pinned[name]
 }
 
 // Register installs the bus handler that serves our domain catalog to
@@ -142,7 +204,7 @@ func (s *Service) Start(campID, zone string) error {
 	if err := s.seedFromStore(); err != nil {
 		return err
 	}
-	srv, err := Open("127.0.0.1:0", zone, s)
+	srv, err := Open("127.0.0.1:0", zone, s, s.PinnedLookup)
 	if err != nil {
 		return err
 	}
@@ -155,6 +217,15 @@ func (s *Service) Start(campID, zone string) error {
 		log.Printf("dns: serving %s.f2f on %s", zone, addr)
 		_ = platform.FlushDNSCache()
 	}
+	// Re-point per-domain resolver entries for pins that survived a
+	// restart (the bound port changes every Start).
+	s.pinMu.RLock()
+	for domain := range s.pinned {
+		if err := platform.InstallDomainResolver(domain, addr); err != nil {
+			log.Printf("dns: reinstall resolver for %s: %v", domain, err)
+		}
+	}
+	s.pinMu.RUnlock()
 	return nil
 }
 
@@ -209,6 +280,15 @@ func (s *Service) Stop() error {
 			log.Printf("dns: remove zone resolver: %v", err)
 		}
 	}
+	// Drop per-domain resolver files — with the server down they'd
+	// blackhole those names. The pinned map stays; Start reinstalls.
+	s.pinMu.RLock()
+	for domain := range s.pinned {
+		if err := platform.RemoveDomainResolver(domain); err != nil {
+			log.Printf("dns: remove resolver for %s: %v", domain, err)
+		}
+	}
+	s.pinMu.RUnlock()
 	if srv == nil {
 		return nil
 	}

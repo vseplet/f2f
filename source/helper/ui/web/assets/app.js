@@ -2087,11 +2087,15 @@ $(function () {
       const displayName = d.name || d.info_hash.slice(0, 12);
       $head.append($('<span class="ax-intercept-spec">').text(displayName));
       if (d.fetching_metadata) {
-        // Magnet added, anacrolix hasn't fetched the .torrent yet —
-        // source peer offline or never connected. Show this so the user
-        // knows the row isn't just "0% but downloading", it's stuck
-        // waiting on the source.
-        $head.append($('<span class="ax-pill ax-pill-pending">').text('fetching metadata…'));
+        // Magnet added, anacrolix hasn't fetched the .torrent yet. If
+        // the source peer is offline there's nobody to fetch from —
+        // say so instead of a perpetual "fetching…". It resumes by
+        // itself when the source comes back online.
+        if (d.source_online === false) {
+          $head.append($('<span class="ax-pill ax-pill-pending">').text('source offline'));
+        } else {
+          $head.append($('<span class="ax-pill ax-pill-pending">').text('fetching metadata…'));
+        }
       } else if (d.size) {
         const total = d.size;
         const done = d.bytes_completed || 0;

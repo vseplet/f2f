@@ -22,6 +22,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,9 +34,18 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
+
+// busTypeResolve is the bus message type for exit-peer name
+// resolution: the payload is a bare DNS name, the response a JSON
+// array of IP strings resolved from THIS node's network view (inside
+// its corporate VPN, etc.). As a side effect the handler prepares
+// per-target egress NAT for the resolved IPs, so a follow-up
+// intercept route through this node actually reaches them.
+const busTypeResolve = "resolve"
 
 // InterceptInfo describes one intercept entry — the spec the user
 // typed, the host routes it owns on the local route table, and the
@@ -54,6 +64,16 @@ type InterceptInfo struct {
 type Service struct {
 	store *config.Store
 	eng   *engine.Engine
+	bus   *bus.Service
+
+	// OnDomainPinned / OnDomainUnpinned let main wire the local DNS
+	// service: when a domain-spec intercept resolves (on the exit
+	// peer), the client's own DNS must answer that name with the SAME
+	// IPs the routes point at — otherwise apps resolve publicly (or
+	// not at all, for VPN-only names) and miss the tunnel. Set once
+	// before Start.
+	OnDomainPinned   func(domain string, v4s []string)
+	OnDomainUnpinned func(domain string)
 
 	mu         sync.Mutex
 	campID     string
@@ -62,13 +82,55 @@ type Service struct {
 	egress     *egress
 }
 
-// New constructs a Service. store + engine must outlive it.
-func New(store *config.Store, eng *engine.Engine) *Service {
+// New constructs a Service. store + engine + bus must outlive it.
+func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 	return &Service{
 		store:      store,
 		eng:        eng,
+		bus:        b,
 		intercepts: map[string]*InterceptInfo{},
 	}
+}
+
+// Register installs the "resolve" bus handler: peers ask us to
+// resolve a name from our network's point of view (we may sit inside
+// a VPN they can't see). We also prepare per-target egress NAT for
+// the answer, so the asking peer's follow-up traffic routed through
+// us reaches the target even when it egresses via another tunnel
+// (split-tunnel corporate VPN). Call once after construction.
+func (s *Service) Register() {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Handle(busTypeResolve, func(fromPub string, payload []byte) ([]byte, error) {
+		name := strings.ToLower(strings.TrimSpace(string(payload)))
+		if name == "" || len(name) > 253 || !isDomainSpec(name) {
+			return nil, fmt.Errorf("bad resolve name %q", name)
+		}
+		ips, err := net.LookupIP(name)
+		if err != nil {
+			return nil, err
+		}
+		var addrs []netip.Addr
+		var out []string
+		for _, ip := range ips {
+			a, ok := netip.AddrFromSlice(ip)
+			if !ok {
+				continue
+			}
+			a = a.Unmap()
+			addrs = append(addrs, a)
+			out = append(out, a.String())
+		}
+		s.mu.Lock()
+		eg := s.egress
+		s.mu.Unlock()
+		if eg != nil {
+			eg.ensureTargets(addrs, s.eng.UtunName())
+		}
+		log.Printf("resolve: %s → %s (asked over bus)", name, strings.Join(out, ", "))
+		return json.Marshal(out)
+	})
 }
 
 // Start picks up the active camp_id, restores every (spec, peer)
@@ -91,11 +153,19 @@ func (s *Service) Start(campID string) {
 // its route.Manager.
 func (s *Service) Stop() {
 	s.mu.Lock()
+	old := s.intercepts
 	s.intercepts = map[string]*InterceptInfo{}
 	s.campID = ""
 	eg := s.egress
 	s.egress = nil
 	s.mu.Unlock()
+	if s.OnDomainUnpinned != nil {
+		for _, info := range old {
+			if isDomainSpec(info.Spec) {
+				s.OnDomainUnpinned(strings.ToLower(info.Spec))
+			}
+		}
+	}
 	if eg != nil {
 		if err := eg.close(); err != nil {
 			log.Printf("egress close: %v", err)
@@ -204,6 +274,9 @@ func (s *Service) Remove(id string) error {
 		}
 	}
 	log.Printf("removed intercept %s (%s)", id, info.Spec)
+	if isDomainSpec(info.Spec) && s.OnDomainUnpinned != nil {
+		s.OnDomainUnpinned(strings.ToLower(info.Spec))
+	}
 	if campID != "" {
 		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
 			kept := c.Intercepts[:0]
@@ -228,7 +301,7 @@ func (s *Service) addLocked(spec, peer string) (InterceptInfo, error) {
 	if spec == "" {
 		return InterceptInfo{}, errors.New("empty intercept spec")
 	}
-	prefixes, err := resolveSpec(spec)
+	prefixes, err := s.resolvePrefixes(spec, peer)
 	if err != nil {
 		return InterceptInfo{}, err
 	}
@@ -266,7 +339,111 @@ func (s *Service) addLocked(spec, peer string) (InterceptInfo, error) {
 	s.mu.Lock()
 	s.intercepts[id] = info
 	s.mu.Unlock()
+	s.pinDomain(spec, info.Prefixes)
 	return *info, nil
+}
+
+// addPendingLocked registers a domain intercept whose resolve failed
+// (exit peer offline at restore time) with no routes — so the
+// RefreshDomainRoutes ticker keeps retrying it instead of the entry
+// silently disappearing until the next restart.
+func (s *Service) addPendingLocked(spec, peer string) {
+	s.mu.Lock()
+	s.nextID++
+	id := "i" + strconv.FormatUint(s.nextID, 10)
+	s.intercepts[id] = &InterceptInfo{ID: id, Spec: spec, Peer: peer}
+	s.mu.Unlock()
+}
+
+// resolvePrefixes turns a spec into prefixes. CIDR/IP specs parse
+// locally; domain specs are resolved ON THE EXIT PEER over the bus —
+// it may sit inside a network (corporate VPN) where the name resolves
+// differently or exclusively.
+//
+// For a domain with a reachable exit peer we use ITS answer and ITS
+// answer only: local fallback is meaningless for a VPN-only name (it
+// just yields a misleading "no such host" from our own resolver) and
+// wrong for any name the exit peer sees differently. Local resolution
+// happens only when there's genuinely no peer to ask (bus down or peer
+// not in the roster yet — restore retries the latter).
+func (s *Service) resolvePrefixes(spec, peer string) ([]netip.Prefix, error) {
+	if !isDomainSpec(spec) {
+		return resolveSpec(spec)
+	}
+	pub := ""
+	if s.bus != nil {
+		pub = s.pubForPeerName(peer)
+	}
+	if pub == "" {
+		// No way to ask the exit peer (bus off, or peer offline/unknown).
+		// Try locally so public-domain intercepts still work; for a
+		// VPN-only name this fails with a clear "not reachable" hint.
+		out, err := resolveSpec(spec)
+		if err != nil {
+			return nil, fmt.Errorf("%w (exit peer %s not reachable to resolve it)", err, peer)
+		}
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	raw, err := s.bus.Request(ctx, pub, busTypeResolve, []byte(spec))
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("exit peer %s could not resolve %q: %w", peer, spec, err)
+	}
+	var addrs []string
+	if jerr := json.Unmarshal(raw, &addrs); jerr != nil {
+		return nil, fmt.Errorf("exit peer %s: bad resolve reply for %q: %w", peer, spec, jerr)
+	}
+	var out []netip.Prefix
+	for _, str := range addrs {
+		a, aerr := netip.ParseAddr(str)
+		if aerr != nil {
+			continue
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		log.Printf("resolved %s → %s (on %s)", spec, a, peer)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("exit peer %s resolved %q to no usable addresses", peer, spec)
+	}
+	return out, nil
+}
+
+// pubForPeerName maps a camp peer's display name to its pub via the
+// engine roster ("" if unknown).
+func (s *Service) pubForPeerName(name string) string {
+	if name == "" {
+		return ""
+	}
+	for _, p := range s.eng.Status().Peers {
+		if !p.Self && p.Name == name {
+			return p.Pub
+		}
+	}
+	return ""
+}
+
+// pinDomain mirrors a domain intercept's resolved v4 addresses into
+// the local DNS (via OnDomainPinned), so apps on this node resolve
+// the name to exactly the IPs the routes cover. No-op for non-domain
+// specs or when nothing v4 resolved.
+func (s *Service) pinDomain(spec string, prefixes []string) {
+	if s.OnDomainPinned == nil || !isDomainSpec(spec) {
+		return
+	}
+	var v4s []string
+	for _, pref := range prefixes {
+		if strings.HasSuffix(pref, " (reject)") {
+			continue
+		}
+		if p, err := netip.ParsePrefix(pref); err == nil && p.Addr().Is4() {
+			v4s = append(v4s, p.Addr().String())
+		}
+	}
+	if len(v4s) > 0 {
+		s.OnDomainPinned(strings.ToLower(spec), v4s)
+	}
 }
 
 // allowedCIDRsForPeer is the hook engine.awgSyncPeers calls to
@@ -310,6 +487,14 @@ func (s *Service) restoreFromStore() {
 			continue
 		}
 		if _, err := s.addLocked(it.Spec, it.Peer); err != nil {
+			if isDomainSpec(it.Spec) {
+				// Exit peer probably not reachable yet (bus comes up
+				// after hole punch). Keep the entry route-less; the
+				// RefreshDomainRoutes ticker retries every minute.
+				s.addPendingLocked(it.Spec, it.Peer)
+				log.Printf("config: intercept %q via %s pending (%v); will retry", it.Spec, it.Peer, err)
+				continue
+			}
 			log.Printf("config: restore intercept %q via %s: %v", it.Spec, it.Peer, err)
 		}
 	}
@@ -336,6 +521,7 @@ func (s *Service) refreshOnce() {
 	type entry struct {
 		id   string
 		spec string
+		peer string
 		old  []string
 	}
 	var domains []entry
@@ -345,6 +531,7 @@ func (s *Service) refreshOnce() {
 			domains = append(domains, entry{
 				id:   id,
 				spec: info.Spec,
+				peer: info.Peer,
 				old:  append([]string(nil), info.Prefixes...),
 			})
 		}
@@ -353,7 +540,7 @@ func (s *Service) refreshOnce() {
 
 	routes := s.eng.Routes()
 	for _, d := range domains {
-		newPrefixes, err := resolveSpec(d.spec)
+		newPrefixes, err := s.resolvePrefixes(d.spec, d.peer)
 		if err != nil {
 			log.Printf("WARN: refresh %s: %v", d.spec, err)
 			continue
@@ -409,8 +596,10 @@ func (s *Service) refreshOnce() {
 			}
 			info.Prefixes = append(info.Prefixes, p.String())
 		}
+		newPinned := append([]string(nil), info.Prefixes...)
 		log.Printf("refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
 		s.mu.Unlock()
+		s.pinDomain(d.spec, newPinned)
 	}
 	s.eng.SyncAWG()
 }

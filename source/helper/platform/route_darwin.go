@@ -6,7 +6,32 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"regexp"
 )
+
+// routeGetIfaceRE extracts the interface name from `route -n get`
+// output ("  interface: utun5").
+var routeGetIfaceRE = regexp.MustCompile(`(?m)^\s*interface:\s*(\S+)`)
+
+// RouteGetIface asks the kernel routing table which interface a
+// packet to addr would leave through. Used by egress to NAT
+// per-target traffic into the right tunnel (e.g. a corporate VPN's
+// utun) instead of the default-route interface.
+func RouteGetIface(addr netip.Addr) (string, error) {
+	family := "-inet"
+	if addr.Is6() {
+		family = "-inet6"
+	}
+	out, err := exec.Command("/sbin/route", "-n", "get", family, addr.String()).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("route -n get %s: %w: %s", addr, err, out)
+	}
+	m := routeGetIfaceRE.FindSubmatch(out)
+	if m == nil {
+		return "", fmt.Errorf("route -n get %s: no interface in output", addr)
+	}
+	return string(m[1]), nil
+}
 
 // RouteAddIface installs a route for prefix p, pointing at iface.
 // macOS distinguishes -host (single address) from -net (CIDR); we

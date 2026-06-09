@@ -71,13 +71,21 @@ func DisableFilterEngine(t FilterEngineToken) error {
 
 // InstallNAT loads the egress NAT anchor that translates packets
 // leaving Subnet via EgressIface to that interface's address.
+// Per-target entries go first: pf translation rules are first-match,
+// so the specific (to <ip> via other iface) rules must precede the
+// catch-all.
 func InstallNAT(r NATRules) error {
-	rule := fmt.Sprintf("nat on %s from %s to any -> (%s)\n", r.EgressIface, r.Subnet, r.EgressIface)
+	var b strings.Builder
+	for _, t := range r.Targets {
+		fmt.Fprintf(&b, "nat on %s from %s to %s -> (%s)\n", t.Iface, r.Subnet, t.IP, t.Iface)
+	}
+	fmt.Fprintf(&b, "nat on %s from %s to any -> (%s)\n", r.EgressIface, r.Subnet, r.EgressIface)
+	rules := b.String()
 	cmd := exec.Command("/sbin/pfctl", "-a", egressAnchor, "-f", "-")
-	cmd.Stdin = strings.NewReader(rule)
+	cmd.Stdin = strings.NewReader(rules)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("pfctl -a %s -f -: %w: %s\nrule: %s", egressAnchor, err, out, rule)
+		return fmt.Errorf("pfctl -a %s -f -: %w: %s\nrules: %s", egressAnchor, err, out, rules)
 	}
 	return nil
 }
