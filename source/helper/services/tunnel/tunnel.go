@@ -358,40 +358,56 @@ func (s *Service) addPendingLocked(spec, peer string) {
 // resolvePrefixes turns a spec into prefixes. CIDR/IP specs parse
 // locally; domain specs are resolved ON THE EXIT PEER over the bus —
 // it may sit inside a network (corporate VPN) where the name resolves
-// differently or exclusively. Falls back to local resolution when the
-// peer can't be reached, which keeps public-domain intercepts working.
+// differently or exclusively.
+//
+// For a domain with a reachable exit peer we use ITS answer and ITS
+// answer only: local fallback is meaningless for a VPN-only name (it
+// just yields a misleading "no such host" from our own resolver) and
+// wrong for any name the exit peer sees differently. Local resolution
+// happens only when there's genuinely no peer to ask (bus down or peer
+// not in the roster yet — restore retries the latter).
 func (s *Service) resolvePrefixes(spec, peer string) ([]netip.Prefix, error) {
 	if !isDomainSpec(spec) {
 		return resolveSpec(spec)
 	}
+	pub := ""
 	if s.bus != nil {
-		if pub := s.pubForPeerName(peer); pub != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			raw, err := s.bus.Request(ctx, pub, busTypeResolve, []byte(spec))
-			cancel()
-			if err != nil {
-				log.Printf("resolve %q on %s: %v (falling back to local DNS)", spec, peer, err)
-			} else {
-				var addrs []string
-				if jerr := json.Unmarshal(raw, &addrs); jerr == nil {
-					var out []netip.Prefix
-					for _, str := range addrs {
-						a, aerr := netip.ParseAddr(str)
-						if aerr != nil {
-							continue
-						}
-						a = a.Unmap()
-						out = append(out, netip.PrefixFrom(a, a.BitLen()))
-						log.Printf("resolved %s → %s (on %s)", spec, a, peer)
-					}
-					if len(out) > 0 {
-						return out, nil
-					}
-				}
-			}
-		}
+		pub = s.pubForPeerName(peer)
 	}
-	return resolveSpec(spec)
+	if pub == "" {
+		// No way to ask the exit peer (bus off, or peer offline/unknown).
+		// Try locally so public-domain intercepts still work; for a
+		// VPN-only name this fails with a clear "not reachable" hint.
+		out, err := resolveSpec(spec)
+		if err != nil {
+			return nil, fmt.Errorf("%w (exit peer %s not reachable to resolve it)", err, peer)
+		}
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	raw, err := s.bus.Request(ctx, pub, busTypeResolve, []byte(spec))
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("exit peer %s could not resolve %q: %w", peer, spec, err)
+	}
+	var addrs []string
+	if jerr := json.Unmarshal(raw, &addrs); jerr != nil {
+		return nil, fmt.Errorf("exit peer %s: bad resolve reply for %q: %w", peer, spec, jerr)
+	}
+	var out []netip.Prefix
+	for _, str := range addrs {
+		a, aerr := netip.ParseAddr(str)
+		if aerr != nil {
+			continue
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		log.Printf("resolved %s → %s (on %s)", spec, a, peer)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("exit peer %s resolved %q to no usable addresses", peer, spec)
+	}
+	return out, nil
 }
 
 // pubForPeerName maps a camp peer's display name to its pub via the
