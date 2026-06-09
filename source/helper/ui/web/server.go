@@ -24,6 +24,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/camp"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/mesh/gossip"
@@ -42,6 +43,11 @@ import (
 
 //go:embed assets
 var assetsFS embed.FS
+
+// busTypeSignal is the bus message type for WebRTC meet signalling —
+// the QUIC counterpart of POST /api/signal/inbox on the tunnel
+// listener (kept for peers on pre-bus builds).
+const busTypeSignal = "signal"
 
 // Server wraps an Engine with an HTTP handler. Two listeners are kept:
 //   - srv on the user-facing loopback bind (the full UI + all API endpoints).
@@ -73,6 +79,7 @@ type Server struct {
 	signals     *signalHub
 	callSignals *signalHub // SSE hub for SFU signals → local browser
 	signalHTTP  *http.Client
+	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
 func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
@@ -106,6 +113,45 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 
 // Addr returns the configured bind address.
 func (s *Server) Addr() string { return s.addr }
+
+// RegisterBus wires the server to the QUIC bus: inbound meet
+// signalling arrives as "signal" messages (instead of the tunnel
+// listener's POST /api/signal/inbox), and outbound signalling /
+// call proxying prefer the bus over HTTP. Call once from main.
+func (s *Server) RegisterBus(b *bus.Service) {
+	s.bus = b
+	b.Handle(busTypeSignal, func(fromPub string, payload []byte) ([]byte, error) {
+		// Auto-select the sender as active peer — same convenience as
+		// handleSignalInbox, but keyed by the bus-attested pub instead
+		// of the RemoteAddr overlay IP.
+		st := s.engine.Status()
+		if st.Running && fromPub != "" && fromPub != st.ActivePeerPub {
+			for _, p := range st.Peers {
+				if !p.Self && p.Pub == fromPub {
+					_ = s.engine.SetActivePeer(fromPub)
+					break
+				}
+			}
+		}
+		s.signals.broadcast(payload)
+		return nil, nil
+	})
+}
+
+// pubForOverlayIP resolves a peer's overlay v4 to its pub via the
+// engine roster (empty if unknown). Used to address bus messages when
+// the caller only has the peer's tunnel IP.
+func (s *Server) pubForOverlayIP(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	for _, p := range s.engine.Status().Peers {
+		if !p.Self && p.OverlayV4 == ip {
+			return p.Pub
+		}
+	}
+	return ""
+}
 
 // ListenAndServe blocks until the server is shut down. Returns http.ErrServerClosed
 // on graceful shutdown.
@@ -350,13 +396,13 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 	var sig map[string]any
 	_ = json.Unmarshal(body, &sig)
 	toPub, _ := sig["to"].(string)
-	var peerIP string
+	var peerIP, peerPub string
 	for _, p := range st.Peers {
 		if p.Self || p.Pub == "" {
 			continue
 		}
 		if (toPub != "" && p.Pub == toPub) || (toPub == "" && p.Pub == st.ActivePeerPub) {
-			peerIP = p.OverlayV4
+			peerIP, peerPub = p.OverlayV4, p.Pub
 			break
 		}
 	}
@@ -372,6 +418,16 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	body = rewriteMDNS(body, st.LocalIP)
+	// Bus first; legacy HTTP inbox for peers on pre-bus builds.
+	if s.bus != nil && peerPub != "" {
+		rctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		_, busErr := s.bus.Request(rctx, peerPub, busTypeSignal, body)
+		cancel()
+		if busErr == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	_, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
@@ -1381,12 +1437,26 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyCallJoinToHost(w http.ResponseWriter, sfuHost, name string) {
+	body, _ := json.Marshal(map[string]string{"name": name})
+	// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
+	if s.bus != nil {
+		if pub := s.pubForOverlayIP(sfuHost); pub != "" {
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			respBody, err := s.bus.Request(rctx, pub, calls.BusTypeJoin, body)
+			cancel()
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write(respBody)
+				return
+			}
+		}
+	}
 	_, port, _ := net.SplitHostPort(s.addr)
 	if port == "" {
 		port = "2202"
 	}
 	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/join"
-	body, _ := json.Marshal(map[string]string{"name": name})
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1434,15 +1504,27 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	// If we joined a remote SFU, proxy leave to the host.
 	if sfuHost != "" && sfuHost != st.LocalIP {
 		s.calls.ClearJoinedSFUHost()
-		_, port, _ := net.SplitHostPort(s.addr)
-		if port == "" {
-			port = "2202"
+		// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
+		delivered := false
+		if s.bus != nil {
+			if pub := s.pubForOverlayIP(sfuHost); pub != "" {
+				rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, err := s.bus.Request(rctx, pub, calls.BusTypeLeave, nil)
+				cancel()
+				delivered = err == nil
+			}
 		}
-		url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/leave"
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Post(url, "application/json", nil)
-		if err == nil {
-			resp.Body.Close()
+		if !delivered {
+			_, port, _ := net.SplitHostPort(s.addr)
+			if port == "" {
+				port = "2202"
+			}
+			url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/leave"
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Post(url, "application/json", nil)
+			if err == nil {
+				resp.Body.Close()
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1508,6 +1590,29 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, body []byte) {
+	// Don't broadcast the proxy response to SSE — the browser already
+	// gets it from the POST response. SFU-initiated offers/candidates
+	// arrive separately via deliverSFUSignal → handleCallSignalInbound
+	// (or its bus counterpart calls.BusTypeSignal).
+	//
+	// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
+	if s.bus != nil {
+		if pub := s.pubForOverlayIP(sfuHost); pub != "" {
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			respBody, err := s.bus.Request(rctx, pub, calls.BusTypeSignal, body)
+			cancel()
+			if err == nil {
+				if len(respBody) == 0 {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write(respBody)
+				return
+			}
+		}
+	}
 	_, port, _ := net.SplitHostPort(s.addr)
 	if port == "" {
 		port = "2202"
@@ -1521,10 +1626,6 @@ func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, bo
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-
-	// Don't broadcast the proxy response to SSE — the browser already
-	// gets it from the POST response. SFU-initiated offers/candidates
-	// arrive separately via deliverSFUSignal → handleCallSignalInbound.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
