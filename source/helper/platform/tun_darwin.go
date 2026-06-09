@@ -43,19 +43,14 @@ func IfconfigP2P(iface, localIP, peerIP string) error {
 	return nil
 }
 
-// IfDisableMulticast drops the MULTICAST flag on the interface.
-// macOS otherwise picks every multicast-capable interface for
-// SSDP/mDNS/UPnP destinations (239.255.255.250 et al), so the tunnel
-// would receive a copy of every local service-discovery query. We
-// can't deliver multicast to overlay peers anyway — they're routed
-// via per-peer UDP, no group state.
-func IfDisableMulticast(iface string) error {
-	out, err := exec.Command("/sbin/ifconfig", iface, "-multicast").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ifconfig %s -multicast: %w: %s", iface, err, out)
-	}
-	return nil
-}
+// IfDisableMulticast is a no-op on macOS. utun interfaces come up with
+// the MULTICAST flag set and ifconfig refuses to clear it — `ifconfig
+// utunN -multicast` fails with "bad value" because the utun driver
+// doesn't honour an IFF_MULTICAST toggle. It doesn't matter: the overlay
+// routes strictly per-peer, so a multicast destination (239.x, SSDP/mDNS)
+// matches no peer route and is dropped at routeFor anyway. Nothing is
+// ever delivered to the tunnel from a multicast group, flag or not.
+func IfDisableMulticast(iface string) error { return nil }
 
 // IfDisableOffload is a no-op on macOS — utun does not expose GSO/TSO
 // the way Linux TUN does, and packets always arrive ≤ MTU.

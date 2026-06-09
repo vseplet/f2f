@@ -12,11 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"syscall"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -56,7 +56,7 @@ func openAnchor(iface, tunnelIP string, allowed []PortRule) (*anchor, error) {
 		return nil, errors.New("firewall: empty tunnel_ip")
 	}
 	if err := sweepLeftover(); err != nil {
-		log.Printf("WARN: pre-flight firewall cleanup: %v", err)
+		clog.Warn("firewall", "pre-flight firewall cleanup: %v", err)
 	}
 	a := &anchor{
 		state: anchorState{
@@ -70,7 +70,7 @@ func openAnchor(iface, tunnelIP string, allowed []PortRule) (*anchor, error) {
 		return nil, fmt.Errorf("install firewall: %w", err)
 	}
 	if err := writeAnchorState(a.state); err != nil {
-		log.Printf("WARN: write firewall state file: %v", err)
+		clog.Warn("firewall", "write firewall state file: %v", err)
 	}
 	return a, nil
 }
@@ -82,7 +82,7 @@ func (a *anchor) apply(allowed []PortRule) error {
 		return fmt.Errorf("reinstall firewall: %w", err)
 	}
 	if err := writeAnchorState(a.state); err != nil {
-		log.Printf("WARN: write firewall state file: %v", err)
+		clog.Warn("firewall", "write firewall state file: %v", err)
 	}
 	return nil
 }
@@ -149,9 +149,9 @@ func sweepLeftover() error {
 		return fmt.Errorf("state file references running pid %d — refusing to touch; "+
 			"another f2f is using the firewall, or remove %s manually", s.PID, statePath)
 	}
-	log.Printf("found stale firewall state from pid %d, rolling back", s.PID)
+	clog.Info("firewall", "found stale firewall state from pid %d, rolling back", s.PID)
 	if err := platform.RemoveFirewall(); err != nil {
-		log.Printf("WARN: sweep remove firewall: %v", err)
+		clog.Warn("firewall", "sweep remove firewall: %v", err)
 	}
 	return os.Remove(statePath)
 }

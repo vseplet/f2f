@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/mesh/engine/awg"
 	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
@@ -38,25 +38,22 @@ import (
 const tunnelSubnetCIDR = V4Subnet
 
 // packetLogEnabled gates per-packet tunnel logging (the [utun]/[udp]
-// per-packet lines). Off by default — these flood the log and bury
-// everything else. Enable with F2F_PACKET_LOG=1.
+// per-packet lines). Off by default even at debug level — these flood the
+// log and bury everything else, so they need an explicit opt-in on top of
+// F2F_LOG=debug. Enable with F2F_PACKET_LOG=1.
 var packetLogEnabled = os.Getenv("F2F_PACKET_LOG") == "1"
 
 func packetLog(format string, args ...any) {
 	if packetLogEnabled {
-		log.Printf(format, args...)
+		clog.Debug("packet", format, args...)
 	}
 }
 
-// awgDebugEnabled gates AWG-integration diagnostics: every multiplex
-// decision in peerToTunLoop, UAPI blobs sent to Device on SyncPeers,
-// slot ranges at startup. Enable with F2F_AWG_DEBUG=1.
-var awgDebugEnabled = os.Getenv("F2F_AWG_DEBUG") == "1"
-
+// awgDebug logs AWG-integration diagnostics: every multiplex decision in
+// peerToTunLoop, UAPI blobs sent to Device on SyncPeers, slot ranges at
+// startup. Shown at F2F_LOG=debug.
 func awgDebug(format string, args ...any) {
-	if awgDebugEnabled {
-		log.Printf(format, args...)
-	}
+	clog.Debug("awg", format, args...)
 }
 
 // Config is the input to Start.
@@ -245,6 +242,16 @@ type peerState struct {
 	LastValidResMs atomic.Int64
 	LastSentReqMs  atomic.Int64
 	LastRTTMs      atomic.Int64
+}
+
+// label renders this peer for logs as name/fp — the one canonical form
+// (see identity.Label). Use it everywhere a log line names a peer instead
+// of hand-formatting pub=/fp=/ip.
+func (p *peerState) label() string {
+	if p == nil {
+		return "?"
+	}
+	return identity.Label(p.Name, p.Pub)
 }
 
 // peerOnlineWindowMs is how long we consider a peer "online" after the
@@ -444,14 +451,14 @@ func (e *Engine) Start(cfg Config) error {
 	if cfg.Camp != nil {
 		e.camp = cfg.Camp
 		e.identity = cfg.Identity
-		log.Printf("identity: camp %s pub=%s fp=%s", cfg.CampID, e.identity.PubHex(), e.identity.Fingerprint())
+		clog.Info("engine", "identity ready: camp %s fp=%s", cfg.CampID, e.identity.Fingerprint())
 
 		// Camp-wide obfuscation: camp_key + magic-header ranges (H1..H8),
 		// derived deterministically from camp_id. Every member of this
 		// camp computes the same values; camp_id never leaves the invite
 		// chain so an outside observer can't derive them.
 		e.obfenv = obfenv.NewCamp(cfg.CampID)
-		log.Printf("pair: control envelope ready for camp %s", cfg.CampID)
+		clog.Debug("pair", "control envelope ready for camp %s", cfg.CampID)
 	}
 
 	// Egress NAT (route the overlay subnet out through the host's
@@ -519,7 +526,7 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("open tunnel: %w", err)
 		}
 		tun = t
-		log.Printf("opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, utun.MTU)
+		clog.Info("engine", "opened %s (subnet=%s/24 mtu=%d)", tun.Name(), localIP, utun.MTU)
 	} else {
 		t, err := utun.Open(localIP, peerIP)
 		if err != nil {
@@ -527,7 +534,7 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("open tunnel: %w", err)
 		}
 		tun = t
-		log.Printf("opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, utun.MTU)
+		clog.Info("engine", "opened %s (local=%s peer=%s mtu=%d)", tun.Name(), localIP, peerIP, utun.MTU)
 	}
 	e.tun = tun
 	// Reflect the actual addresses we ended up using back into the
@@ -537,7 +544,7 @@ func (e *Engine) Start(cfg Config) error {
 		cfg.PeerIP = peerIP
 	}
 	if e.udp != nil {
-		log.Printf("UDP listening on %s", e.udp.LocalAddr())
+		clog.Info("engine", "UDP listening on %s", e.udp.LocalAddr())
 	}
 
 	// AWG device: takes exclusive ownership of utun + our Bind. After
@@ -553,17 +560,15 @@ func (e *Engine) Start(cfg Config) error {
 			return fmt.Errorf("awg device: %w", err)
 		}
 		e.awgDevice = awgDev
-		log.Printf("awg: device up — encrypted transport ready for paired peers")
+		clog.Info("awg", "device up — encrypted transport ready for paired peers")
 		// Diagnostic snapshot of derived parameters — both peers must see
 		// the SAME values for AWG packets to be classifiable on receive.
 		// Camp_id derives all of these; if two ends see different camp_id
 		// strings their slot ranges and magic headers diverge and traffic
-		// silently drops at our discriminator. Enable with F2F_AWG_DEBUG=1
-		// — and even without the flag we always log the snapshot once at
-		// startup since it's a single line and useful for verification.
+		// silently drops at our discriminator. Shown at F2F_LOG=debug.
 		for slot, name := range []string{"h1", "h2", "h3", "h4"} {
 			start, end := e.obfenv.SlotRange(obfenv.Slot(slot))
-			log.Printf("awg: %s slot [0x%08x..0x%08x) configured magic=%d", name, start, end, start)
+			clog.Debug("awg", "%s slot [0x%08x..0x%08x) configured magic=%d", name, start, end, start)
 		}
 	}
 
@@ -849,7 +854,7 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 		if p.Online && p.UDPEndpoint != "" {
 			a, err := net.ResolveUDPAddr("udp", p.UDPEndpoint)
 			if err != nil {
-				log.Printf("WARN: peer %s invalid endpoint %q: %v", p.Name, p.UDPEndpoint, err)
+				clog.Warn("camp", "peer %s invalid endpoint %q: %v", identity.Label(p.Name, p.Pub), p.UDPEndpoint, err)
 				continue
 			}
 			addr = a
@@ -869,9 +874,9 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 			}
 			e.peers[p.Pub] = st
 			if p.Online {
-				log.Printf("camp: peer %s @ %s entered roster (pub=%s)", p.Name, addr, p.Pub)
+				clog.Info("camp", "peer %s entered roster @ %s", st.label(), addr)
 			} else {
-				log.Printf("camp: peer %s in roster but stale (pub=%s)", p.Name, p.Pub)
+				clog.Info("camp", "peer %s in roster but stale", st.label())
 			}
 		} else {
 			existing.Name = p.Name
@@ -887,7 +892,7 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 					existing.UDPAddr = addr
 				}
 				if !existing.InCamp {
-					log.Printf("camp: peer %s back in roster (pub=%s)", p.Name, p.Pub)
+					clog.Info("camp", "peer %s back in roster", existing.label())
 				}
 			} else {
 				// Camp evicted the peer (no announce in ~60s). Drop the
@@ -899,7 +904,7 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				existing.PublicIP = ""
 				existing.UDPPort = 0
 				if existing.InCamp {
-					log.Printf("camp: peer %s left roster (pub=%s)", p.Name, p.Pub)
+					clog.Info("camp", "peer %s left roster", existing.label())
 				}
 			}
 			existing.InCamp = p.Online
@@ -917,7 +922,7 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 			continue
 		}
 		if st.InCamp || st.UDPAddr != nil {
-			log.Printf("camp: peer %s @ %s no longer in roster", st.Name, st.UDPAddr)
+			clog.Info("camp", "peer %s no longer in roster (was @ %s)", st.label(), st.UDPAddr)
 		}
 		st.InCamp = false
 		st.UDPAddr = nil
@@ -998,13 +1003,13 @@ func (e *Engine) awgSyncPeers() {
 	}
 	dev := e.awgDevice
 	e.mu.Unlock()
-	awgDebug("awg sync peers: %d peers", len(peers))
+	awgDebug("sync %d peers", len(peers))
 	for _, p := range peers {
 		awgDebug("  peer wg_pub=%s endpoint=%s allowed=%v",
 			p.WGPub[:16], p.Endpoint, p.AllowedCIDRs)
 	}
 	if err := dev.SyncPeers(peers); err != nil {
-		log.Printf("awg sync peers: %v", err)
+		clog.Error("awg", "sync peers: %v", err)
 	}
 }
 
@@ -1038,22 +1043,19 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	p, ok := e.peers[req.Pub]
 	if !ok {
 		e.mu.Unlock()
-		log.Printf("pair_req: from non-member pub=%s name=%q at %s — drop",
-			identity.FingerprintHex(req.Pub), req.Name, from)
+		clog.Warn("pair", "req from non-member %s at %s — drop", identity.Label(req.Name, req.Pub), from)
 		return
 	}
 	switch {
 	case p.WGPub == "":
-		log.Printf("pair_req: peer %s (fp=%s) wg_pub=%s established",
-			req.Name, identity.FingerprintHex(req.Pub), req.WGPub[:16])
+		clog.Info("pair", "req: peer %s wg_pub=%s established", p.label(), req.WGPub[:16])
 	case p.WGPub != req.WGPub:
-		log.Printf("pair_req: peer %s rotated wg_pub: %s → %s",
-			req.Name, p.WGPub[:16], req.WGPub[:16])
+		clog.Info("pair", "req: peer %s rotated wg_pub %s → %s", p.label(), p.WGPub[:16], req.WGPub[:16])
 	}
 	p.WGPub = req.WGPub
 	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
 	if endpointChanged {
-		log.Printf("pair_req: peer %s UDP %s → %s (NAT rebind?)", req.Name, p.UDPAddr, from)
+		clog.Info("pair", "req: peer %s UDP %s → %s (NAT rebind?)", p.label(), p.UDPAddr, from)
 		p.UDPAddr = from
 	}
 	e.mu.Unlock()
@@ -1063,7 +1065,7 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	// hello already established about WGPub.
 	firstReq := p.LastValidReqMs.Load() == 0
 	if firstReq {
-		log.Printf("pair_req: first valid from %s (fp=%s)", req.Name, identity.FingerprintHex(req.Pub))
+		clog.Info("pair", "req: first valid from %s", p.label())
 	}
 	p.LastValidReqMs.Store(now)
 	// Refresh the AWG peer list:
@@ -1083,16 +1085,16 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 	}
 	resJSON, err := pair.BuildRes(e.identity, e.cfg.CampName, now, req.SentMs)
 	if err != nil {
-		log.Printf("pair_res build: %v", err)
+		clog.Error("pair", "res build: %v", err)
 		return
 	}
 	sealed, err := e.obfenv.Seal(obfenv.SlotHello, resJSON)
 	if err != nil {
-		log.Printf("pair_res seal: %v", err)
+		clog.Error("pair", "res seal: %v", err)
 		return
 	}
 	if _, err := e.udp.WriteToUDP(sealed, from); err != nil {
-		log.Printf("pair_res send to %s: %v", from, err)
+		clog.Warn("pair", "res send to %s: %v", from, err)
 	}
 }
 
@@ -1106,22 +1108,19 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 	p, ok := e.peers[res.Pub]
 	if !ok {
 		e.mu.Unlock()
-		log.Printf("pair_res: from non-member pub=%s name=%q at %s — drop",
-			identity.FingerprintHex(res.Pub), res.Name, from)
+		clog.Warn("pair", "res from non-member %s at %s — drop", identity.Label(res.Name, res.Pub), from)
 		return
 	}
 	switch {
 	case p.WGPub == "":
-		log.Printf("pair_res: peer %s (fp=%s) wg_pub=%s established",
-			res.Name, identity.FingerprintHex(res.Pub), res.WGPub[:16])
+		clog.Info("pair", "res: peer %s wg_pub=%s established", p.label(), res.WGPub[:16])
 	case p.WGPub != res.WGPub:
-		log.Printf("pair_res: peer %s rotated wg_pub: %s → %s",
-			res.Name, p.WGPub[:16], res.WGPub[:16])
+		clog.Info("pair", "res: peer %s rotated wg_pub %s → %s", p.label(), p.WGPub[:16], res.WGPub[:16])
 	}
 	p.WGPub = res.WGPub
 	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
 	if endpointChanged {
-		log.Printf("pair_res: peer %s UDP %s → %s (NAT rebind?)", res.Name, p.UDPAddr, from)
+		clog.Info("pair", "res: peer %s UDP %s → %s (NAT rebind?)", p.label(), p.UDPAddr, from)
 		p.UDPAddr = from
 	}
 	e.mu.Unlock()
@@ -1142,11 +1141,9 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 	}
 	if firstRes {
 		if rtt >= 0 {
-			log.Printf("pair_res: first valid from %s (fp=%s) rtt=%dms",
-				res.Name, identity.FingerprintHex(res.Pub), rtt)
+			clog.Info("pair", "res: first valid from %s rtt=%dms", p.label(), rtt)
 		} else {
-			log.Printf("pair_res: first valid from %s (fp=%s) — echo didn't match LastSentReqMs (stale)",
-				res.Name, identity.FingerprintHex(res.Pub))
+			clog.Info("pair", "res: first valid from %s — echo didn't match LastSentReqMs (stale)", p.label())
 		}
 		// Same trigger as handlePairReq: first valid res confirms the
 		// full round-trip; push the peer into the AWG device's routing
@@ -1189,7 +1186,7 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			// and a fresh reflex in camp; peers pick up the new endpoint
 			// on their next camp poll.
 			if prevTickMs != 0 && now-prevTickMs > wakeJumpMs {
-				log.Printf("wake: clock jumped %ds, restarting on a fresh ephemeral port", (now-prevTickMs)/1000)
+				clog.Info("wake", "clock jumped %ds, restarting on a fresh ephemeral port", (now-prevTickMs)/1000)
 				go e.restartOnEphemeralPort()
 				return
 			}
@@ -1235,13 +1232,13 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				reqPkt, perr := e.pairReqPacket(now)
 				if perr != nil {
 					if ctx.Err() == nil {
-						log.Printf("WARN: build pair_req for %s: %v", p.Name, perr)
+						clog.Warn("pair", "build req for %s: %v", p.label(), perr)
 					}
 					continue
 				}
 				if _, err := e.udp.WriteToUDP(reqPkt, p.UDPAddr); err != nil {
 					if ctx.Err() == nil {
-						log.Printf("WARN: pair_req %s: %v", p.Name, err)
+						clog.Warn("pair", "send req %s: %v", p.label(), err)
 					}
 					continue
 				}
@@ -1274,11 +1271,11 @@ func (e *Engine) restartOnEphemeralPort() {
 	e.mu.Unlock()
 	cfg.Listen = ":0"
 	if err := e.Stop(); err != nil {
-		log.Printf("wake: stop: %v", err)
+		clog.Error("wake", "stop: %v", err)
 		return
 	}
 	if err := e.Start(cfg); err != nil {
-		log.Printf("wake: start: %v", err)
+		clog.Error("wake", "start: %v", err)
 	}
 }
 
@@ -1544,7 +1541,7 @@ func (e *Engine) SetActivePeer(pub string) error {
 	defer e.mu.Unlock()
 	if pub == "" {
 		e.activePub.Store(nil)
-		log.Printf("camp: active peer cleared")
+		clog.Info("camp", "active peer cleared")
 		return nil
 	}
 	p, ok := e.peers[pub]
@@ -1552,7 +1549,7 @@ func (e *Engine) SetActivePeer(pub string) error {
 		return fmt.Errorf("no peer with pub %s", pub)
 	}
 	e.activePub.Store(&pub)
-	log.Printf("camp: active peer = %s (pub=%s)", p.Name, pub)
+	clog.Info("camp", "active peer = %s", p.label())
 	return nil
 }
 
@@ -1563,7 +1560,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		pkt, err := e.tun.Read()
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Printf("tun read stopped: %v", err)
+				clog.Warn("engine", "tun read stopped: %v", err)
 			}
 			return
 		}
@@ -1595,7 +1592,7 @@ func (e *Engine) tunToPeerLoop(ctx context.Context) {
 		}
 		if n, werr := e.udp.WriteToUDP(pkt, peerAddr); werr != nil {
 			if ctx.Err() == nil {
-				log.Printf("WARN: udp send: %v", werr)
+				clog.Warn("engine", "udp send: %v", werr)
 			}
 			action = "→peer-failed"
 		} else {
@@ -1664,7 +1661,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		n, from, err := e.udp.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Printf("udp read stopped: %v", err)
+				clog.Warn("engine", "udp read stopped: %v", err)
 			}
 			return
 		}
@@ -1697,16 +1694,16 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 						if req, rok := pair.ParseReq(plain); rok {
 							e.handlePairReq(req, from)
 						} else {
-							log.Printf("pair: req parse/verify failed from %s", from)
+							clog.Warn("pair", "req parse/verify failed from %s", from)
 						}
 					case pair.TypeRes:
 						if res, rok := pair.ParseRes(plain); rok {
 							e.handlePairRes(res, from)
 						} else {
-							log.Printf("pair: res parse/verify failed from %s", from)
+							clog.Warn("pair", "res parse/verify failed from %s", from)
 						}
 					default:
-						log.Printf("pair: unknown control packet type %q from %s", pair.Type(plain), from)
+						clog.Warn("pair", "unknown control packet type %q from %s", pair.Type(plain), from)
 					}
 				}
 				continue
@@ -1750,7 +1747,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 			e.mu.Unlock()
 		} else {
 			if cur := e.staticPeer.Load(); !sameUDPAddr(cur, from) {
-				log.Printf("peer address updated: %s → %s", cur, from)
+				clog.Info("engine", "static peer address updated: %s → %s", cur, from)
 				e.staticPeer.Store(from)
 			}
 		}
@@ -1781,7 +1778,7 @@ func (e *Engine) peerToTunLoop(ctx context.Context) {
 		}
 		if werr := e.tun.Write(pkt); werr != nil {
 			if ctx.Err() == nil {
-				log.Printf("WARN: utun write from %s: %v", from, werr)
+				clog.Warn("engine", "utun write from %s: %v", from, werr)
 			}
 			packetLog("[udp %s] %s [→utun-failed]", from, summary)
 		} else {

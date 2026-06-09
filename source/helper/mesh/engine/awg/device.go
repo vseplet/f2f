@@ -2,13 +2,13 @@ package awg
 
 import (
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
 	"github.com/amnezia-vpn/amneziawg-go/device"
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/engine/obfenv"
 )
@@ -47,10 +47,10 @@ type Device struct {
 func Start(tun wgtun.Device, bind conn.Bind, id *identity.Identity, env *obfenv.Camp) (*Device, error) {
 	logger := &device.Logger{
 		Verbosef: func(format string, args ...any) {
-			log.Printf("awg: "+format, args...)
+			clog.Debug("awg", format, args...)
 		},
 		Errorf: func(format string, args ...any) {
-			log.Printf("awg ERR: "+format, args...)
+			clog.Error("awg", format, args...)
 		},
 	}
 	dev := device.NewDevice(tun, bind, logger)

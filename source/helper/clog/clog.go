@@ -83,7 +83,7 @@ func applyOutputLocked() {
 	sinks := []io.Writer{io.Writer(fileW), tap}
 	sinks = append(sinks, extraSinks...)
 	if toConsole {
-		sinks = append(sinks, os.Stderr)
+		sinks = append(sinks, consoleSink())
 	}
 	log.SetOutput(io.MultiWriter(sinks...))
 }

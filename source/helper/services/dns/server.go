@@ -9,13 +9,13 @@ package dns
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/vseplet/f2f/source/helper/clog"
 )
 
 // Resolver is implemented by engine.Engine — exposed as an interface so
@@ -119,7 +119,7 @@ func Open(bindAddr, zone string, res Resolver, pinned func(name string) []string
 			// Quietly ignore the "use of closed network connection" we
 			// get on graceful shutdown.
 			if !strings.Contains(err.Error(), "use of closed") {
-				log.Printf("dns: serve: %v", err)
+				clog.Warn("dns", "serve: %v", err)
 			}
 		}
 	}()

@@ -222,6 +222,28 @@ func (i *Identity) Fingerprint() string {
 	return hex.EncodeToString(h[:8])
 }
 
+// Label renders a peer identity for logs and the UI in one canonical
+// form: name/fp (e.g. "alice/a1b2c3d4e5f6a7b8"). It is THE way to name a
+// peer in a log line — don't hand-format pub=/fp=/ip variants. When name
+// is empty (callers that only know the pubkey, e.g. the bus) it returns
+// the bare fingerprint; when the pubkey is unusable it falls back to a
+// short pub prefix so the line still carries some identity.
+func Label(name, pubHex string) string {
+	fp := FingerprintHex(pubHex)
+	switch {
+	case name != "" && fp != "":
+		return name + "/" + fp
+	case fp != "":
+		return fp
+	case name != "":
+		return name
+	case len(pubHex) > 12:
+		return pubHex[:12]
+	default:
+		return pubHex
+	}
+}
+
 // FingerprintHex computes the same fingerprint from a hex-encoded
 // pubkey. Used to render peer identities the engine only knows by
 // pub hex (e.g. via camp's PeerInfo). Returns "" on bad input.

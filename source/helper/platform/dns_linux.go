@@ -4,7 +4,7 @@ package platform
 
 import (
 	"fmt"
-	"log"
+	"github.com/vseplet/f2f/source/helper/clog"
 	"os/exec"
 )
 
@@ -14,7 +14,7 @@ import (
 // own caching, which is out of our reach. Best-effort.
 func FlushDNSCache() error {
 	if err := exec.Command("resolvectl", "flush-caches").Run(); err != nil {
-		log.Printf("dns: resolvectl flush-caches: %v (no systemd-resolved?)", err)
+		clog.Info("dns", "resolvectl flush-caches: %v (no systemd-resolved?)", err)
 	}
 	return nil
 }

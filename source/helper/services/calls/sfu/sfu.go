@@ -3,7 +3,6 @@ package sfu
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+	"github.com/vseplet/f2f/source/helper/clog"
 )
 
 type publishedTrack struct {
@@ -50,7 +50,7 @@ func New(localIP, tunIface string, onSignal func(to string, msg []byte)) *SFU {
 	buildAPI := func(se webrtc.SettingEngine) *webrtc.API {
 		m := &webrtc.MediaEngine{}
 		if err := m.RegisterDefaultCodecs(); err != nil {
-			log.Printf("sfu: register codecs: %v", err)
+			clog.Warn("sfu", "register codecs: %v", err)
 		}
 		i := &interceptor.Registry{}
 		responder, _ := nack.NewResponderInterceptor()
@@ -58,7 +58,7 @@ func New(localIP, tunIface string, onSignal func(to string, msg []byte)) *SFU {
 		generator, _ := nack.NewGeneratorInterceptor()
 		i.Add(generator)
 		if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
-			log.Printf("sfu: register interceptors: %v", err)
+			clog.Warn("sfu", "register interceptors: %v", err)
 		}
 		return webrtc.NewAPI(
 			webrtc.WithMediaEngine(m),
@@ -110,7 +110,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		old.mu.Unlock()
 		delete(s.participants, tunnelIP)
 		go old.PC.Close()
-		log.Printf("sfu: replacing stale participant %s (%s)", name, tunnelIP)
+		clog.Info("sfu", "replacing stale participant %s (%s)", name, tunnelIP)
 	}
 
 	api := s.tunnelAPI
@@ -135,7 +135,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		for _, pt := range other.tracks {
 			rtpSender, err := pc.AddTrack(pt.local)
 			if err != nil {
-				log.Printf("sfu: add existing track to %s: %v", tunnelIP, err)
+				clog.Warn("sfu", "add existing track to %s: %v", tunnelIP, err)
 				continue
 			}
 			go forwardRTCP(rtpSender, pt.publisherPC, pt.remoteSSRC)
@@ -175,7 +175,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 			p.mu.Lock()
 			p.DC = dc
 			p.mu.Unlock()
-			log.Printf("sfu: chat channel open for %s", tunnelIP)
+			clog.Info("sfu", "chat channel open for %s", tunnelIP)
 		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			s.broadcastChat(tunnelIP, msg.Data)
@@ -186,7 +186,7 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 		if c == nil {
 			return
 		}
-		log.Printf("sfu: ICE candidate for %s: %s %s:%d", tunnelIP, c.Typ, c.Address, c.Port)
+		clog.Info("sfu", "ICE candidate for %s: %s %s:%d", tunnelIP, c.Typ, c.Address, c.Port)
 		cj := c.ToJSON()
 		msg, _ := json.Marshal(signalMsg{
 			Kind:      "candidate",
@@ -197,18 +197,18 @@ func (s *SFU) AddParticipant(tunnelIP, name string) (*Participant, error) {
 	})
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("sfu: %s ICE: %s", tunnelIP, state)
+		clog.Info("sfu", "%s ICE: %s", tunnelIP, state)
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("sfu: %s connection state: %s", tunnelIP, state)
+		clog.Info("sfu", "%s connection state: %s", tunnelIP, state)
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			s.RemoveParticipant(tunnelIP)
 		}
 	})
 
 	s.participants[tunnelIP] = p
-	log.Printf("sfu: added participant %s (%s), total=%d", name, tunnelIP, len(s.participants))
+	clog.Info("sfu", "added participant %s (%s), total=%d", name, tunnelIP, len(s.participants))
 	return p, nil
 }
 
@@ -246,7 +246,7 @@ func (s *SFU) RemoveParticipant(tunnelIP string) {
 
 	p.PC.OnConnectionStateChange(func(webrtc.PeerConnectionState) {})
 	_ = p.PC.Close()
-	log.Printf("sfu: removed participant %s (%s)", p.Name, tunnelIP)
+	clog.Info("sfu", "removed participant %s (%s)", p.Name, tunnelIP)
 
 	for _, other := range renegotiateList {
 		s.renegotiate(other)
@@ -292,7 +292,7 @@ func (s *SFU) Close() {
 		_ = p.PC.Close()
 	}
 	s.participants = make(map[string]*Participant)
-	log.Printf("sfu: closed")
+	clog.Info("sfu", "closed")
 }
 
 // --- internal ---
@@ -354,7 +354,7 @@ func (s *SFU) handleOffer(tunnelIP, sdp string) ([]byte, error) {
 	}
 	mAudio, mVideo := countMLines(answer.SDP)
 	if sendAudio > mAudio || sendVideo > mVideo {
-		log.Printf("sfu: %s has unnegotiated senders (a=%d/%d v=%d/%d), renegotiating",
+		clog.Info("sfu", "%s has unnegotiated senders (a=%d/%d v=%d/%d), renegotiating",
 			tunnelIP, sendAudio, mAudio, sendVideo, mVideo)
 		s.renegotiate(p)
 	}
@@ -386,13 +386,13 @@ func (s *SFU) handleAnswer(tunnelIP, sdp string) error {
 		return fmt.Errorf("unknown participant %s", tunnelIP)
 	}
 
-	log.Printf("sfu: received answer from %s (signalingState=%s)", tunnelIP, p.PC.SignalingState())
+	clog.Info("sfu", "received answer from %s (signalingState=%s)", tunnelIP, p.PC.SignalingState())
 	answer := webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp}
 	err := p.PC.SetRemoteDescription(answer)
 	if err != nil {
-		log.Printf("sfu: setRemoteDescription(answer) for %s failed: %v", tunnelIP, err)
+		clog.Warn("sfu", "setRemoteDescription(answer) for %s failed: %v", tunnelIP, err)
 	} else {
-		log.Printf("sfu: answer applied for %s, senders=%d", tunnelIP, len(p.PC.GetSenders()))
+		clog.Info("sfu", "answer applied for %s, senders=%d", tunnelIP, len(p.PC.GetSenders()))
 	}
 	return err
 }
@@ -418,7 +418,7 @@ func (s *SFU) handleCandidateInit(tunnelIP string, candidate *webrtc.ICECandidat
 }
 
 func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
-	log.Printf("sfu: OnTrack from %s: %s (codec=%s, stream=%s)",
+	clog.Info("sfu", "OnTrack from %s: %s (codec=%s, stream=%s)",
 		sender.TunnelIP, remote.ID(), remote.Codec().MimeType, remote.StreamID())
 
 	local, err := webrtc.NewTrackLocalStaticRTP(
@@ -427,7 +427,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		fmt.Sprintf("%s-%s", sender.TunnelIP, remote.StreamID()),
 	)
 	if err != nil {
-		log.Printf("sfu: new local track: %v", err)
+		clog.Warn("sfu", "new local track: %v", err)
 		return
 	}
 
@@ -447,10 +447,10 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		if p.TunnelIP == sender.TunnelIP {
 			continue
 		}
-		log.Printf("sfu: forwarding track %s from %s → %s", remote.Codec().MimeType, sender.TunnelIP, p.TunnelIP)
+		clog.Info("sfu", "forwarding track %s from %s → %s", remote.Codec().MimeType, sender.TunnelIP, p.TunnelIP)
 		rtpSender, err := p.PC.AddTrack(local)
 		if err != nil {
-			log.Printf("sfu: add track to %s: %v", p.TunnelIP, err)
+			clog.Warn("sfu", "add track to %s: %v", p.TunnelIP, err)
 			continue
 		}
 		renegotiateList = append(renegotiateList, p)
@@ -473,27 +473,27 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 		}
 	}()
 
-	log.Printf("sfu: forwarding %s from %s (ssrc=%d)", remote.Codec().MimeType, sender.TunnelIP, ssrc)
+	clog.Info("sfu", "forwarding %s from %s (ssrc=%d)", remote.Codec().MimeType, sender.TunnelIP, ssrc)
 	buf := make([]byte, 1500)
 	n, _, err := remote.Read(buf)
 	if err != nil {
-		log.Printf("sfu: forward loop for %s/%s exited on first read: %v", sender.TunnelIP, remote.ID(), err)
+		clog.Warn("sfu", "forward loop for %s/%s exited on first read: %v", sender.TunnelIP, remote.ID(), err)
 		sender.mu.Lock()
 		delete(sender.tracks, remote.ID())
 		sender.mu.Unlock()
 		return
 	}
-	log.Printf("sfu: first RTP packet from %s/%s (%d bytes)", sender.TunnelIP, remote.ID(), n)
+	clog.Info("sfu", "first RTP packet from %s/%s (%d bytes)", sender.TunnelIP, remote.ID(), n)
 	_, _ = local.Write(buf[:n])
 
 	for {
 		n, _, err = remote.Read(buf)
 		if err != nil {
-			log.Printf("sfu: forward loop ended for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
+			clog.Warn("sfu", "forward loop ended for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
 			break
 		}
 		if _, err := local.Write(buf[:n]); err != nil {
-			log.Printf("sfu: forward write error for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
+			clog.Warn("sfu", "forward write error for %s/%s: %v", sender.TunnelIP, remote.ID(), err)
 			break
 		}
 	}
@@ -521,7 +521,7 @@ func (s *SFU) handleTrack(sender *Participant, remote *webrtc.TrackRemote) {
 	for _, sub := range affectedSubs {
 		s.renegotiate(sub)
 	}
-	log.Printf("sfu: removed ended track %s from %d subscriber(s)", remote.ID(), len(affectedSubs))
+	clog.Info("sfu", "removed ended track %s from %d subscriber(s)", remote.ID(), len(affectedSubs))
 }
 
 type renegotiateMsg struct {
@@ -553,7 +553,7 @@ func (s *SFU) renegotiate(p *Participant) {
 		}
 		s.mu.Unlock()
 
-		log.Printf("sfu: requesting renegotiation from %s (%d sender tracks)", p.TunnelIP, len(tracks))
+		clog.Info("sfu", "requesting renegotiation from %s (%d sender tracks)", p.TunnelIP, len(tracks))
 		msg, _ := json.Marshal(renegotiateMsg{
 			Kind:   "renegotiate",
 			From:   "sfu",

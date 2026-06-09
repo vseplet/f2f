@@ -5,10 +5,10 @@ package utun
 
 import (
 	"fmt"
-	"log"
 	"net/netip"
 
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
@@ -48,10 +48,10 @@ func Open(localIP, peerIP string) (*Tunnel, error) {
 		return nil, err
 	}
 	if err := platform.IfDisableMulticast(name); err != nil {
-		log.Printf("tunnel: %v", err)
+		clog.Warn("utun", "%v", err)
 	}
 	if err := platform.IfDisableOffload(name); err != nil {
-		log.Printf("tunnel: %v", err)
+		clog.Warn("utun", "%v", err)
 	}
 	return newTunnel(dev, name, afLen), nil
 }
@@ -80,10 +80,10 @@ func OpenSubnet(localIP string, prefixLen int) (*Tunnel, error) {
 		return nil, err
 	}
 	if err := platform.IfDisableMulticast(name); err != nil {
-		log.Printf("tunnel: %v", err)
+		clog.Warn("utun", "%v", err)
 	}
 	if err := platform.IfDisableOffload(name); err != nil {
-		log.Printf("tunnel: %v", err)
+		clog.Warn("utun", "%v", err)
 	}
 	// Delete-then-add: a stale route from a prior crashed process on
 	// a different tunnel would shadow our add and silently send

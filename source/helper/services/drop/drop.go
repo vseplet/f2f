@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/user"
@@ -29,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
@@ -118,13 +118,13 @@ func (s *Service) Start(campID, localIP string) error {
 		SharedDir:    s.sharedDir,
 		DownloadsDir: s.downloads,
 	}
-	log.Printf("torrent: binding on %s …", opts.ListenAddr)
+	clog.Info("torrent", "binding on %s …", opts.ListenAddr)
 	c, err := internaltorrent.New(opts)
 	if err != nil {
 		return fmt.Errorf("drop: bind %s: %w", opts.ListenAddr, err)
 	}
 	s.client = c
-	log.Printf("torrent: ready in %v (shared=%s downloads=%s)",
+	clog.Info("torrent", "ready in %v (shared=%s downloads=%s)",
 		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
 	chownToUser(opts.SharedDir)
 	chownToUser(opts.DownloadsDir)
@@ -185,7 +185,7 @@ func (s *Service) AddDownload(magnet string, peers []string) (*internaltorrent.D
 		Magnet: magnet, InfoHash: d.InfoHash, Peers: peers,
 	})
 	if err := s.saveDownloads(saved); err != nil {
-		log.Printf("downloads: persist: %v", err)
+		clog.Warn("downloads", "persist: %v", err)
 	}
 	return d, nil
 }
@@ -210,7 +210,7 @@ func (s *Service) RemoveDownload(infoHash string) bool {
 	}
 	if len(kept) != len(saved) {
 		if err := s.saveDownloads(kept); err != nil {
-			log.Printf("downloads: persist after remove: %v", err)
+			clog.Warn("downloads", "persist after remove: %v", err)
 		}
 	}
 	return removed
@@ -404,7 +404,7 @@ func (s *Service) loadSavedDownloads() []savedDownload {
 	}
 	var out []savedDownload
 	if err := json.Unmarshal(data, &out); err != nil {
-		log.Printf("downloads: parse %s: %v", path, err)
+		clog.Warn("downloads", "parse %s: %v", path, err)
 		return nil
 	}
 	return out
@@ -430,13 +430,13 @@ func (s *Service) restoreDownloads(c *internaltorrent.Client) {
 	added := 0
 	for _, sv := range saved {
 		if _, err := c.AddDownload(sv.Magnet, sv.Peers); err != nil {
-			log.Printf("downloads: restore %s: %v", sv.InfoHash, err)
+			clog.Warn("downloads", "restore %s: %v", sv.InfoHash, err)
 			continue
 		}
 		added++
 	}
 	if added > 0 {
-		log.Printf("downloads: restored %d previously-downloaded torrent(s)", added)
+		clog.Info("downloads", "restored %d previously-downloaded torrent(s)", added)
 	}
 }
 
@@ -445,7 +445,7 @@ func (s *Service) restoreDownloads(c *internaltorrent.Client) {
 func (s *Service) rescanSharedDir(c *internaltorrent.Client, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Printf("torrent: rescan %s: %v", dir, err)
+		clog.Warn("torrent", "rescan %s: %v", dir, err)
 		return
 	}
 	added := 0
@@ -460,14 +460,14 @@ func (s *Service) rescanSharedDir(c *internaltorrent.Client, dir string) {
 		path := filepath.Join(dir, name)
 		h, err := c.AddSeed(path)
 		if err != nil {
-			log.Printf("torrent: rescan %s: %v", name, err)
+			clog.Warn("torrent", "rescan %s: %v", name, err)
 			continue
 		}
 		added++
-		log.Printf("torrent: rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
+		clog.Info("torrent", "rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
 	}
 	if added > 0 {
-		log.Printf("torrent: rescan re-seeded %d file(s) from %s", added, dir)
+		clog.Info("torrent", "rescan re-seeded %d file(s) from %s", added, dir)
 	}
 }
 
@@ -506,7 +506,7 @@ func (s *Service) refeedActiveDownloads(c *internaltorrent.Client) {
 			// un-shared it — only then is the download a dead zombie.
 			switch s.metadataVerdict(d) {
 			case metaUnshared:
-				log.Printf("downloads: %s no longer shared by any online peer — removing", d.InfoHash)
+				clog.Info("downloads", "%s no longer shared by any online peer — removing", d.InfoHash)
 				s.RemoveDownload(d.InfoHash)
 			case metaWait:
 				c.FeedPeers(d) // online source still offers it (or catalog not polled yet)
@@ -526,13 +526,13 @@ func (s *Service) refeedActiveDownloads(c *internaltorrent.Client) {
 		}
 		stalled := now.Sub(d.LastProgressAt) > stallAfter
 		if stalled && d.Magnet != "" {
-			log.Printf("downloads: %s stalled (%s with no progress) — drop+re-add",
+			clog.Info("downloads", "%s stalled (%s with no progress) — drop+re-add",
 				d.InfoHash, now.Sub(d.LastProgressAt).Round(time.Second))
 			peers := append([]string(nil), d.Peers...)
 			magnet := d.Magnet
 			c.RemoveDownload(d.InfoHash)
 			if _, err := c.AddDownload(magnet, peers); err != nil {
-				log.Printf("downloads: stall recovery re-add %s: %v", d.InfoHash, err)
+				clog.Warn("downloads", "stall recovery re-add %s: %v", d.InfoHash, err)
 			}
 			continue
 		}
@@ -568,7 +568,7 @@ func (s *Service) pruneOnce(c *internaltorrent.Client) {
 			continue
 		}
 		if _, err := os.Stat(path); err != nil {
-			log.Printf("downloads: file gone, dropping %s (%s)", sv.InfoHash, path)
+			clog.Info("downloads", "file gone, dropping %s (%s)", sv.InfoHash, path)
 			c.RemoveDownload(sv.InfoHash)
 			removed = true
 			continue
@@ -577,7 +577,7 @@ func (s *Service) pruneOnce(c *internaltorrent.Client) {
 	}
 	if removed {
 		if err := s.saveDownloads(keep); err != nil {
-			log.Printf("downloads: persist after prune: %v", err)
+			clog.Warn("downloads", "persist after prune: %v", err)
 		}
 	}
 	for _, h := range c.ListSeeds() {
@@ -585,7 +585,7 @@ func (s *Service) pruneOnce(c *internaltorrent.Client) {
 			continue
 		}
 		if _, err := os.Stat(h.Path); err != nil {
-			log.Printf("seeds: file gone, dropping %s (%s)", h.InfoHash, h.Path)
+			clog.Info("seeds", "file gone, dropping %s (%s)", h.InfoHash, h.Path)
 			_ = c.RemoveSeed(h.InfoHash)
 		}
 	}
@@ -612,7 +612,7 @@ func chownToUser(path string) {
 	}
 	u, err := user.Lookup(su)
 	if err != nil {
-		log.Printf("chown: lookup %s: %v", su, err)
+		clog.Warn("chown", "lookup %s: %v", su, err)
 		return
 	}
 	uid, _ := strconv.Atoi(u.Uid)
@@ -622,7 +622,7 @@ func chownToUser(path string) {
 			return nil
 		}
 		if cerr := os.Lchown(p, uid, gid); cerr != nil {
-			log.Printf("chown: %s: %v", p, cerr)
+			clog.Warn("chown", "%s: %v", p, cerr)
 		}
 		return nil
 	})

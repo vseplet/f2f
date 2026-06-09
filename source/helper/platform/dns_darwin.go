@@ -4,7 +4,7 @@ package platform
 
 import (
 	"fmt"
-	"log"
+	"github.com/vseplet/f2f/source/helper/clog"
 	"net"
 	"os"
 	"os/exec"
@@ -20,10 +20,10 @@ const resolverDir = "/etc/resolver"
 // logged, not fatal.
 func FlushDNSCache() error {
 	if err := exec.Command("dscacheutil", "-flushcache").Run(); err != nil {
-		log.Printf("dns: dscacheutil -flushcache: %v", err)
+		clog.Warn("dns", "dscacheutil -flushcache: %v", err)
 	}
 	if err := exec.Command("killall", "-HUP", "mDNSResponder").Run(); err != nil {
-		log.Printf("dns: killall -HUP mDNSResponder: %v", err)
+		clog.Warn("dns", "killall -HUP mDNSResponder: %v", err)
 	}
 	return nil
 }
