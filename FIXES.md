@@ -110,12 +110,13 @@
 | POST /api/call/signal     | `call.signal` | services/calls               |
 | POST /api/signal/inbox    | `signal`      | ui/web (RegisterBus)         |
 
-Осталась фаза remove-old: когда все пиры обновятся — выкинуть
-HTTP-фоллбеки (`fetch*` в сервисах, фоллбек-ветки в ui/web), удалить
-tunnel-listener mux (`ui/web/server.go` BindTunnel) и убрать 2202 из
-builtin-портов firewall. 80/443 остаются: это reverse-proxy для
-опубликованных доменов (браузер пира ходит на tunnelIP:443 напрямую),
-а не межсервисный RPC.
+**Фаза remove-old тоже сделана** (после проверки кэмпа на новой
+сборке): HTTP-фоллбеки `fetch*` и фоллбек-ветки в ui/web удалены,
+tunnel-listener (BindTunnel) выпилен, 2202 убран из builtin-портов
+firewall, `TunnelHTTPPort` ушёл из engine. 80/443 остаются: это
+reverse-proxy для опубликованных доменов (браузер пира ходит на
+tunnelIP:443 напрямую), а не межсервисный RPC. Попутно bus перестал
+пинговать офлайн-пиров (busResolver.Peers фильтрует по Online).
 
 План был: вся межсервисная коммуникация пир↔пир (HTTP поверх
 туннеля) переезжает на QUIC bus (`mesh/bus`), как уже сделано для

@@ -3,11 +3,9 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -49,12 +47,9 @@ var assetsFS embed.FS
 // listener (kept for peers on pre-bus builds).
 const busTypeSignal = "signal"
 
-// Server wraps an Engine with an HTTP handler. Two listeners are kept:
-//   - srv on the user-facing loopback bind (the full UI + all API endpoints).
-//   - tunnelSrv on the utun tunnel_ip, exposed once the engine is up,
-//     serving ONLY POST /api/signal/inbox so the remote peer can deliver
-//     WebRTC signalling through the tunnel without us exposing the UI to
-//     the LAN.
+// Server wraps an Engine with an HTTP handler on the user-facing
+// loopback bind (the full UI + all API endpoints). Peer↔peer traffic
+// does not pass through here — it rides the QUIC bus (RegisterBus).
 type Server struct {
 	engine   *engine.Engine
 	store    *config.Store
@@ -73,12 +68,8 @@ type Server struct {
 	addr     string
 	srv      *http.Server
 
-	mu        sync.Mutex
-	tunnelSrv *http.Server // signal/domain listener on tunnel v4
-
 	signals     *signalHub
-	callSignals *signalHub // SSE hub for SFU signals → local browser
-	signalHTTP  *http.Client
+	callSignals *signalHub   // SSE hub for SFU signals → local browser
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
@@ -101,9 +92,6 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
-		signalHTTP: &http.Client{
-			Timeout: 5 * time.Second,
-		},
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -168,64 +156,10 @@ func (s *Server) ListenAndServe() error {
 
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	_ = s.UnbindTunnel()
 	if s.srv == nil {
 		return nil
 	}
 	return s.srv.Shutdown(ctx)
-}
-
-// BindTunnel starts the tunnel-side listener on ip:<same port as loopback>.
-func (s *Server) BindTunnel(ip string) error {
-	if ip == "" {
-		return nil
-	}
-	_ = s.UnbindTunnel()
-	_, port, err := net.SplitHostPort(s.addr)
-	if err != nil {
-		return fmt.Errorf("split bind addr %q: %w", s.addr, err)
-	}
-	addr := net.JoinHostPort(ip, port)
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
-	mux.HandleFunc("GET /api/domains", s.handleListDomains)
-	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
-	mux.HandleFunc("GET /api/files", s.handleListFiles)
-	mux.HandleFunc("GET /api/firewall", s.handleListFirewall)
-	mux.HandleFunc("POST /api/call/signal", s.handleCallSignalInbound)
-	mux.HandleFunc("GET /api/call/state", s.handleCallState)
-	mux.HandleFunc("POST /api/call/join", s.handleCallJoinRemote)
-	mux.HandleFunc("POST /api/call/leave", s.handleCallLeaveRemote)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	s.mu.Lock()
-	s.tunnelSrv = srv
-	s.mu.Unlock()
-	go func() {
-		log.Printf("tunnel inbox listening on http://%s", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("WARN: tunnel inbox listener: %v", err)
-		}
-	}()
-	return nil
-}
-
-// UnbindTunnel stops the tunnel-side listener.
-func (s *Server) UnbindTunnel() error {
-	s.mu.Lock()
-	srv := s.tunnelSrv
-	s.tunnelSrv = nil
-	s.mu.Unlock()
-	if srv == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	log.Printf("tunnel inbox stopped (%s)", srv.Addr)
-	return srv.Shutdown(ctx)
 }
 
 func (s *Server) routes(mux *http.ServeMux) {
@@ -261,8 +195,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/vnc/ws", s.handleVncWS)
 
 	// Local DNS / domain management. /api/my-domains is the UI side
-	// (read/write our own list); /api/domains is the read-only side
-	// exposed on the tunnel listener for peers to poll.
+	// (read/write our own list); peers pull the catalog over the bus
+	// ("domains" message type), /api/domains stays as a debug aid.
 	mux.HandleFunc("GET /api/my-domains", s.handleListMyDomains)
 	mux.HandleFunc("PUT /api/my-domains", s.handleSetMyDomains)
 	mux.HandleFunc("GET /api/domains", s.handleListDomains)
@@ -281,8 +215,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// File sharing via BitTorrent (camp-only, no DHT/public trackers).
 	// /api/files/mine — UI-facing CRUD for what we publish.
-	// /api/files — read-only listing exposed on the tunnel listener
-	// so peers can browse our catalog.
+	// /api/files — read-only listing; peers browse our catalog over
+	// the bus ("files" message type).
 	mux.HandleFunc("GET /api/files/mine", s.handleListMyFiles)
 	mux.HandleFunc("POST /api/files/mine", s.handleAddMyFile)
 	mux.HandleFunc("POST /api/files/mine/upload", s.handleUploadMyFile)
@@ -293,11 +227,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/files/reveal", s.handleRevealFile)
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 
-	// WebRTC signalling: outbox = browser → peer, inbox = peer → us,
-	// stream = us → browser. Wire-format is opaque JSON blobs forwarded
+	// WebRTC signalling: outbox = browser → peer (forwarded over the
+	// bus), stream = us → browser; peer → us arrives as a "signal" bus
+	// message (RegisterBus). Wire-format is opaque JSON blobs forwarded
 	// verbatim; only the browsers care about their contents.
 	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
-	mux.HandleFunc("POST /api/signal/inbox", s.handleSignalInbox)
 	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
 
 	// Notifications: recent list + live SSE stream for the UI.
@@ -307,9 +241,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
 	mux.HandleFunc("GET /api/mesh", s.handleMesh)
 
-	// Group calls (SFU-based). Browser-facing endpoints on the UI
-	// server; /api/call/signal also registered on the tunnel listener
-	// so remote peers can deliver SFU signals.
+	// Group calls (SFU-based). Browser-facing endpoints only; remote
+	// peers deliver SFU signals over the bus (call.* message types).
 	mux.HandleFunc("GET /api/call/state", s.handleCallState)
 	mux.HandleFunc("GET /api/call/list", s.handleCallList)
 	mux.HandleFunc("POST /api/call/create", s.handleCallCreate)
@@ -375,9 +308,8 @@ func rewriteMDNS(body []byte, tunnelIP string) []byte {
 }
 
 // handleSignalOutbox accepts a JSON signalling message from the local
-// browser and forwards it as-is to the peer's /api/signal/inbox over the
-// tunnel. The peer IP comes from the engine config; the port is assumed
-// to match ours (both sides run the UI on the same port).
+// browser and forwards it as-is to the peer over the bus ("signal"
+// message type).
 func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -396,17 +328,17 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 	var sig map[string]any
 	_ = json.Unmarshal(body, &sig)
 	toPub, _ := sig["to"].(string)
-	var peerIP, peerPub string
+	var peerPub string
 	for _, p := range st.Peers {
 		if p.Self || p.Pub == "" {
 			continue
 		}
 		if (toPub != "" && p.Pub == toPub) || (toPub == "" && p.Pub == st.ActivePeerPub) {
-			peerIP, peerPub = p.OverlayV4, p.Pub
+			peerPub = p.Pub
 			break
 		}
 	}
-	if peerIP == "" {
+	if peerPub == "" {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("no target peer (unknown 'to' pub, and no active peer)"))
 		return
 	}
@@ -418,70 +350,17 @@ func (s *Server) handleSignalOutbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	body = rewriteMDNS(body, st.LocalIP)
-	// Bus first; legacy HTTP inbox for peers on pre-bus builds.
-	if s.bus != nil && peerPub != "" {
-		rctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		_, busErr := s.bus.Request(rctx, peerPub, busTypeSignal, body)
-		cancel()
-		if busErr == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-	}
-	_, port, err := net.SplitHostPort(s.addr)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("server addr %q: %w", s.addr, err))
+	if s.bus == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("bus not running"))
 		return
 	}
-	url := "http://" + net.JoinHostPort(peerIP, port) + "/api/signal/inbox"
-	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	rctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	_, busErr := s.bus.Request(rctx, peerPub, busTypeSignal, body)
+	cancel()
+	if busErr != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("forward to peer: %w", busErr))
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.signalHTTP.Do(req)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("forward to peer: %w", err))
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("peer returned %s", resp.Status))
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleSignalInbox receives forwarded signalling messages from the peer
-// and broadcasts them to local browser subscribers. As a side effect it
-// auto-selects the sending peer as active — so the receiver doesn't have
-// to manually pick the caller from a dropdown before being able to
-// answer. The source tunnel_ip is read from RemoteAddr, which is the
-// peer's address as routed through utun.
-func (s *Server) handleSignalInbox(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	// Auto-select active peer by matching the caller's v4 overlay
-	// address (pub-derived, unique per peer) to a known peer.
-	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
-		st := s.engine.Status()
-		if st.Running {
-			for _, p := range st.Peers {
-				if p.Self || p.Pub == "" {
-					continue
-				}
-				if p.OverlayV4 == host && p.Pub != st.ActivePeerPub {
-					_ = s.engine.SetActivePeer(p.Pub)
-					break
-				}
-			}
-		}
-	}
-	s.signals.broadcast(body)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1009,12 +888,14 @@ func (s *Server) handleSetFirewall(w http.ResponseWriter, r *http.Request) {
 }
 
 // fileEntry is the JSON shape returned by /api/files and friends.
+// Loopback-only; the peer-facing catalog (without Path) is served by
+// the drop service's "files" bus handler.
 type fileEntry struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
 	InfoHash string `json:"info_hash"`
 	Magnet   string `json:"magnet"`
-	Path     string `json:"path,omitempty"` // omitted from peer-facing response
+	Path     string `json:"path,omitempty"`
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
@@ -1028,16 +909,8 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		out = append(out, fileEntry{
 			Name: h.Name, Size: h.Size,
 			InfoHash: h.InfoHash, Magnet: h.Magnet,
-			// Path intentionally omitted on peer-facing path; we strip
-			// below for tunnel listener requests.
 			Path: h.Path,
 		})
-	}
-	// Hide local filesystem path from peer-facing tunnel-listener requests.
-	if !isLoopback(r.RemoteAddr) {
-		for i := range out {
-			out[i].Path = ""
-		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1437,93 +1310,38 @@ func (s *Server) handleCallJoin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyCallJoinToHost(w http.ResponseWriter, sfuHost, name string) {
+	pub := s.pubForOverlayIP(sfuHost)
+	if s.bus == nil || pub == "" {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy join: no bus route to %s", sfuHost))
+		return
+	}
 	body, _ := json.Marshal(map[string]string{"name": name})
-	// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
-	if s.bus != nil {
-		if pub := s.pubForOverlayIP(sfuHost); pub != "" {
-			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			respBody, err := s.bus.Request(rctx, pub, calls.BusTypeJoin, body)
-			cancel()
-			if err == nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write(respBody)
-				return
-			}
-		}
-	}
-	_, port, _ := net.SplitHostPort(s.addr)
-	if port == "" {
-		port = "2202"
-	}
-	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/join"
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	respBody, err := s.bus.Request(rctx, pub, calls.BusTypeJoin, body)
+	cancel()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy join to %s: %w", sfuHost, err))
 		return
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(http.StatusOK)
 	w.Write(respBody)
-}
-
-// handleCallJoinRemote is exposed on the tunnel listener so a remote peer
-// can register itself as a call participant.
-func (s *Server) handleCallJoinRemote(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if host == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("cannot determine caller IP"))
-		return
-	}
-	if err := s.calls.Join(host, req.Name); err != nil {
-		writeError(w, http.StatusConflict, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.calls.LocalCall())
 }
 
 func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Status()
 	sfuHost := s.calls.JoinedSFUHost()
 
-	// If we joined a remote SFU, proxy leave to the host.
+	// If we joined a remote SFU, proxy leave to the host over the bus.
 	if sfuHost != "" && sfuHost != st.LocalIP {
 		s.calls.ClearJoinedSFUHost()
-		// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
-		delivered := false
 		if s.bus != nil {
 			if pub := s.pubForOverlayIP(sfuHost); pub != "" {
 				rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, err := s.bus.Request(rctx, pub, calls.BusTypeLeave, nil)
+				if _, err := s.bus.Request(rctx, pub, calls.BusTypeLeave, nil); err != nil {
+					log.Printf("call: leave %s: %v", sfuHost, err)
+				}
 				cancel()
-				delivered = err == nil
-			}
-		}
-		if !delivered {
-			_, port, _ := net.SplitHostPort(s.addr)
-			if port == "" {
-				port = "2202"
-			}
-			url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/leave"
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Post(url, "application/json", nil)
-			if err == nil {
-				resp.Body.Close()
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -1534,19 +1352,10 @@ func (s *Server) handleCallLeave(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleCallLeaveRemote is on the tunnel listener — a remote peer leaves.
-func (s *Server) handleCallLeaveRemote(w http.ResponseWriter, r *http.Request) {
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if host != "" {
-		s.calls.Leave(host)
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleCallSignal receives WebRTC signals for the SFU. On the tunnel
-// listener the sender is a remote peer; on the loopback listener it's
-// the local browser. If the SFU is remote, the loopback handler proxies
-// the signal to the SFU host through the tunnel.
+// handleCallSignal receives WebRTC signals for the SFU from the local
+// browser. If the SFU is remote, the signal is proxied to the SFU host
+// over the bus; peer-originated signals arrive via the calls service's
+// call.signal bus handler instead.
 func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -1592,92 +1401,26 @@ func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request) {
 func (s *Server) proxyCallSignalToHost(w http.ResponseWriter, sfuHost string, body []byte) {
 	// Don't broadcast the proxy response to SSE — the browser already
 	// gets it from the POST response. SFU-initiated offers/candidates
-	// arrive separately via deliverSFUSignal → handleCallSignalInbound
-	// (or its bus counterpart calls.BusTypeSignal).
-	//
-	// Bus first; legacy HTTP endpoint for hosts on pre-bus builds.
-	if s.bus != nil {
-		if pub := s.pubForOverlayIP(sfuHost); pub != "" {
-			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			respBody, err := s.bus.Request(rctx, pub, calls.BusTypeSignal, body)
-			cancel()
-			if err == nil {
-				if len(respBody) == 0 {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write(respBody)
-				return
-			}
-		}
+	// arrive separately via deliverSignal → calls.BusTypeSignal.
+	pub := s.pubForOverlayIP(sfuHost)
+	if s.bus == nil || pub == "" {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy signal: no bus route to %s", sfuHost))
+		return
 	}
-	_, port, _ := net.SplitHostPort(s.addr)
-	if port == "" {
-		port = "2202"
-	}
-	url := "http://" + net.JoinHostPort(sfuHost, port) + "/api/call/signal"
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	respBody, err := s.bus.Request(rctx, pub, calls.BusTypeSignal, body)
+	cancel()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy signal to %s: %w", sfuHost, err))
 		return
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
-}
-
-// handleCallSignalInbound is registered on the tunnel listener. It handles:
-//
-//  1. Signals FROM the SFU (from: "sfu") → always broadcast to local browser SSE.
-//     This covers both: SFU host receiving its own renegotiation offers, and
-//     remote peers receiving SFU offers/candidates.
-//  2. Signals FROM a remote browser (no from: "sfu") → dispatch to local SFU.
-func (s *Server) handleCallSignalInbound(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-
-	// Check if this signal originates from the SFU itself.
-	var peek struct {
-		From string `json:"from"`
-	}
-	_ = json.Unmarshal(body, &peek)
-
-	if peek.From == "sfu" {
-		// SFU → browser: broadcast to local SSE so the browser can
-		// process renegotiation offers and ICE candidates.
-		s.callSignals.broadcast(body)
+	if len(respBody) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-
-	// Browser/peer → SFU: dispatch to the local SFU engine.
-	from := ""
-	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
-		from = host
-	}
-
-	if s.calls.SFU() != nil {
-		resp, err := s.calls.HandleSignal(from, body)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		if resp != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write(resp)
-			return
-		}
-	}
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
 }
 
 func (s *Server) handleCallSignalStream(w http.ResponseWriter, r *http.Request) {

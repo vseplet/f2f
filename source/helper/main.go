@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -112,8 +111,7 @@ func run(bind string, console bool, autostart bool) error {
 
 	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
 	// comes up (OnStarted); it auto-meshes with every reachable peer. All
-	// peer↔peer service traffic rides it (the tunnel HTTP listener remains
-	// as a fallback for peers on pre-bus builds).
+	// peer↔peer service traffic rides it.
 	busSvc, err := bus.New(busResolver{eng: eng})
 	if err != nil {
 		return fmt.Errorf("bus: %w", err)
@@ -278,9 +276,6 @@ func run(bind string, console bool, autostart bool) error {
 				log.Printf("WARN: switch camp log: %v", err)
 			}
 		}
-		// Tunnel-side HTTP listener (tunnelIP:2202) is no longer bound:
-		// peer traffic rides the QUIC bus. Restore srv.BindTunnel(localIP)
-		// here if a camp still has pre-bus peers that must reach us.
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -305,7 +300,6 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}
 	eng.OnStopped = func() {
-		_ = srv.UnbindTunnel()
 		gossipSvc.Stop()
 		_ = busSvc.Stop()
 		_ = proxySvc.Stop()
@@ -321,10 +315,6 @@ func run(bind string, console bool, autostart bool) error {
 		// Camp-less again — route logs back to the bootstrap file.
 		_ = clog.SwitchTo(filepath.Join(store.Dir(), "f2f.log"))
 	}
-	if _, port, err := net.SplitHostPort(bind); err == nil {
-		eng.SetTunnelHTTPPort(port)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -425,6 +415,12 @@ func (r busResolver) Peers() []string {
 	var out []string
 	for _, p := range st.Peers {
 		if p.Self || p.Pub == "" || p.OverlayV4 == "" || !p.InCamp {
+			continue
+		}
+		// Skip offline members: dialing them just burns the 5s ping
+		// timeout and spams "ping failed" — they reappear here as soon
+		// as the camp roster marks them online again.
+		if !p.Online {
 			continue
 		}
 		// Defensive self-exclusion: the camp-owner entry can appear without

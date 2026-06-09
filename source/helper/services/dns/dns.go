@@ -15,9 +15,9 @@
 //     MyDomains, peer-domain poll, TCP health check.
 //
 // The service reads/writes camp state through *config.Store directly
-// — engine is consulted only for live peer iteration and the tunnel
-// HTTP port. This keeps config persistence centralised and avoids
-// engine accumulating per-service proxy setters.
+// — engine is consulted only for live peer iteration. This keeps
+// config persistence centralised and avoids engine accumulating
+// per-service proxy setters.
 package dns
 
 import (
@@ -26,7 +26,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,8 +40,7 @@ import (
 )
 
 // busTypeDomains is the bus message type serving our published domain
-// catalog — the QUIC counterpart of GET /api/domains on the tunnel
-// listener (kept for peers on pre-bus builds).
+// catalog to peers.
 const busTypeDomains = "domains"
 
 // Entry is one (name, port, proto) record this peer publishes inside
@@ -85,7 +83,6 @@ type Service struct {
 	store *config.Store
 	eng   *engine.Engine
 	bus   *bus.Service
-	http  *http.Client
 
 	my atomic.Pointer[[]Entry]
 
@@ -114,7 +111,6 @@ func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 		store:    store,
 		eng:      eng,
 		bus:      b,
-		http:     &http.Client{Timeout: 3 * time.Second},
 		health:   make(map[string]healthSnapshot),
 		peerDoms: make(map[string][]Entry),
 	}
@@ -503,14 +499,19 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
+	if s.bus == nil {
+		return
+	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		// log.Printf("dns-poll: 0 peers online — skipping tick")
 		return
 	}
-	port := s.eng.TunnelHTTPPort()
 	for _, t := range targets {
-		list, err := s.fetchDomains(ctx, t, port)
+		if t.Pub == "" {
+			continue
+		}
+		list, err := s.fetchDomains(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
@@ -519,36 +520,16 @@ func (s *Service) pollOnce(ctx context.Context) {
 	}
 }
 
-// fetchDomains asks one peer for its domain catalog: bus first, falling
-// back to the legacy HTTP endpoint for peers on pre-bus builds. Remove
-// the HTTP leg once every peer in the camp has upgraded.
-func (s *Service) fetchDomains(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]Entry, error) {
-	if s.bus != nil && t.Pub != "" {
-		rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		raw, err := s.bus.Request(rctx, t.Pub, busTypeDomains, nil)
-		cancel()
-		if err == nil {
-			var list []Entry
-			if jerr := json.Unmarshal(raw, &list); jerr == nil {
-				return list, nil
-			}
-		}
-	}
-	if port == "" {
-		return nil, errors.New("dns: peer unreachable over bus, no tunnel HTTP port for fallback")
-	}
-	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/domains"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// fetchDomains asks one peer for its domain catalog over the bus.
+func (s *Service) fetchDomains(ctx context.Context, pub string) ([]Entry, error) {
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, busTypeDomains, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 	var list []Entry
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	if err := json.Unmarshal(raw, &list); err != nil {
 		return nil, err
 	}
 	return list, nil

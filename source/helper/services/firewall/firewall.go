@@ -24,8 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +33,9 @@ import (
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 )
 
-// busTypeFirewall is the bus message type serving our allow list —
-// the QUIC counterpart of GET /api/firewall on the tunnel listener
-// (kept for peers on pre-bus builds). Response shape matches the HTTP
-// endpoint: {"active":…, "builtin":[…], "user":[…]}.
+// busTypeFirewall is the bus message type serving our allow list to
+// peers. Response shape matches the loopback HTTP endpoint:
+// {"active":…, "builtin":[…], "user":[…]}.
 const busTypeFirewall = "firewall"
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
@@ -50,17 +47,15 @@ var ErrEngineNotRunning = errors.New("firewall: engine not running")
 // tunnel. They are always allowed by the inbound filter regardless
 // of user settings, because the engine itself is the consumer:
 //
-//   - 2202/tcp — HTTP API used by the web UI and by peer-to-peer
-//     signal polling over utun.
-//   - 2203/udp — the QUIC peer-to-peer data bus (mesh/bus).
+//   - 2203/udp — the QUIC peer-to-peer data bus (mesh/bus); all
+//     service-to-service traffic rides it.
 //   - 80/tcp, 443/tcp — reverse proxy entry points that forward to
 //     locally-registered domains.
 //   - 6881/tcp + 6881/udp — BitTorrent peer wire and uTP for the
 //     drop subsystem.
 //
-// Keep in sync with web.Server, mesh/bus (Port) and the torrent client.
+// Keep in sync with mesh/bus (Port) and the torrent client.
 var BuiltinRules = []PortRule{
-	{Port: 2202, Protocol: "tcp"},
 	{Port: 2203, Protocol: "udp"}, // QUIC data bus
 	{Port: 80, Protocol: "tcp"},
 	{Port: 443, Protocol: "tcp"},
@@ -73,8 +68,6 @@ var BuiltinRules = []PortRule{
 // Returns "" for non-builtin combinations.
 func BuiltinLabel(port int, proto string) string {
 	switch {
-	case port == 2202 && proto == "tcp":
-		return "f2f HTTP API"
 	case port == 2203 && proto == "udp":
 		return "f2f data bus (QUIC)"
 	case port == 80 && proto == "tcp":
@@ -94,9 +87,8 @@ func BuiltinLabel(port int, proto string) string {
 // tunnelIP, campID) so the service is camp-independent until then.
 type Service struct {
 	store *config.Store
-	eng   *engine.Engine // for OnlinePeersForCAPoll + TunnelHTTPPort
+	eng   *engine.Engine // for OnlinePeersForCAPoll
 	bus   *bus.Service
-	http  *http.Client
 
 	mu     sync.Mutex
 	anchor *anchor
@@ -116,7 +108,6 @@ func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 		store:     store,
 		eng:       eng,
 		bus:       b,
-		http:      &http.Client{Timeout: 5 * time.Second},
 		peerPorts: map[string][]config.Firewall{},
 	}
 }
@@ -174,16 +165,21 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
+	if s.bus == nil {
+		return
+	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
-	port := s.eng.TunnelHTTPPort()
 	s.mu.Lock()
 	campID := s.campID
 	s.mu.Unlock()
 	for _, t := range targets {
-		user, err := s.fetchPeerPorts(ctx, t, port)
+		if t.Pub == "" {
+			continue
+		}
+		user, err := s.fetchPeerPorts(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
@@ -204,37 +200,18 @@ func (s *Service) pollOnce(ctx context.Context) {
 	}
 }
 
-// fetchPeerPorts pulls one peer's user allow list: bus first, legacy
-// HTTP endpoint as fallback for peers on pre-bus builds. Remove the
-// HTTP leg once every peer in the camp has upgraded.
-func (s *Service) fetchPeerPorts(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]config.Firewall, error) {
+// fetchPeerPorts pulls one peer's user allow list over the bus.
+func (s *Service) fetchPeerPorts(ctx context.Context, pub string) ([]config.Firewall, error) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, busTypeFirewall, nil)
+	if err != nil {
+		return nil, err
+	}
 	var body struct {
 		User []config.Firewall `json:"user"`
 	}
-	if s.bus != nil && t.Pub != "" {
-		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		raw, err := s.bus.Request(rctx, t.Pub, busTypeFirewall, nil)
-		cancel()
-		if err == nil {
-			if jerr := json.Unmarshal(raw, &body); jerr == nil {
-				return body.User, nil
-			}
-		}
-	}
-	if port == "" {
-		return nil, errors.New("firewall: peer unreachable over bus, no tunnel HTTP fallback")
-	}
-	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/firewall"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		return nil, err
 	}
 	return body.User, nil

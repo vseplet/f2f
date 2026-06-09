@@ -6,8 +6,8 @@
 //     <name>.<camp>.f2f). Loaded from disk or generated fresh on each
 //     camp Start, then installed into the system trust store so the
 //     OS recognises it as a root.
-//   - "peer CAs": every camp peer publishes its own local CA at
-//     /api/ca-cert. PollPeers fetches each one, persists it on disk
+//   - "peer CAs": every camp peer serves its own local CA over the
+//     bus. PollPeers fetches each one, persists it on disk
 //     plus records metadata in the camp config; Install adds a
 //     discovered CA to the system trust store on explicit user click
 //     (because the keychain prompt is intrusive); Remove is the
@@ -29,10 +29,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,9 +44,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
-// busTypeCACert is the bus message type serving our CA cert (PEM) —
-// the QUIC counterpart of GET /api/ca-cert on the tunnel listener
-// (kept for peers on pre-bus builds).
+// busTypeCACert is the bus message type serving our CA cert (PEM) to
+// peers.
 const busTypeCACert = "ca-cert"
 
 // myCADir is where the local CA's ca.crt/ca.key live. Persisted
@@ -79,7 +75,6 @@ type Service struct {
 	store *config.Store
 	eng   *engine.Engine
 	bus   *bus.Service
-	http  *http.Client
 
 	mu     sync.Mutex
 	myCA   *CA                  // current camp's local CA (HTTPS termination)
@@ -95,7 +90,6 @@ func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
 		store: store,
 		eng:   eng,
 		bus:   b,
-		http:  &http.Client{Timeout: 5 * time.Second},
 		peers: make(map[string]PeerEntry),
 	}
 }
@@ -302,13 +296,18 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
+	if s.bus == nil {
+		return
+	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		return
 	}
-	port := s.eng.TunnelHTTPPort()
 	for _, t := range targets {
-		body, err := s.fetchCACert(ctx, t, port)
+		if t.Pub == "" {
+			continue
+		}
+		body, err := s.fetchCACert(ctx, t.Pub)
 		if err != nil {
 			log.Printf("ca-poll: peer %s: %v", t.Name, err)
 			continue
@@ -317,37 +316,16 @@ func (s *Service) pollOnce(ctx context.Context) {
 	}
 }
 
-// fetchCACert pulls one peer's CA cert: bus first, legacy HTTP endpoint
-// as fallback for peers on pre-bus builds. Remove the HTTP leg once
-// every peer in the camp has upgraded.
-func (s *Service) fetchCACert(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) ([]byte, error) {
-	if s.bus != nil && t.Pub != "" {
-		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		body, err := s.bus.Request(rctx, t.Pub, busTypeCACert, nil)
-		cancel()
-		if err == nil && len(body) > 0 {
-			return body, nil
-		}
-	}
-	if port == "" || t.Host == "" {
-		return nil, fmt.Errorf("unreachable over bus, no tunnel HTTP fallback")
-	}
-	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/ca-cert"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// fetchCACert pulls one peer's CA cert over the bus.
+func (s *Service) fetchCACert(ctx context.Context, pub string) ([]byte, error) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, err := s.bus.Request(rctx, pub, busTypeCACert, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty ca-cert reply")
 	}
 	return body, nil
 }

@@ -18,13 +18,10 @@
 package calls
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,13 +32,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/calls/sfu"
 )
 
-// Bus message types — QUIC counterparts of the tunnel-listener HTTP
-// endpoints (which are kept for peers on pre-bus builds):
-//
-//	call.state  ↔ GET  /api/call/state
-//	call.join   ↔ POST /api/call/join
-//	call.leave  ↔ POST /api/call/leave
-//	call.signal ↔ POST /api/call/signal
+// Bus message types for call discovery, membership and signalling.
 const (
 	BusTypeState  = "call.state"
 	BusTypeJoin   = "call.join"
@@ -74,7 +65,6 @@ type Service struct {
 	eng   *engine.Engine
 	store *config.Store
 	bus   *bus.Service
-	http  *http.Client
 
 	// OnLocalSignal delivers SFU signal messages destined for the
 	// local browser, bypassing HTTP-through-tunnel. Set by main.go
@@ -92,12 +82,7 @@ type Service struct {
 
 // New constructs a Service. The engine and store must outlive it.
 func New(store *config.Store, eng *engine.Engine, b *bus.Service) *Service {
-	return &Service{
-		store: store,
-		eng:   eng,
-		bus:   b,
-		http:  &http.Client{Timeout: 5 * time.Second},
-	}
+	return &Service{store: store, eng: eng, bus: b}
 }
 
 // Register installs the call.* bus handlers. The sender's identity
@@ -387,26 +372,15 @@ func (s *Service) deliverSignal(to string, msg []byte) {
 		s.OnLocalSignal(msg)
 		return
 	}
+	pub := s.pubForIP(to)
+	if s.bus == nil || pub == "" {
+		log.Printf("call: deliver signal to %s: no bus route", to)
+		return
+	}
 	go func() {
-		// Bus first; legacy HTTP endpoint for peers on pre-bus builds.
-		if s.bus != nil {
-			if pub := s.pubForIP(to); pub != "" {
-				if err := s.bus.Notify(pub, BusTypeSignal, msg); err == nil {
-					return
-				}
-			}
-		}
-		port := s.eng.TunnelHTTPPort()
-		if port == "" {
-			port = "2202"
-		}
-		url := "http://" + to + ":" + port + "/api/call/signal"
-		resp, err := s.http.Post(url, "application/json", bytes.NewReader(msg))
-		if err != nil {
+		if err := s.bus.Notify(pub, BusTypeSignal, msg); err != nil {
 			log.Printf("call: deliver signal to %s: %v", to, err)
-			return
 		}
-		resp.Body.Close()
 	}()
 }
 
@@ -429,15 +403,20 @@ func (s *Service) PollPeers(ctx context.Context) {
 }
 
 func (s *Service) pollOnce(ctx context.Context) {
+	if s.bus == nil {
+		return
+	}
 	targets := s.eng.OnlinePeersForCAPoll()
 	if len(targets) == 0 {
 		s.storeRemoteCalls(nil)
 		return
 	}
-	port := s.eng.TunnelHTTPPort()
 	var found []State
 	for _, t := range targets {
-		cs, err := s.fetchCallState(ctx, t, port)
+		if t.Pub == "" {
+			continue
+		}
+		cs, err := s.fetchCallState(ctx, t.Pub)
 		if err != nil {
 			continue
 		}
@@ -449,35 +428,16 @@ func (s *Service) pollOnce(ctx context.Context) {
 	s.storeRemoteCalls(found)
 }
 
-// fetchCallState asks one peer for the call it's hosting: bus first,
-// legacy HTTP endpoint as fallback for peers on pre-bus builds. Remove
-// the HTTP leg once every peer in the camp has upgraded.
-func (s *Service) fetchCallState(ctx context.Context, t engine.OnlinePeerHTTPInfo, port string) (State, error) {
+// fetchCallState asks one peer for the call it's hosting over the bus.
+func (s *Service) fetchCallState(ctx context.Context, pub string) (State, error) {
 	var cs State
-	if s.bus != nil && t.Pub != "" {
-		rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		raw, err := s.bus.Request(rctx, t.Pub, BusTypeState, nil)
-		cancel()
-		if err == nil {
-			if jerr := json.Unmarshal(raw, &cs); jerr == nil {
-				return cs, nil
-			}
-		}
-	}
-	if port == "" {
-		return cs, fmt.Errorf("calls: peer unreachable over bus, no tunnel HTTP fallback")
-	}
-	url := "http://" + net.JoinHostPort(t.Host, port) + "/api/call/state"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := s.bus.Request(rctx, pub, BusTypeState, nil)
 	if err != nil {
 		return cs, err
 	}
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return cs, err
-	}
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&cs); err != nil {
+	if err := json.Unmarshal(raw, &cs); err != nil {
 		return cs, err
 	}
 	return cs, nil
