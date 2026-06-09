@@ -1396,6 +1396,15 @@ func (e *Engine) Status() Status {
 		TxPackets: e.txPackets.Load(),
 		RxPackets: e.rxPackets.Load(),
 	}
+	// When the AWG device is active, data-plane traffic bypasses the
+	// engine's tun/udp loops entirely — the Bind is the only observer.
+	if e.awgBind != nil {
+		tx, rx, txp, rxp := e.awgBind.Stats()
+		st.TxBytes += tx
+		st.RxBytes += rx
+		st.TxPackets += txp
+		st.RxPackets += rxp
+	}
 	if e.tun != nil {
 		st.UtunName = e.tun.Name()
 	}
