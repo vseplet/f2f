@@ -3,7 +3,11 @@
 // which peer it goes to. Today this means "intercepts" — user-driven
 // (spec → peer) bindings where spec is a CIDR, IP, or DNS name.
 // Future work: tunnelling traffic to public domains the user has
-// pointed at the camp (ngrok-style ingress).
+// pointed at the camp (ngrok-style ingress); and intercepts for
+// domains visible only from the EXIT peer's network (e.g. a corporate
+// VPN) — resolve the name AND its outbound interface on the exit peer,
+// not the origin. See ARCHITECTURE.md "TODO: intercepts на домены,
+// видимые только из сети exit-пира".
 //
 // Layering:
 //
