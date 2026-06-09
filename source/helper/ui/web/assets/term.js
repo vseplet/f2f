@@ -109,6 +109,17 @@
     }
   }
 
+  // redraw forces xterm to repaint every row from its own buffer. While a
+  // browser tab is hidden the renderer is throttled, so writes update the
+  // buffer but the DOM lags; on return the screen can look garbled. A refresh
+  // fixes it client-side — no reattach, so no mouse-mode loss.
+  function redraw() {
+    if (!term) return;
+    const t = document.getElementById('tab-term');
+    if (t && t.classList.contains('hidden')) return; // not visible; refresh on show
+    try { term.refresh(0, term.rows - 1); } catch (_) {}
+  }
+
   // DEBUG: scan host→client bytes for sequences that would turn mouse tracking
   // OFF — mouse DECRST (ESC[?1000l / 1002l / 1003l), full reset (ESC c) or soft
   // reset (ESC[!p). Logs them so we can see exactly what kills the mouse.
@@ -158,7 +169,7 @@
     curPub = pub;
     curSession = sessionFor(pub);
     elTitle().textContent = '— terminal · ' + pub.slice(0, 12);
-    setTimeout(doFit, 0);
+    setTimeout(() => { doFit(); redraw(); }, 0); // repaint when the panel re-shows
     if (!ws) connect();
   }
 
@@ -222,6 +233,11 @@
     const fs = document.getElementById('term-fs');
     if (fs) fs.addEventListener('click', toggleFullscreen);
     document.addEventListener('fullscreenchange', () => setTimeout(doFit, 0));
+    // When the browser tab becomes visible again, repaint: the renderer was
+    // throttled while hidden so the screen may be stale.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) setTimeout(redraw, 0);
+    });
     window.addEventListener('hashchange', applyTermRoute);
     applyTermRoute();
   }
