@@ -2809,6 +2809,15 @@ healthcheck:
 
 ## TODO: intercepts на домены, видимые только из сети exit-пира
 
+> **Статус (2026-06): реализовано.** bus-хендлер `resolve` живёт в
+> services/tunnel (Register) и попутно ставит per-target NAT по своей
+> таблице маршрутов (egress.ensureTargets) — split-tunnel VPN покрыт.
+> Domain-спеки резолвятся через exit-пира (resolvePrefixes), ответы
+> пинятся в локальный DNS (dns.SetPinned + /etc/resolver/<domain>,
+> mac-only). Открытые вопросы 2 (коллизии приватных IP — синтетические
+> адреса) и 3 (политика, кто может резолвить/выходить) пока не закрыты;
+> вопрос 1 закрыт per-domain resolver'ом.
+
 ### Зачем
 
 Кейс: `work-vpn.ru` доступен пользователю **только когда он сидит в

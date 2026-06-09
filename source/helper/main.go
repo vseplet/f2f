@@ -128,7 +128,13 @@ func run(bind string, console bool, autostart bool) error {
 	dropSvc.Register()
 	callsSvc := calls.New(store, eng, busSvc)
 	callsSvc.Register()
-	tunnelSvc := tunnel.New(store, eng)
+	tunnelSvc := tunnel.New(store, eng, busSvc)
+	tunnelSvc.Register()
+	// Domain intercepts resolve on the exit peer; mirror the answers
+	// into the local DNS so apps here resolve those names to the same
+	// IPs the intercept routes cover.
+	tunnelSvc.OnDomainPinned = dnsSvc.SetPinned
+	tunnelSvc.OnDomainUnpinned = dnsSvc.RemovePinned
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 

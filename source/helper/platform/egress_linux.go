@@ -39,15 +39,19 @@ func DisableFilterEngine(FilterEngineToken) error { return nil }
 // script as one transaction, so there's no window where masquerade
 // is half-installed.
 func InstallNAT(r NATRules) error {
+	var targets strings.Builder
+	for _, t := range r.Targets {
+		fmt.Fprintf(&targets, "    ip saddr %s ip daddr %s oif \"%s\" masquerade\n", r.Subnet, t.IP, t.Iface)
+	}
 	rules := fmt.Sprintf(`table ip f2fnat {}
 delete table ip f2fnat
 table ip f2fnat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr %s oif "%s" masquerade
+%s    ip saddr %s oif "%s" masquerade
   }
 }
-`, r.Subnet, r.EgressIface)
+`, targets.String(), r.Subnet, r.EgressIface)
 	cmd := exec.Command("nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(rules)
 	out, err := cmd.CombinedOutput()

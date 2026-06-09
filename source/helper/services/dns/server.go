@@ -43,6 +43,11 @@ type Server struct {
 	suffix string // ".<camp_id>.f2f." — lowercase, trailing dot
 	res    Resolver
 
+	// pinnedFn answers names OUTSIDE the camp zone — intercept
+	// domains pinned to exit-peer-resolved IPs. Queries for them only
+	// arrive here via per-domain OS resolver entries. nil = no pins.
+	pinnedFn func(name string) []string
+
 	// Per-rcode query counters and last-query timestamp, for the UI's
 	// diagnostics tab. Atomic — read concurrently with handle().
 	totalQueries atomic.Int64
@@ -81,7 +86,7 @@ func (s *Server) Stats() Stats {
 //
 // Pass "127.0.0.1:0" to let the kernel pick a free port; the actual
 // bound address is then available via Server.Addr.
-func Open(bindAddr, zone string, res Resolver) (*Server, error) {
+func Open(bindAddr, zone string, res Resolver, pinned func(name string) []string) (*Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dns: resolve %s: %w", bindAddr, err)
@@ -92,13 +97,19 @@ func Open(bindAddr, zone string, res Resolver) (*Server, error) {
 	}
 	suffix := "." + strings.ToLower(zone) + ".f2f."
 	s := &Server{
-		srv:    &dns.Server{PacketConn: conn},
-		addr:   conn.LocalAddr().String(),
-		suffix: suffix,
-		res:    res,
+		srv:      &dns.Server{PacketConn: conn},
+		addr:     conn.LocalAddr().String(),
+		suffix:   suffix,
+		res:      res,
+		pinnedFn: pinned,
 	}
 	mux := dns.NewServeMux()
 	mux.HandleFunc(strings.TrimPrefix(suffix, "."), s.handle)
+	// Root pattern catches everything outside the camp zone — pinned
+	// intercept domains routed here by per-domain resolver entries.
+	// The mux picks the longest matching suffix, so the camp-zone
+	// handler above still wins for its names.
+	mux.HandleFunc(".", s.handlePinned)
 	s.srv.Handler = mux
 
 	started := make(chan error, 1)
@@ -210,6 +221,55 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 	// RFC 2308 negative cache stays at one second.
 	if len(m.Answer) == 0 {
 		s.attachSOA(m)
+	}
+	_ = w.WriteMsg(m)
+}
+
+// handlePinned answers queries for names outside the camp zone:
+// intercept domains pinned to exit-peer-resolved A records. AAAA gets
+// an empty NOERROR so apps settle on v4 immediately (the v4 routes
+// are what the intercept covers). Unknown names → NXDOMAIN.
+func (s *Server) handlePinned(w dns.ResponseWriter, req *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetReply(req)
+	m.Authoritative = true
+	s.totalQueries.Add(1)
+	s.lastQueryMs.Store(time.Now().UnixMilli())
+	defer func() {
+		switch m.Rcode {
+		case dns.RcodeSuccess:
+			s.noerrCount.Add(1)
+		case dns.RcodeNameError:
+			s.nxdomCount.Add(1)
+		case dns.RcodeRefused:
+			s.refusedCount.Add(1)
+		}
+	}()
+	if len(req.Question) == 0 || req.Question[0].Qclass != dns.ClassINET {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
+	q := req.Question[0]
+	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	var ips []string
+	if s.pinnedFn != nil {
+		ips = s.pinnedFn(name)
+	}
+	if len(ips) == 0 {
+		m.Rcode = dns.RcodeNameError
+		_ = w.WriteMsg(m)
+		return
+	}
+	if q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY {
+		for _, ip := range ips {
+			if addr := net.ParseIP(ip).To4(); addr != nil {
+				m.Answer = append(m.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   addr,
+				})
+			}
+		}
 	}
 	_ = w.WriteMsg(m)
 }
