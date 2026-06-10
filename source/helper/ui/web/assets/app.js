@@ -1128,65 +1128,103 @@ $(function () {
       return;
     }
 
+    // Group subdomains under their parent zone: B nests under A when
+    // B.spec is a strict subdomain of A.spec (most specific parent wins).
+    // On-demand entries (www resolved automatically under a myip.com
+    // intercept) and hand-added subdomains both fold in this way.
+    const parentOf = (it) => {
+      let best = null;
+      for (const o of items) {
+        if (o === it) continue;
+        if (it.spec.endsWith('.' + o.spec) && (!best || o.spec.length > best.spec.length)) best = o;
+      }
+      return best;
+    };
+    const childrenOf = new Map();
+    const tops = [];
     items.forEach((it) => {
-      const key = it.spec + '\x00' + it.peer;
-      const prefixes = it.live ? (it.live.prefixes || []) : [];
-      const parsed = prefixes.map(parsePrefixEntry);
-      const v4count = parsed.filter((p) => p.kind === 'v4').length;
-      const v6count = parsed.filter((p) => p.kind === 'v6').length;
-      const expanded = expandedIntercepts.has(key);
-
-      const $row = $('<div class="ax-intercept">').toggleClass('is-expanded', expanded);
-      const $head = $('<div class="ax-intercept-head">');
-      $head.append($('<span class="ax-intercept-caret">').text(expanded ? '▼' : '▶'));
-      $head.append($('<span class="ax-intercept-spec">').text(it.spec));
-      $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + it.peer));
-      if (it.live) $head.append($('<span class="ax-pill ax-pill-active">').text('active'));
-      else         $head.append($('<span class="ax-pill ax-pill-pending">').text('pending'));
-
-      const $meta = $('<span class="ax-intercept-meta">');
-      if (parsed.length) {
-        const bits = [];
-        if (v4count) bits.push(`<span class="ax-meta-routes">${v4count} route${v4count === 1 ? '' : 's'}</span>`);
-        if (v6count) bits.push(`<span class="ax-meta-reject">${v6count} reject</span>`);
-        $meta.html(bits.join(' · '));
+      const p = parentOf(it);
+      if (p) {
+        if (!childrenOf.has(p.spec)) childrenOf.set(p.spec, []);
+        childrenOf.get(p.spec).push(it);
+      } else {
+        tops.push(it);
       }
-      $head.append($meta);
-
-      const $rm = $('<button class="ax-list-remove">remove</button>');
-      $rm.on('click', (e) => { e.stopPropagation(); removeSpec(it.live); });
-      $head.append($rm);
-
-      $head.on('click', () => {
-        if (expandedIntercepts.has(key)) expandedIntercepts.delete(key);
-        else expandedIntercepts.add(key);
-        renderIntercepts();
-      });
-      $row.append($head);
-
-      if (expanded) {
-        const $body = $('<div class="ax-intercept-body">');
-        if (parsed.length === 0) {
-          $body.append($('<div class="ax-intercept-empty">').text('no resolved routes yet'));
-        } else {
-          const $tbl = $('<table class="ax-intercept-table">');
-          $tbl.append('<thead><tr><th>kind</th><th>resolved</th><th class="ax-policy">policy</th></tr></thead>');
-          const $tb = $('<tbody>');
-          parsed.forEach((p) => {
-            const $tr = $('<tr>').addClass(p.kind);
-            $tr.append($('<td class="ax-kind">').text(p.kind));
-            $tr.append($('<td class="ax-resolved">').text(p.resolved));
-            $tr.append($('<td class="ax-policy">').text(p.policy));
-            $tb.append($tr);
-          });
-          $tbl.append($tb);
-          $body.append($tbl);
-        }
-        $row.append($body);
-      }
-
-      $list.append($row);
     });
+    const bySpec = (a, b) => a.spec.localeCompare(b.spec);
+    const renderNode = (it, depth) => {
+      $list.append(buildInterceptRow(it, depth));
+      const kids = childrenOf.get(it.spec);
+      if (kids) {
+        kids.sort(bySpec);
+        kids.forEach((k) => renderNode(k, depth + 1));
+      }
+    };
+    tops.sort(bySpec).forEach((it) => renderNode(it, 0));
+  }
+
+  // buildInterceptRow renders one intercept as a collapsible row. depth>0
+  // means it's a subdomain nested under a parent zone — indented, with an
+  // "auto" pill when we resolved it on demand rather than the user typing it.
+  function buildInterceptRow(it, depth) {
+    const key = it.spec + '\x00' + it.peer;
+    const prefixes = it.live ? (it.live.prefixes || []) : [];
+    const parsed = prefixes.map(parsePrefixEntry);
+    const v4count = parsed.filter((p) => p.kind === 'v4').length;
+    const v6count = parsed.filter((p) => p.kind === 'v6').length;
+    const expanded = expandedIntercepts.has(key);
+
+    const $row = $('<div class="ax-intercept">').toggleClass('is-expanded', expanded);
+    if (depth > 0) $row.addClass('is-child').css('margin-left', (depth * 16) + 'px');
+    const $head = $('<div class="ax-intercept-head">');
+    $head.append($('<span class="ax-intercept-caret">').text(expanded ? '▼' : '▶'));
+    $head.append($('<span class="ax-intercept-spec">').text(it.spec));
+    $head.append($('<span class="ax-pill ax-pill-peer">').text('via ' + it.peer));
+    if (it.live && it.live.on_demand) $head.append($('<span class="ax-pill ax-pill-auto">').text('auto'));
+    if (it.live) $head.append($('<span class="ax-pill ax-pill-active">').text('active'));
+    else         $head.append($('<span class="ax-pill ax-pill-pending">').text('pending'));
+
+    const $meta = $('<span class="ax-intercept-meta">');
+    if (parsed.length) {
+      const bits = [];
+      if (v4count) bits.push(`<span class="ax-meta-routes">${v4count} route${v4count === 1 ? '' : 's'}</span>`);
+      if (v6count) bits.push(`<span class="ax-meta-reject">${v6count} reject</span>`);
+      $meta.html(bits.join(' · '));
+    }
+    $head.append($meta);
+
+    const $rm = $('<button class="ax-list-remove">remove</button>');
+    $rm.on('click', (e) => { e.stopPropagation(); removeSpec(it.live); });
+    $head.append($rm);
+
+    $head.on('click', () => {
+      if (expandedIntercepts.has(key)) expandedIntercepts.delete(key);
+      else expandedIntercepts.add(key);
+      renderIntercepts();
+    });
+    $row.append($head);
+
+    if (expanded) {
+      const $body = $('<div class="ax-intercept-body">');
+      if (parsed.length === 0) {
+        $body.append($('<div class="ax-intercept-empty">').text('no resolved routes yet'));
+      } else {
+        const $tbl = $('<table class="ax-intercept-table">');
+        $tbl.append('<thead><tr><th>kind</th><th>resolved</th><th class="ax-policy">policy</th></tr></thead>');
+        const $tb = $('<tbody>');
+        parsed.forEach((p) => {
+          const $tr = $('<tr>').addClass(p.kind);
+          $tr.append($('<td class="ax-kind">').text(p.kind));
+          $tr.append($('<td class="ax-resolved">').text(p.resolved));
+          $tr.append($('<td class="ax-policy">').text(p.policy));
+          $tb.append($tr);
+        });
+        $tbl.append($tb);
+        $body.append($tbl);
+      }
+      $row.append($body);
+    }
+    return $row;
   }
 
   // parsePrefixEntry takes a string like "5.255.255.242/32" or

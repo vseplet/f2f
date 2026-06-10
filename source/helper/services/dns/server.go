@@ -48,6 +48,14 @@ type Server struct {
 	// arrive here via per-domain OS resolver entries. nil = no pins.
 	pinnedFn func(name string) []string
 
+	// pinnedMissFn is consulted when pinnedFn has no answer: the name may
+	// be a not-yet-seen subdomain of an active intercept zone (the OS
+	// resolver scopes the whole zone to us, so www.myip.com lands here
+	// even though only myip.com was pinned). The hook resolves it on the
+	// exit peer, installs routes, and returns the fresh A records. nil
+	// disables on-demand subdomains.
+	pinnedMissFn func(name string) []string
+
 	// Per-rcode query counters and last-query timestamp, for the UI's
 	// diagnostics tab. Atomic — read concurrently with handle().
 	totalQueries atomic.Int64
@@ -86,7 +94,7 @@ func (s *Server) Stats() Stats {
 //
 // Pass "127.0.0.1:0" to let the kernel pick a free port; the actual
 // bound address is then available via Server.Addr.
-func Open(bindAddr, zone string, res Resolver, pinned func(name string) []string) (*Server, error) {
+func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name string) []string) (*Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dns: resolve %s: %w", bindAddr, err)
@@ -97,11 +105,12 @@ func Open(bindAddr, zone string, res Resolver, pinned func(name string) []string
 	}
 	suffix := "." + strings.ToLower(zone) + ".f2f."
 	s := &Server{
-		srv:      &dns.Server{PacketConn: conn},
-		addr:     conn.LocalAddr().String(),
-		suffix:   suffix,
-		res:      res,
-		pinnedFn: pinned,
+		srv:          &dns.Server{PacketConn: conn},
+		addr:         conn.LocalAddr().String(),
+		suffix:       suffix,
+		res:          res,
+		pinnedFn:     pinned,
+		pinnedMissFn: pinnedMiss,
 	}
 	mux := dns.NewServeMux()
 	mux.HandleFunc(strings.TrimPrefix(suffix, "."), s.handle)
@@ -255,6 +264,14 @@ func (s *Server) handlePinned(w dns.ResponseWriter, req *dns.Msg) {
 	var ips []string
 	if s.pinnedFn != nil {
 		ips = s.pinnedFn(name)
+	}
+	if len(ips) == 0 && s.pinnedMissFn != nil {
+		// Not pinned, but possibly a subdomain of an active intercept
+		// zone (www.myip.com under a myip.com intercept). Resolve it on
+		// the exit peer and route it now; subsequent queries hit the
+		// pin directly. Synchronous — the first lookup waits on the bus
+		// round-trip, the OS resolver retries cover a cold miss.
+		ips = s.pinnedMissFn(name)
 	}
 	if len(ips) == 0 {
 		m.Rcode = dns.RcodeNameError

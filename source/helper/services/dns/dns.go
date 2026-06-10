@@ -103,6 +103,12 @@ type Service struct {
 	pinMu  sync.RWMutex
 	pinned map[string][]string
 
+	// OnPinnedMiss is invoked when a query under a pinned intercept
+	// zone has no exact pin yet — set by services/tunnel to resolve the
+	// subdomain on the exit peer and route it on demand. nil = feature
+	// off (queries for unpinned subdomains just NXDOMAIN).
+	OnPinnedMiss func(name string) []string
+
 	srvMu  sync.Mutex
 	srv    *Server
 	zone   string
@@ -178,6 +184,15 @@ func (s *Service) PinnedLookup(name string) []string {
 	return s.pinned[name]
 }
 
+// pinnedMiss bridges the server's on-demand subdomain path to the
+// OnPinnedMiss hook (services/tunnel). nil hook → no answer → NXDOMAIN.
+func (s *Service) pinnedMiss(name string) []string {
+	if s.OnPinnedMiss == nil {
+		return nil
+	}
+	return s.OnPinnedMiss(name)
+}
+
 // Register installs the bus handler that serves our domain catalog to
 // peers. Call once after construction (like shell/vnc Register).
 func (s *Service) Register() {
@@ -204,7 +219,7 @@ func (s *Service) Start(campID, zone string) error {
 	if err := s.seedFromStore(); err != nil {
 		return err
 	}
-	srv, err := Open("127.0.0.1:0", zone, s, s.PinnedLookup)
+	srv, err := Open("127.0.0.1:0", zone, s, s.PinnedLookup, s.pinnedMiss)
 	if err != nil {
 		return err
 	}
