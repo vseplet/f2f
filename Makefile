@@ -18,8 +18,11 @@ help:
 	@echo "  make camp-run             run camp server locally (go run)"
 	@echo "  make camp-deploy          deploy camp to fly.io"
 	@echo "  make camp-logs            tail fly.io logs for camp"
+# F2F_LOG is placed after $(SUDO) so sudo's env scrubbing doesn't eat it:
+# `make dev F2F_LOG=debug` enables debug logging.
+F2F_LOG ?= info
 dev:
-	-$(SUDO) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper --console $(ARGS)
+	-$(SUDO) F2F_LOG=$(F2F_LOG) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper --console $(ARGS)
 
 build:
 	go build -o f2f-mac ./source/mac
