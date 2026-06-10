@@ -36,7 +36,7 @@ func TestPinnedDomains(t *testing.T) {
 	pins := map[string][]string{"work-vpn.ru": {"10.8.3.7", "10.8.3.8"}}
 	srv, err := Open("127.0.0.1:0", "testcamp", stubResolver{}, func(name string) []string {
 		return pins[name]
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,5 +63,43 @@ func TestPinnedDomains(t *testing.T) {
 	resp = query(t, srv.Addr(), "gitea.testcamp.f2f", dns.TypeA)
 	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
 		t.Fatalf("zone A: rcode=%v answers=%d, want NOERROR/1", resp.Rcode, len(resp.Answer))
+	}
+}
+
+// TestPinnedMiss covers on-demand subdomains: a name with no exact pin
+// falls through to the miss hook, which resolves+routes it and returns
+// A records. A miss the hook can't satisfy is still NXDOMAIN.
+func TestPinnedMiss(t *testing.T) {
+	pins := map[string][]string{} // nothing pinned up front
+	var missed []string
+	miss := func(name string) []string {
+		missed = append(missed, name)
+		if name == "www.myip.com" {
+			return []string{"104.26.9.59"}
+		}
+		return nil
+	}
+	srv, err := Open("127.0.0.1:0", "testcamp", stubResolver{}, func(name string) []string {
+		return pins[name]
+	}, miss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	resp := query(t, srv.Addr(), "www.myip.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		t.Fatalf("on-demand A: rcode=%v answers=%d, want NOERROR/1", resp.Rcode, len(resp.Answer))
+	}
+	if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != "104.26.9.59" {
+		t.Fatalf("on-demand answer = %v, want 104.26.9.59", resp.Answer[0])
+	}
+	if len(missed) == 0 || missed[0] != "www.myip.com" {
+		t.Fatalf("miss hook calls = %v, want it asked for www.myip.com", missed)
+	}
+
+	resp = query(t, srv.Addr(), "api.other.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("unhandled miss rcode = %v, want NXDOMAIN", resp.Rcode)
 	}
 }

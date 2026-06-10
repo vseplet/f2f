@@ -135,6 +135,11 @@ func run(bind string, console bool, autostart bool) error {
 	// IPs the intercept routes cover.
 	tunnelSvc.OnDomainPinned = dnsSvc.SetPinned
 	tunnelSvc.OnDomainUnpinned = dnsSvc.RemovePinned
+	// On-demand subdomains: a query under an intercept zone with no exact
+	// pin (e.g. www.myip.com under a myip.com intercept) gets resolved on
+	// the exit peer and routed on the fly, so the user needn't add every
+	// subdomain by hand.
+	dnsSvc.OnPinnedMiss = tunnelSvc.ResolveSubdomain
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 

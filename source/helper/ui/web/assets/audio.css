@@ -1393,6 +1393,16 @@ a.ax-domain-link:hover {
     border-color: var(--info);
     background: color-mix(in srgb, var(--info) 6%, transparent);
 }
+.ax-pill-auto {
+    color: var(--muted);
+    border-color: var(--border-2);
+    background: color-mix(in srgb, #fff 4%, transparent);
+}
+/* Subdomain row nested under its parent zone — a thin guide on the left
+   reinforces the indent applied inline (margin-left scales with depth). */
+.ax-intercept.is-child {
+    border-left: 2px solid var(--panel-2);
+}
 /* Fingerprint pill — used in the peers table next to nicknames. Has its
    own padding/border because the base .ax-pill rule is scoped to
    .ax-intercept and we render outside that context. */

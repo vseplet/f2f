@@ -55,6 +55,10 @@ type InterceptInfo struct {
 	Spec     string   `json:"spec"`
 	Peer     string   `json:"peer"`
 	Prefixes []string `json:"prefixes"`
+	// OnDemand marks an entry the user never typed: a subdomain of an
+	// explicit intercept that we resolved + routed on the fly (see
+	// ResolveSubdomain). The UI groups these under their parent zone.
+	OnDemand bool `json:"on_demand,omitempty"`
 }
 
 // Service owns the live intercept set. State is duplicated:
@@ -80,6 +84,12 @@ type Service struct {
 	intercepts map[string]*InterceptInfo
 	nextID     uint64
 	egress     *egress
+
+	// subInflight collapses concurrent first-time resolves of the same
+	// on-demand subdomain (a page loading www + api + cdn at once) so we
+	// don't fire duplicate bus resolves or double-install routes.
+	subMu       sync.Mutex
+	subInflight map[string]chan struct{}
 }
 
 // New constructs a Service. store + engine + bus must outlive it.
@@ -261,21 +271,36 @@ func (s *Service) Remove(id string) error {
 	}
 	delete(s.intercepts, id)
 	campID := s.campID
-	s.mu.Unlock()
-	routes := s.eng.Routes()
-	for _, prefStr := range info.Prefixes {
-		prefStr = strings.TrimSuffix(prefStr, " (reject)")
-		p, err := netip.ParsePrefix(prefStr)
-		if err != nil {
-			continue
-		}
-		if err := routes.Remove(p); err != nil {
-			clog.Warn("tunnel", "remove route %s: %v", prefStr, err)
+	// Also drop any on-demand subdomain children resolved under this
+	// zone — their routes/pins/resolver entries would otherwise leak and
+	// keep sending *.spec through a peer the user just detached.
+	victims := []*InterceptInfo{info}
+	if isDomainSpec(info.Spec) {
+		suffix := "." + strings.ToLower(info.Spec)
+		for cid, child := range s.intercepts {
+			if strings.HasSuffix(strings.ToLower(child.Spec), suffix) {
+				delete(s.intercepts, cid)
+				victims = append(victims, child)
+			}
 		}
 	}
-	clog.Info("tunnel", "removed intercept %s (%s)", id, info.Spec)
-	if isDomainSpec(info.Spec) && s.OnDomainUnpinned != nil {
-		s.OnDomainUnpinned(strings.ToLower(info.Spec))
+	s.mu.Unlock()
+	routes := s.eng.Routes()
+	for _, v := range victims {
+		for _, prefStr := range v.Prefixes {
+			prefStr = strings.TrimSuffix(prefStr, " (reject)")
+			p, err := netip.ParsePrefix(prefStr)
+			if err != nil {
+				continue
+			}
+			if err := routes.Remove(p); err != nil {
+				clog.Warn("tunnel", "remove route %s: %v", prefStr, err)
+			}
+		}
+		clog.Info("tunnel", "removed intercept %s (%s)", v.ID, v.Spec)
+		if isDomainSpec(v.Spec) && s.OnDomainUnpinned != nil {
+			s.OnDomainUnpinned(strings.ToLower(v.Spec))
+		}
 	}
 	if campID != "" {
 		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
@@ -353,6 +378,121 @@ func (s *Service) addPendingLocked(spec, peer string) {
 	id := "i" + strconv.FormatUint(s.nextID, 10)
 	s.intercepts[id] = &InterceptInfo{ID: id, Spec: spec, Peer: peer}
 	s.mu.Unlock()
+}
+
+// ResolveSubdomain is the DNS server's on-demand hook (wired as
+// dnsSvc.OnPinnedMiss). It fires when a query lands under an active
+// intercept zone but has no exact pin yet — typically a subdomain the
+// user never added (myip.com intercepted, browser navigates to
+// www.myip.com). It resolves the name on the parent intercept's exit
+// peer, installs routes the same way as an explicit intercept, pins it
+// in the local DNS, and returns the v4 answers. Returns nil if the name
+// isn't under any intercept zone or the resolve fails — the caller then
+// answers NXDOMAIN.
+//
+// Runs synchronously in the DNS handler goroutine: the first query for a
+// subdomain waits on the bus round-trip; afterwards it's a plain pin.
+// The result is an ephemeral child intercept (its own ID, not persisted)
+// so AWG sync and the refresh ticker treat it like any other route.
+func (s *Service) ResolveSubdomain(name string) []string {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if name == "" || !isDomainSpec(name) {
+		return nil
+	}
+	if v4 := s.pinnedV4For(name); v4 != nil {
+		return v4
+	}
+	peer := s.parentPeerFor(name)
+	if peer == "" {
+		return nil // not under any active intercept zone
+	}
+	// Collapse concurrent first-time resolves of the same name.
+	s.subMu.Lock()
+	if ch, ok := s.subInflight[name]; ok {
+		s.subMu.Unlock()
+		<-ch
+		return s.pinnedV4For(name)
+	}
+	ch := make(chan struct{})
+	if s.subInflight == nil {
+		s.subInflight = map[string]chan struct{}{}
+	}
+	s.subInflight[name] = ch
+	s.subMu.Unlock()
+	defer func() {
+		s.subMu.Lock()
+		delete(s.subInflight, name)
+		close(ch)
+		s.subMu.Unlock()
+	}()
+	// A racer may have pinned it between our first check and the slot.
+	if v4 := s.pinnedV4For(name); v4 != nil {
+		return v4
+	}
+
+	info, err := s.addLocked(name, peer)
+	if err != nil {
+		clog.Warn("tunnel", "on-demand %s via %s: %v", name, peer, err)
+		return nil
+	}
+	// Tag the stored entry so the UI can group it under its parent zone.
+	s.mu.Lock()
+	if e := s.intercepts[info.ID]; e != nil {
+		e.OnDemand = true
+	}
+	s.mu.Unlock()
+	s.eng.SyncAWG()
+	v4 := v4Of(info.Prefixes)
+	clog.Info("tunnel", "on-demand subdomain %s → %s (via %s)", name, strings.Join(v4, ", "), peer)
+	return v4
+}
+
+// parentPeerFor returns the exit peer of the active domain intercept
+// that name is a strict subdomain of, picking the most specific zone.
+// "" if name falls under no intercept.
+func (s *Service) parentPeerFor(name string) (peer string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	best := ""
+	for _, info := range s.intercepts {
+		if !isDomainSpec(info.Spec) {
+			continue
+		}
+		spec := strings.ToLower(info.Spec)
+		if strings.HasSuffix(name, "."+spec) && len(spec) > len(best) {
+			best, peer = spec, info.Peer
+		}
+	}
+	return peer
+}
+
+// pinnedV4For returns the v4 route addresses of an existing intercept
+// whose spec exactly matches name (nil if none) — used to short-circuit
+// a subdomain that's already been resolved.
+func (s *Service) pinnedV4For(name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, info := range s.intercepts {
+		if strings.ToLower(info.Spec) == name {
+			return v4Of(info.Prefixes)
+		}
+	}
+	return nil
+}
+
+// v4Of extracts the bare v4 addresses from a Prefixes list, skipping the
+// " (reject)"-annotated v6 entries.
+func v4Of(prefixes []string) []string {
+	var out []string
+	for _, pref := range prefixes {
+		if strings.HasSuffix(pref, " (reject)") {
+			continue
+		}
+		if p, err := netip.ParsePrefix(pref); err == nil && p.Addr().Is4() {
+			out = append(out, p.Addr().String())
+		}
+	}
+	return out
 }
 
 // resolvePrefixes turns a spec into prefixes. CIDR/IP specs parse
