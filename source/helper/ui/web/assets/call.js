@@ -390,16 +390,21 @@ $(function () {
     },
 
     // tear everything down locally without signalling (used on a remote hangup).
-    // silent = we're switching to another call, so skip the "ended" screen.
+    // silent = we're switching to another call, so skip any navigation.
+    // A finished call drops the user back into the chat it belongs to (the
+    // "call ended" line is already there) instead of a dead-end ended screen.
     async endLocal(silent) {
-      const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
-      if (this.active && this.active.kind === 'group') await Group.leave(true);
+      const a = this.active;
+      const chatRoute = a
+        ? (a.kind === 'group' ? 'chat:channel:' + encHash(a.id) : 'chat:dm:' + (a.pub || a.id))
+        : '';
+      if (a && a.kind === 'group') await Group.leave(true);
       else teardown();
       clearCall();
       this.active = null;
       this.renderBar();
       if (!silent && (location.hash || '').indexOf('#call:') === 0) {
-        location.hash = 'call:ended' + (label ? ':' + encodeURIComponent(label) : '');
+        location.hash = chatRoute;
       }
     },
 

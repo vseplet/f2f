@@ -1079,7 +1079,7 @@ $(function () {
           if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
           return row(null, '# ' + ch.name, tags.join(' · '), null, 'chat:channel:' + ch.id);
         }).join('')
-      : empty('no channels'))
+      : empty('no groups'))
       + addRow('+ channel', 'chat:new');
 
     // intercepts — :port -> peer.
@@ -1115,9 +1115,9 @@ $(function () {
     }
     const meetsBody = meetRows || empty('no calls');
     const messagingBody =
-      section('meets')    + meetsBody
-      + section('channels') + groupsBody
-      + section('direct')   + directsBody;
+      section('calls')   + meetsBody
+      + section('groups')  + groupsBody
+      + section('direct')  + directsBody;
 
     // tunnel — outbound intercepts + inbound open ports under one group
     // with section dividers (mirrors the app's "tunnel" tab).
@@ -1142,7 +1142,7 @@ $(function () {
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
-      + category('shells',    'shells',    shellList.length || null, shellsBody)
+      + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
