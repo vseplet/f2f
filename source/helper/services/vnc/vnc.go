@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/clog"
-	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
 
@@ -126,7 +125,7 @@ func (s *Service) handleOpen(fromPub string, _ []byte, st *bus.Stream) {
 		return
 	}
 	defer conn.Close()
-	clog.Info("vnc", "%s → %s", short(fromPub), s.target())
+	clog.Info("vnc", "%s → %s", s.bus.Label(fromPub), s.target())
 
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(conn, st); done <- struct{}{} }() // peer → VNC server
@@ -154,6 +153,3 @@ func (s *Service) Available(ctx context.Context, pub string) bool {
 	}
 	return r.Available
 }
-
-// short renders a peer pubkey as its canonical fingerprint for logs.
-func short(p string) string { return identity.Label("", p) }

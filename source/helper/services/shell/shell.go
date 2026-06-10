@@ -41,7 +41,6 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/vseplet/f2f/source/helper/clog"
-	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
 
@@ -206,15 +205,12 @@ func (s *Service) handleOpen(fromPub string, open []byte, st *bus.Stream) {
 				se.resize(be16(data[0:]), be16(data[2:]))
 			}
 		case opKill:
-			clog.Info("shell", "session %s killed by %s", o.SessionID, short(fromPub))
+			clog.Info("shell", "session %s killed by %s", o.SessionID, s.bus.Label(fromPub))
 			se.kill()
 			return
 		}
 	}
 }
-
-// short renders a peer pubkey as its canonical fingerprint for logs.
-func short(p string) string { return identity.Label("", p) }
 
 func (s *Service) getOrCreate(id string, cols, rows uint16) (*session, error) {
 	s.mu.Lock()
