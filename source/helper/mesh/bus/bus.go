@@ -61,6 +61,7 @@ type Stream = quic.Stream
 type Resolver interface {
 	AddrForPub(pub string) string // overlay IP, "" if unknown/offline
 	PubForIP(ip string) string    // pub for an overlay IP, "" if unknown
+	NameForPub(pub string) string // display name for a pub, "" if unknown
 	Peers() []string              // pubs of reachable peers (excluding self)
 	SelfPub() string              // our own identity pub (for the dial tie-break)
 }
@@ -152,6 +153,11 @@ func (s *Service) HandleStream(typ string, fn StreamHandlerFunc) {
 // Peers returns the pubs of reachable peers (from the resolver) — used by
 // higher layers (gossip) to fan out to the mesh.
 func (s *Service) Peers() []string { return s.resolver.Peers() }
+
+// Label renders a peer pub as the canonical name/fp for logs. Exposed so
+// services that only learn a peer by pub over the bus (shell, vnc) name it
+// the same way every other component does.
+func (s *Service) Label(pub string) string { return s.label(pub) }
 
 // Start brings the bus up: QUIC listener on overlayIP:Port plus the
 // auto-mesh ping loop. Idempotent. Never fails permanently — a bind error
@@ -246,9 +252,9 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	ok := err == nil
 	rtt := time.Since(start).Round(time.Millisecond)
 	if ok {
-		clog.Debug("bus", "ping %s ok via QUIC (%s)", short(pub), rtt)
+		clog.Debug("bus", "ping %s ok via QUIC (%s)", s.label(pub), rtt)
 	} else {
-		clog.Warn("bus", "ping %s failed: %v", short(pub), err)
+		clog.Warn("bus", "ping %s failed: %v", s.label(pub), err)
 		s.dropConn(pub) // force a fresh dial next round
 	}
 
@@ -286,7 +292,7 @@ func (s *Service) evictStale(known map[string]bool) {
 	}
 	s.mu.Unlock()
 	for _, pub := range stale {
-		dbg("evict %s: peer left roster", short(pub))
+		dbg("evict %s: peer left roster", s.label(pub))
 		s.dropConn(pub)
 	}
 }
@@ -335,7 +341,7 @@ func (s *Service) serveConn(ctx context.Context, conn *quic.Conn) {
 	// Identity = the overlay IP we received the connection from (AWG-attested).
 	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	fromPub := s.resolver.PubForIP(ip)
-	clog.Debug("bus", "inbound QUIC from %s (%s)", ip, short(fromPub))
+	clog.Debug("bus", "inbound QUIC from %s", s.labelOr(fromPub, ip))
 	// Reuse this inbound connection for our own outbound sends too — QUIC
 	// streams are bidirectional, so one connection per pair serves both ways.
 	if fromPub != "" {
@@ -359,8 +365,8 @@ func (s *Service) acceptStreams(ctx context.Context, ip, fromPub string, conn *q
 			// Why did this conn die? context.Cause exposes the QUIC reason
 			// (idle timeout vs peer CONNECTION_CLOSE vs path error) — the signal
 			// we need to tell a real fault from our own redial.
-			dbg("conn %s (%s) closed: accept=%v cause=%v",
-				ip, short(fromPub), err, context.Cause(conn.Context()))
+			dbg("conn %s closed: accept=%v cause=%v",
+				s.labelOr(fromPub, ip), err, context.Cause(conn.Context()))
 			return
 		}
 		go s.serveStream(fromPub, stream)
@@ -403,7 +409,7 @@ func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 	}
 	defer st.Close()
 	if fn == nil {
-		clog.Warn("bus", "no handler for type %q from %s", hdr.Type, short(fromPub))
+		clog.Warn("bus", "no handler for type %q from %s", hdr.Type, s.label(fromPub))
 		return
 	}
 	resp, err := fn(fromPub, payload)
@@ -475,7 +481,7 @@ func (s *Service) dropIfStalled(pub string, err error) {
 	if errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		(errors.As(err, &ne) && ne.Timeout()) {
-		dbg("drop %s: request stalled to deadline on a live conn", short(pub))
+		dbg("drop %s: request stalled to deadline on a live conn", s.label(pub))
 		s.dropConn(pub)
 	}
 }
@@ -602,16 +608,19 @@ func (s *Service) dial(ctx context.Context, pub string) (*quic.Conn, error) {
 func (s *Service) dialOnce(ctx context.Context, pub string) (*quic.Conn, error) {
 	ip := s.resolver.AddrForPub(pub)
 	if ip == "" {
-		return nil, fmt.Errorf("bus: no overlay ip for %s", short(pub))
+		return nil, fmt.Errorf("bus: no overlay ip for %s", s.label(pub))
 	}
-	dbg("dial %s (%s) …", ip, short(pub))
+	lbl := s.label(pub)
+	dbg("dial %s …", lbl)
 	start := time.Now()
 	conn, err := quic.DialAddr(ctx, net.JoinHostPort(ip, Port), s.tlsClient, s.quicConf)
 	if err != nil {
-		dbg("dial %s (%s) failed after %s: %v", ip, short(pub), time.Since(start).Round(time.Millisecond), err)
-		return nil, fmt.Errorf("bus: dial %s: %w", ip, err)
+		dbg("dial %s failed after %s: %v", lbl, time.Since(start).Round(time.Millisecond), err)
+		// No identity in the wrapped error — the caller (ca-poll, etc.)
+		// already labels the peer, so repeating it just doubles up.
+		return nil, fmt.Errorf("bus: dial: %w", err)
 	}
-	dbg("dial %s (%s) ok in %s", ip, short(pub), time.Since(start).Round(time.Millisecond))
+	dbg("dial %s ok in %s", lbl, time.Since(start).Round(time.Millisecond))
 	s.mu.Lock()
 	if existing := s.conns[pub]; existing != nil { // lost a race; keep the first
 		s.mu.Unlock()
@@ -643,7 +652,7 @@ func (s *Service) dropConn(pub string) {
 	delete(s.conns, pub)
 	s.mu.Unlock()
 	if c != nil {
-		dbg("drop %s: closing conn (cause=%v)", short(pub), context.Cause(c.Context()))
+		dbg("drop %s: closing conn (cause=%v)", s.label(pub), context.Cause(c.Context()))
 		_ = c.CloseWithError(0, "redial")
 	}
 }
@@ -734,8 +743,21 @@ func selfSignedCert() (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
-// short renders a peer pubkey for logs as its canonical fingerprint (the
-// bus only ever knows peers by pubkey, never name — see identity.Label).
-func short(p string) string {
-	return identity.Label("", p)
+// label renders a peer for logs as the canonical name/fp — the ONE form
+// used everywhere a bus line names a peer. The name comes from the
+// resolver (the engine roster); when it's unknown we fall back to the
+// bare fingerprint. Never log a raw pub or overlay IP for identity.
+func (s *Service) label(pub string) string {
+	return identity.Label(s.resolver.NameForPub(pub), pub)
+}
+
+// labelOr is label, but for an inbound conn whose pub we couldn't resolve
+// (peer not in the roster yet) it falls back to the raw overlay IP — the
+// only identity we have in that one case. Everywhere the pub is known,
+// it's the same name/fp as label.
+func (s *Service) labelOr(pub, ip string) string {
+	if l := s.label(pub); l != "" {
+		return l
+	}
+	return ip
 }

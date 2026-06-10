@@ -309,7 +309,7 @@ func (s *Service) pollOnce(ctx context.Context) {
 		}
 		body, err := s.fetchCACert(ctx, t.Pub)
 		if err != nil {
-			clog.Warn("ca-poll", "peer %s: %v", t.Name, err)
+			clog.Warn("ca-poll", "peer %s: %v", identity.Label(t.Name, t.Pub), err)
 			continue
 		}
 		s.discover(t.Name, body)

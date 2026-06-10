@@ -22,7 +22,8 @@ func (r staticResolver) PubForIP(ip string) string {
 	}
 	return ""
 }
-func (r staticResolver) SelfPub() string { return r.self }
+func (r staticResolver) NameForPub(pub string) string { return "" }
+func (r staticResolver) SelfPub() string              { return r.self }
 func (r staticResolver) Peers() []string {
 	out := make([]string, 0, len(r.peers))
 	for pub := range r.peers {

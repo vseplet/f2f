@@ -419,6 +419,15 @@ func (r busResolver) PubForIP(ip string) string {
 	return ""
 }
 
+func (r busResolver) NameForPub(pub string) string {
+	for _, p := range r.eng.Status().Peers {
+		if !p.Self && p.Pub == pub {
+			return p.Name
+		}
+	}
+	return ""
+}
+
 func (r busResolver) SelfPub() string { return r.eng.Status().IdentityPub }
 
 func (r busResolver) Peers() []string {
