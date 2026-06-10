@@ -39,7 +39,9 @@ func (s *Server) handleVncPeers(w http.ResponseWriter, r *http.Request) {
 		wg  sync.WaitGroup
 	)
 	for _, p := range st.Peers {
-		if p.Self || p.Pub == "" {
+		// Same gate as the shell probe: only peers reachable on the
+		// overlay can answer, and this poll fires every 5s per peer.
+		if p.Self || p.Pub == "" || !p.Reachable {
 			continue
 		}
 		p := p

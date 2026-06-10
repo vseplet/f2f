@@ -42,7 +42,10 @@ func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
 		wg  sync.WaitGroup
 	)
 	for _, p := range st.Peers {
-		if p.Self || p.Pub == "" {
+		// Probe only peers we're actually receiving UDP from — a peer
+		// that's unreachable on the overlay can't answer a bus probe
+		// either, and this poll fires every 5s for every peer.
+		if p.Self || p.Pub == "" || !p.Reachable {
 			continue
 		}
 		p := p

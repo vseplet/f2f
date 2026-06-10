@@ -1270,9 +1270,12 @@ func (e *Engine) restartOnEphemeralPort() {
 	cfg := e.cfg
 	e.mu.Unlock()
 	cfg.Listen = ":0"
+	// Stop errors are cleanup failures (route removal, socket close) —
+	// engine state is reset regardless, so bailing out here would leave
+	// the node DOWN after every wake with a flaky teardown. Log and
+	// proceed to Start.
 	if err := e.Stop(); err != nil {
-		clog.Error("wake", "stop: %v", err)
-		return
+		clog.Warn("wake", "stop: %v (continuing with restart)", err)
 	}
 	if err := e.Start(cfg); err != nil {
 		clog.Error("wake", "start: %v", err)

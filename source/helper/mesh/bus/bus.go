@@ -30,6 +30,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -100,6 +101,12 @@ type Service struct {
 	handlers       map[string]HandlerFunc
 	streamHandlers map[string]StreamHandlerFunc
 	linkUp         map[string]bool // pub → last ping outcome (for up/down notifications)
+	// dialing collapses concurrent dials to the same peer (the shell and
+	// vnc discovery probes fire together every 5s): the first caller dials,
+	// the rest wait on the channel and reuse the outcome. Without this every
+	// probe pair runs two parallel QUIC handshakes to the same address —
+	// twice the burn against an unreachable peer.
+	dialing map[string]chan struct{}
 }
 
 // New builds the service. The self-signed cert is generated once.
@@ -118,6 +125,7 @@ func New(r Resolver) (*Service, error) {
 		handlers:       make(map[string]HandlerFunc),
 		streamHandlers: make(map[string]StreamHandlerFunc),
 		linkUp:         make(map[string]bool),
+		dialing:        make(map[string]chan struct{}),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
 	s.handlers["ping"] = func(_ string, payload []byte) ([]byte, error) { return payload, nil }
@@ -145,31 +153,67 @@ func (s *Service) HandleStream(typ string, fn StreamHandlerFunc) {
 // higher layers (gossip) to fan out to the mesh.
 func (s *Service) Peers() []string { return s.resolver.Peers() }
 
-// Start binds the QUIC listener on overlayIP:Port and serves it. Idempotent.
+// Start brings the bus up: QUIC listener on overlayIP:Port plus the
+// auto-mesh ping loop. Idempotent. Never fails permanently — a bind error
+// (overlay IP not yet settled during engine bring-up, stale socket) is
+// retried in the background, because outbound dials work without a
+// listener and a one-shot failure here used to leave the bus dead until
+// the next engine restart.
 func (s *Service) Start(overlayIP string) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return nil
 	}
-	addr := net.JoinHostPort(overlayIP, Port)
-	ln, err := quic.ListenAddr(addr, s.tlsServer, s.quicConf)
-	if err != nil {
-		s.mu.Unlock()
-		return fmt.Errorf("bus: listen %s: %w", addr, err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ln, s.ctx, s.cancel, s.running = ln, ctx, cancel, true
+	s.ctx, s.cancel, s.running = ctx, cancel, true
 	s.mu.Unlock()
-	clog.Info("bus", "QUIC listening on %s", addr)
-	go s.acceptLoop(ctx, ln)
+	go s.listenLoop(ctx, net.JoinHostPort(overlayIP, Port))
 	go s.pingLoop(ctx) // auto-mesh: keep a QUIC link to every peer alive
 	return nil
 }
 
-// pingLoop dials + probes every known peer over QUIC every few seconds, so
-// the mesh forms automatically and the traffic is visible in the logs.
+// listenLoop binds the QUIC listener, retrying every few seconds until it
+// sticks, then serves it until the service stops.
+func (s *Service) listenLoop(ctx context.Context, addr string) {
+	for {
+		ln, err := quic.ListenAddr(addr, s.tlsServer, s.quicConf)
+		if err == nil {
+			s.mu.Lock()
+			if !s.running {
+				s.mu.Unlock()
+				_ = ln.Close()
+				return
+			}
+			s.ln = ln
+			s.mu.Unlock()
+			clog.Info("bus", "QUIC listening on %s", addr)
+			s.acceptLoop(ctx, ln)
+			return
+		}
+		clog.Warn("bus", "listen %s: %v — retrying in 3s", addr, err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// pingLoop dials + probes every known peer over QUIC, so the mesh forms
+// automatically and the traffic is visible in the logs. The first round
+// fires immediately (a bare ticker would leave the mesh unformed for its
+// whole first period), a second follows shortly after — the camp roster
+// often lands a few seconds into the engine's life — then the steady 30s
+// cadence takes over.
 func (s *Service) pingLoop(ctx context.Context) {
+	s.pingRound(ctx)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Second):
+		s.pingRound(ctx)
+	}
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -177,15 +221,21 @@ func (s *Service) pingLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			peers := s.resolver.Peers()
-			known := make(map[string]bool, len(peers))
-			for _, pub := range peers {
-				known[pub] = true
-				go s.pingOne(ctx, pub)
-			}
-			s.evictStale(known)
+			s.pingRound(ctx)
 		}
 	}
+}
+
+// pingRound probes every currently-known peer once and evicts conns to
+// peers that left the roster.
+func (s *Service) pingRound(ctx context.Context) {
+	peers := s.resolver.Peers()
+	known := make(map[string]bool, len(peers))
+	for _, pub := range peers {
+		known[pub] = true
+		go s.pingOne(ctx, pub)
+	}
+	s.evictStale(known)
 }
 
 func (s *Service) pingOne(ctx context.Context, pub string) {
@@ -379,6 +429,7 @@ func (s *Service) OpenStream(ctx context.Context, pub, typ string, open []byte) 
 	}
 	if err := writeFrame(st, header{Type: typ}, open); err != nil {
 		st.Close()
+		s.dropIfStalled(pub, err)
 		return nil, err
 	}
 	return st, nil
@@ -400,9 +451,33 @@ func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) 
 		_ = st.SetDeadline(dl)
 	}
 	if err := writeFrame(st, header{Type: typ}, payload); err != nil {
+		s.dropIfStalled(pub, err)
 		return nil, err
 	}
-	return readChunk(st)
+	resp, err := readChunk(st)
+	if err != nil {
+		s.dropIfStalled(pub, err)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// dropIfStalled evicts the cached conn for pub when err is a deadline-type
+// failure. A conn that eats a whole request deadline is a zombie: QUIC may
+// keep it alive indefinitely (keepalive/ACK packets flow, stream data
+// doesn't — half-dead path, or a peer that never accepts streams), so the
+// idle timeout never fires and only the 30s ping sweep would clean it up —
+// leaving every request in between to fail. Evict now; the next call
+// redials. A stream reset (handler failure on a healthy conn) is NOT a
+// stall and keeps the conn.
+func (s *Service) dropIfStalled(pub string, err error) {
+	var ne net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &ne) && ne.Timeout()) {
+		dbg("drop %s: request stalled to deadline on a live conn", short(pub))
+		s.dropConn(pub)
+	}
 }
 
 // Notify sends a fire-and-forget typed message to pub (no response).
@@ -444,10 +519,22 @@ func (s *Service) connFor(ctx context.Context, pub string) (*quic.Conn, error) {
 	}
 	// Tie-break so a pair forms ONE connection: the lower pub dials, the
 	// higher pub waits for the inbound. The waiter still falls back to
-	// dialing (so it never gets stuck if the peer never dials).
+	// dialing (so it never gets stuck if the peer never dials). The wait
+	// must never eat the caller's whole budget: a 2s discovery probe that
+	// waits 2s reaches the fallback dial with an already-expired ctx and
+	// fails in ~1ms every time — so cap the wait at half the remaining
+	// deadline.
 	if my := s.resolver.SelfPub(); my != "" && my > pub {
-		if c := s.waitInbound(ctx, pub, 2*time.Second); c != nil {
-			return c, nil
+		wait := 2 * time.Second
+		if dl, ok := ctx.Deadline(); ok {
+			if half := time.Until(dl) / 2; half < wait {
+				wait = half
+			}
+		}
+		if wait > 0 {
+			if c := s.waitInbound(ctx, pub, wait); c != nil {
+				return c, nil
+			}
 		}
 	}
 	return s.dial(ctx, pub)
@@ -477,7 +564,42 @@ func (s *Service) waitInbound(ctx context.Context, pub string, d time.Duration) 
 	return s.cached(pub)
 }
 
+// dial returns a connection to pub, deduplicating concurrent attempts:
+// exactly one caller runs the QUIC handshake, the rest wait for its outcome
+// and pick the conn up from the cache. A waiter whose winner failed retries
+// as the dialer itself (bounded by its own ctx).
 func (s *Service) dial(ctx context.Context, pub string) (*quic.Conn, error) {
+	for {
+		s.mu.Lock()
+		if c := s.conns[pub]; c != nil {
+			s.mu.Unlock()
+			return c, nil
+		}
+		ch, busy := s.dialing[pub]
+		if !busy {
+			ch = make(chan struct{})
+			s.dialing[pub] = ch
+		}
+		s.mu.Unlock()
+		if busy {
+			select {
+			case <-ch: // winner finished — re-check the cache, or dial ourselves
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		conn, err := s.dialOnce(ctx, pub)
+		s.mu.Lock()
+		delete(s.dialing, pub)
+		s.mu.Unlock()
+		close(ch)
+		return conn, err
+	}
+}
+
+// dialOnce performs one actual QUIC dial to pub's overlay address.
+func (s *Service) dialOnce(ctx context.Context, pub string) (*quic.Conn, error) {
 	ip := s.resolver.AddrForPub(pub)
 	if ip == "" {
 		return nil, fmt.Errorf("bus: no overlay ip for %s", short(pub))
