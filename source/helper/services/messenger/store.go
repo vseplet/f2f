@@ -164,6 +164,48 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 	return out, rows.Err()
 }
 
+// AllMessages returns every message in campID's database, oldest-first —
+// used to hydrate the in-memory store at startup.
+func (s *Store) AllMessages(campID string) ([]Message, error) {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, ts, mine
+		   FROM messages ORDER BY ts ASC, id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("messenger: all messages: %w", err)
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		var members string
+		var mine int
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &m.TS, &mine); err != nil {
+			return nil, err
+		}
+		m.Members = parseArr(members)
+		m.Mine = mine != 0
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteChannel removes a channel row and all its messages from campID.
+func (s *Store) DeleteChannel(campID, id string) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM channels WHERE id=?`, id); err != nil {
+		return fmt.Errorf("messenger: delete channel: %w", err)
+	}
+	_, err = db.Exec(`DELETE FROM messages WHERE kind='channel' AND peer=?`, id)
+	return err
+}
+
 // UpsertChannel creates or updates a channel in campID's database.
 func (s *Store) UpsertChannel(campID string, c Channel) error {
 	db, err := s.dbFor(campID)

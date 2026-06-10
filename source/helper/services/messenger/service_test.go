@@ -1,9 +1,14 @@
 package messenger
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // newTestService builds a Service without a bus (onMsg/append/Messages
 // never touch it) for unit-testing the in-memory ordering and dedup logic.
+// store/camp are nil so persistence is a no-op unless overridden.
 func newTestService() *Service {
 	return &Service{
 		self:     func() string { return "self" },
@@ -11,6 +16,53 @@ func newTestService() *Service {
 		convs:    map[string][]Message{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
+	}
+}
+
+func TestPersistAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(func(id string) string {
+		d := filepath.Join(dir, id)
+		_ = os.MkdirAll(d, 0o755)
+		return d
+	})
+	defer st.Close()
+	mk := func() *Service {
+		s := newTestService()
+		s.store = st
+		s.camp = func() string { return "c1" }
+		return s
+	}
+
+	s := mk()
+	// Owner "alice" creates a channel that includes us, then posts.
+	s.onMsg("alice", mustJSON(Message{ID: "1", Kind: "channel", Peer: "alice/dev", Type: TypeCreate, Members: []string{"alice", "self"}, TS: 1}))
+	s.onMsg("alice", mustJSON(Message{ID: "2", Kind: "channel", Peer: "alice/dev", Type: TypeText, Members: []string{"alice", "self"}, Body: "hi", TS: 2}))
+
+	// A fresh service hydrates the same state from the store.
+	s2 := mk()
+	s2.LoadCamp()
+	if chs := s2.Channels(); len(chs) != 1 || chs[0].ID != "alice/dev" {
+		t.Fatalf("hydrated channels = %+v", chs)
+	}
+	msgs := s2.Messages("channel", "alice/dev", 0)
+	var gotText bool
+	for _, m := range msgs {
+		if m.Type == TypeText && m.Body == "hi" {
+			gotText = true
+		}
+	}
+	if !gotText {
+		t.Fatalf("hydrated messages missing the text post: %+v", msgs)
+	}
+
+	// Owner deletes the channel → dropped from memory and store.
+	s2.onMsg("alice", mustJSON(Message{ID: "3", Kind: "channel", Peer: "alice/dev", Type: TypeDelete, TS: 3}))
+	if chs := s2.Channels(); len(chs) != 0 {
+		t.Fatalf("delete left channels: %+v", chs)
+	}
+	if chs, _ := st.Channels("c1"); len(chs) != 0 {
+		t.Fatalf("delete left channel in store: %+v", chs)
 	}
 }
 

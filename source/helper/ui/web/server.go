@@ -183,6 +183,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chat/channels", s.handleChatChannels)
 	mux.HandleFunc("POST /api/chat/channels", s.handleChatCreateChannel)
 	mux.HandleFunc("POST /api/chat/members", s.handleChatMembers)
+	mux.HandleFunc("POST /api/chat/channels/delete", s.handleChatDeleteChannel)
+	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
 	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
 	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)

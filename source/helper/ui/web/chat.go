@@ -61,6 +61,38 @@ func (s *Server) handleChatMembers(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleChatDeleteChannel tears a channel down (owner only).
+func (s *Server) handleChatDeleteChannel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.msg.DeleteChannel(req.Channel); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleChatLeaveChannel removes us from a channel.
+func (s *Server) handleChatLeaveChannel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.msg.LeaveChannel(req.Channel); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleChatMessages returns recent messages for a conversation.
 // Query: kind=dm|channel, key=<peer pub | channel id>, limit=<n>.
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {

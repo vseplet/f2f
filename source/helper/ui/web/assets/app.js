@@ -3,6 +3,8 @@ $(function () {
   // first because applyRoute() runs during init, before later code.
   let selectedPeer = '';   // peerKey of the peer whose details fill the identity panel
   let lastStatus = null;   // last /api/status sample, for re-rendering on route change
+  let livePeers = [];      // last seen camp peers from /api/status (declared early:
+                           // nameForPub/applyRoute reference it during init)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -269,6 +271,9 @@ $(function () {
   // --- messaging (services/messenger over the bus) ---
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
+  let chatMsgs = [];          // messages of the open conversation (cached for redraw)
+  let chatNamesPending = false; // redraw the open chat once /api/status lands so
+                                // authors/title resolve to names, not pub prefixes
   const chatUnread = {};      // conversation key → unread count
 
   // nameForPub renders a peer pub as its display name (falls back to a fp-ish
@@ -299,28 +304,45 @@ $(function () {
       else line = who + ' ' + m.type;
       return `<div class="ax-msg ax-msg-system">${esc(line)}</div>`;
     }
-    const author = nameForPub(m.from);
+    // Own messages bubble on the right, everyone else's on the left.
+    const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
+    const author = mine ? 'you' : nameForPub(m.from);
     const head = grouped ? '' :
       `<div class="ax-msg-head">`
         + `<span class="ax-msg-author">${esc(author)}</span>`
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
       + `</div>`;
-    return `<div class="ax-msg" data-author="${esc(m.from)}">`
+    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
       + head
       + `<div class="ax-msg-text">${esc(m.body)}</div>`
       + `</div>`;
   }
 
   function renderChat(msgs) {
-    let html = '', prev = null;
+    let html = '', prevFrom = null, prevTs = 0;
+    const GROUP_MS = 5 * 60 * 1000; // collapse the header only within 5 minutes
     for (const m of (msgs || [])) {
       const isText = !m.type || m.type === 'text';
-      html += msgRow(m, isText && m.from === prev);
-      prev = isText ? m.from : null;
+      // Group consecutive lines from the same author ONLY when close in time,
+      // so messages sent far apart keep their own timestamped header.
+      const grouped = isText && m.from === prevFrom && (m.ts - prevTs) < GROUP_MS;
+      html += msgRow(m, grouped);
+      prevFrom = isText ? m.from : null;
+      prevTs = isText ? m.ts : 0;
     }
     const $m = $('#chat-messages');
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
+  }
+
+  // setChatTitle resolves the open conversation's header (channel name or
+  // peer nickname). Re-callable so it updates once /api/status lands.
+  function setChatTitle() {
+    if (!chatConv) return;
+    const title = chatConv.kind === 'channel'
+      ? '# ' + ((chatChannels.find((c) => c.id === chatConv.key) || {}).name || chatConv.key.split('/').pop())
+      : nameForPub(chatConv.key);
+    $('#chat-title').text(title);
   }
 
   // loadConversation fetches history for the open conversation and renders.
@@ -329,7 +351,10 @@ $(function () {
     chatUnread[chatConv.key] = 0;
     $.getJSON('/api/chat/messages?kind=' + encodeURIComponent(chatConv.kind)
       + '&key=' + encodeURIComponent(chatConv.key), (msgs) => {
-      if (chatConv) renderChat(msgs);
+      if (!chatConv) return;
+      chatMsgs = msgs || [];
+      renderChat(chatMsgs);
+      setChatTitle();
     });
   }
 
@@ -372,8 +397,26 @@ $(function () {
     } else {
       html += '<div class="ax-chat-members-note">only the owner can change members</div>';
     }
+    // Owner tears the channel down for everyone; a member just leaves.
+    html += '<div class="ax-chat-members-actions">'
+      + (isOwner
+          ? '<button class="ax-chat-danger" id="chat-delete-channel">delete channel</button>'
+          : '<button class="ax-chat-danger" id="chat-leave-channel">leave channel</button>')
+      + '</div>';
     $p.html(html).removeClass('hidden');
   }
+
+  // Delete (owner) / leave (member) the open channel.
+  function chatChannelAction(path, verb) {
+    if (!chatConv || !confirm(verb + ' channel?')) return;
+    $.ajax({
+      url: path, method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: chatConv.key }),
+    }).done(() => { location.hash = ''; fetchChannels(); })
+      .fail((xhr) => alert(verb + ': ' + errorOf(xhr)));
+  }
+  $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/chat/channels/delete', 'delete'));
+  $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/chat/channels/leave', 'leave'));
 
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
@@ -406,14 +449,24 @@ $(function () {
     es.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
       const key = m.kind === 'channel' ? m.peer : (m.mine ? m.to : m.from);
-      // A channel lifecycle event may have created/changed a channel we
-      // belong to — refresh the list so it shows up.
+      // A channel lifecycle event may have created/changed/removed a channel
+      // — refresh the list so it (dis)appears.
       if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
+      // The open channel was deleted (or we left) → close the view.
+      if ((m.type === 'delete' || m.type === 'leave')
+          && chatConv && chatConv.kind === 'channel' && chatConv.key === m.peer) {
+        chatConv = null;
+        location.hash = '';
+        return;
+      }
+      // System lifecycle lines (create/add/remove) belong in the channel
+      // view; render them too, not just text.
       if (chatConv && chatConv.kind === m.kind && chatConv.key === key) {
+        chatMsgs.push(m);
         $('#chat-messages').append(msgRow(m, false));
         const $m = $('#chat-messages');
         $m.scrollTop($m[0].scrollHeight);
-      } else {
+      } else if (!m.mine) {
         chatUnread[key] = (chatUnread[key] || 0) + 1;
       }
     };
@@ -480,13 +533,11 @@ $(function () {
     if (!m) return;
     const [, kind, key] = m;
     chatConv = { kind, key };
+    chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-chat').removeClass('hidden');
-    const title = kind === 'channel'
-      ? '# ' + ((chatChannels.find((c) => c.id === key) || {}).name || key.split('/').pop())
-      : nameForPub(key);
-    $('#chat-title').text(title);
+    setChatTitle();
     $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
     // Members button only for channels; collapse the panel on switch.
     $('#chat-members').toggle(kind === 'channel');
@@ -556,7 +607,6 @@ $(function () {
     .forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
   let liveIntercepts = []; // last seen from /api/status
-  let livePeers = [];      // last seen camp peers from /api/status
   // Shell/VNC discovery is STICKY: bus links flap, so we keep a peer listed
   // for a short TTL after it was last seen reachable instead of dropping it
   // the instant one poll comes back without it. {pub → {name, ts}}.
@@ -757,6 +807,14 @@ $(function () {
 
     liveIntercepts = s.intercepts || [];
     livePeers = s.peers || [];
+    // Names just became available — redraw the open chat once so authors and
+    // the title resolve to nicknames instead of pub prefixes (matters on a
+    // hard reload where the chat renders before /api/status lands).
+    if (chatNamesPending && chatConv) {
+      chatNamesPending = false;
+      setChatTitle();
+      renderChat(chatMsgs);
+    }
     refreshInterceptPeerSelect();
     refreshCallPeerSelect(s.active_peer_pub || '');
     renderIntercepts();

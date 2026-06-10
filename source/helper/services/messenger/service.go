@@ -29,13 +29,17 @@ const (
 	TypeCreate = "create"
 	TypeAdd    = "add"
 	TypeRemove = "remove"
+	TypeDelete = "delete" // owner tore the channel down — recipients drop it
+	TypeLeave  = "leave"  // a member left — the owner ratifies with a remove
 )
 
-// Service owns the in-memory message store and the bus transport. It holds
-// no DB (the Store is dormant); messages live only for the process lifetime.
+// Service owns the in-memory message store and the bus transport, backed by
+// a per-camp SQLite Store for durability.
 type Service struct {
-	bus  *bus.Service
-	self func() string // our identity pub, from the engine
+	bus   *bus.Service
+	self  func() string // our identity pub, from the engine
+	store *Store        // durable backing; nil disables persistence
+	camp  func() string // current camp id, for the per-camp database
 
 	mu       sync.Mutex
 	channels map[string]*Channel  // id → materialised channel (fold of its messages)
@@ -46,18 +50,48 @@ type Service struct {
 	subs  map[chan Message]struct{}
 }
 
-// NewService builds the messaging service. selfFn returns our identity pub
-// and display name (engine IdentityPub + CampName); it's called per
-// operation so a camp switch is picked up without re-wiring.
-func NewService(b *bus.Service, selfFn func() string) *Service {
+// NewService builds the messaging service. selfFn returns our identity pub;
+// campFn the active camp id (for the per-camp database). store may be nil to
+// run purely in memory. Both funcs are called per operation so a camp switch
+// is picked up without re-wiring; call LoadCamp after a switch to hydrate.
+func NewService(b *bus.Service, selfFn func() string, store *Store, campFn func() string) *Service {
 	return &Service{
 		bus:      b,
 		self:     selfFn,
+		store:    store,
+		camp:     campFn,
 		channels: map[string]*Channel{},
 		convs:    map[string][]Message{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
 	}
+}
+
+// LoadCamp clears in-memory state and hydrates it from the durable store for
+// the current camp. Call when a camp becomes active (engine OnStarted) so
+// channels and history survive restarts.
+func (s *Service) LoadCamp() {
+	if s.store == nil {
+		return
+	}
+	camp := s.camp()
+	chans, _ := s.store.Channels(camp)
+	msgs, _ := s.store.AllMessages(camp)
+	selfPub := s.self()
+	s.mu.Lock()
+	s.channels = map[string]*Channel{}
+	s.convs = map[string][]Message{}
+	s.seen = map[string]struct{}{}
+	for i := range chans {
+		c := chans[i]
+		s.channels[c.ID] = &c
+	}
+	for _, m := range msgs {
+		s.seen[m.ID] = struct{}{}
+		k := convKey(m, selfPub)
+		s.convs[k] = append(s.convs[k], m)
+	}
+	s.mu.Unlock()
 }
 
 // Register wires the bus handler. Call once after constructing the bus.
@@ -85,12 +119,62 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	if m.ID == "" || !s.markSeen(m.ID) {
 		return nil, nil // duplicate (retransmit / future relay) or id-less — drop
 	}
+	// Control events aren't conversation content — they mutate channel state
+	// and are not stored as messages.
 	if m.Kind == "channel" {
+		owner, _ := SplitChannelID(m.Peer)
+		switch m.Type {
+		case TypeDelete:
+			if m.From == owner { // only the owner can tear a channel down
+				s.dropChannel(m.Peer)
+				s.publish(m) // let UIs refresh the channel list
+			}
+			return nil, nil
+		case TypeLeave:
+			if selfPub == owner { // ratify a member's departure authoritatively
+				_, _ = s.RemoveMembers(m.Peer, []string{m.From})
+			}
+			return nil, nil
+		}
 		s.reconcileChannel(m, selfPub)
 	}
 	s.append(convKey(m, selfPub), m)
 	s.publish(m)
 	return nil, nil
+}
+
+// dropChannel removes a channel and its conversation from memory and the
+// store. Used by delete (owner) and leave (self).
+func (s *Service) dropChannel(id string) {
+	s.mu.Lock()
+	delete(s.channels, id)
+	delete(s.convs, id)
+	s.mu.Unlock()
+	if s.store != nil {
+		if err := s.store.DeleteChannel(s.camp(), id); err != nil {
+			clog.Warn("chat", "delete channel %q: %v", id, err)
+		}
+	}
+}
+
+// persistMsg writes one message to the durable store (best-effort).
+func (s *Service) persistMsg(m Message) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.AddMessage(s.camp(), m); err != nil {
+		clog.Debug("chat", "persist message: %v", err)
+	}
+}
+
+// persistChannel writes a channel descriptor to the durable store.
+func (s *Service) persistChannel(c *Channel) {
+	if s.store == nil || c == nil {
+		return
+	}
+	if err := s.store.UpsertChannel(s.camp(), *c); err != nil {
+		clog.Debug("chat", "persist channel: %v", err)
+	}
 }
 
 // markSeen records a message ID and reports whether it was new (false = a
@@ -119,23 +203,30 @@ func (s *Service) reconcileChannel(m Message, selfPub string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	existing := s.channels[m.Peer]
 	if existing == nil {
-		s.channels[m.Peer] = &Channel{
+		ch := &Channel{
 			ID: m.Peer, Name: name, Owner: owner,
 			Members: append([]string(nil), m.Members...), CreatedAt: m.TS,
 		}
+		s.channels[m.Peer] = ch
+		s.mu.Unlock()
+		s.persistChannel(ch)
 		return
 	}
 	if m.From != owner { // only the owner may change the roster
+		s.mu.Unlock()
 		return
 	}
 	if !contains(m.Members, selfPub) {
-		delete(s.channels, m.Peer) // owner removed us
+		s.mu.Unlock()
+		s.dropChannel(m.Peer) // owner removed us
 		return
 	}
 	existing.Members = append([]string(nil), m.Members...)
+	cp := *existing
+	s.mu.Unlock()
+	s.persistChannel(&cp)
 }
 
 // --- outbound ---
@@ -178,13 +269,73 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 	}
 	id := selfPub + "/" + name
 	roster := dedupe(append(members, selfPub))
+	ch := &Channel{ID: id, Name: name, Owner: selfPub, Members: roster, CreatedAt: nowMs()}
 	s.mu.Lock()
-	s.channels[id] = &Channel{ID: id, Name: name, Owner: selfPub, Members: roster, CreatedAt: nowMs()}
+	s.channels[id] = ch
 	s.mu.Unlock()
+	s.persistChannel(ch)
 	if _, err := s.emit(id, TypeCreate, "", roster); err != nil {
 		return Channel{}, err
 	}
 	return *s.channelCopy(id), nil
+}
+
+// DeleteChannel tears a channel down (owner only): tells the members, then
+// drops it locally and from the store.
+func (s *Service) DeleteChannel(chanID string) error {
+	selfPub := s.self()
+	s.mu.Lock()
+	ch := s.channels[chanID]
+	if ch == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("chat: unknown channel %q", chanID)
+	}
+	if ch.Owner != selfPub {
+		s.mu.Unlock()
+		return fmt.Errorf("chat: only the owner can delete the channel")
+	}
+	members := append([]string(nil), ch.Members...)
+	s.mu.Unlock()
+	s.sendControl(chanID, TypeDelete, members)
+	s.dropChannel(chanID)
+	s.publish(Message{Kind: "channel", Peer: chanID, Type: TypeDelete, From: selfPub, TS: nowMs(), Mine: true})
+	return nil
+}
+
+// LeaveChannel removes us from a channel: drops it locally and asks the owner
+// to ratify the departure (which propagates an authoritative remove). The
+// owner can't leave their own channel — they delete it instead.
+func (s *Service) LeaveChannel(chanID string) error {
+	selfPub := s.self()
+	owner, _ := SplitChannelID(chanID)
+	if owner == selfPub {
+		return fmt.Errorf("chat: the owner deletes the channel, not leaves it")
+	}
+	s.mu.Lock()
+	_, ok := s.channels[chanID]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("chat: unknown channel %q", chanID)
+	}
+	s.sendControl(chanID, TypeLeave, []string{owner})
+	s.dropChannel(chanID)
+	s.publish(Message{Kind: "channel", Peer: chanID, Type: TypeLeave, From: selfPub, TS: nowMs(), Mine: true})
+	return nil
+}
+
+// sendControl fires a contentless channel event (delete/leave) to the given
+// peers. Not stored locally — it mutates state, it isn't conversation.
+func (s *Service) sendControl(chanID, typ string, fanout []string) {
+	selfPub := s.self()
+	wire := mustJSON(Message{ID: newID(), Kind: "channel", Peer: chanID, Type: typ, From: selfPub, TS: nowMs()})
+	for _, pub := range fanout {
+		if pub == selfPub || pub == "" {
+			continue
+		}
+		if err := s.bus.Notify(pub, typeMsg, wire); err != nil {
+			clog.Debug("chat", "%s to %s: %v", typ, s.bus.Label(pub), err)
+		}
+	}
 }
 
 // AddMembers adds members to a channel (owner only) and fans the new roster
@@ -228,7 +379,9 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 		roster = kept
 	}
 	ch.Members = roster
+	cp := *ch
 	s.mu.Unlock()
+	s.persistChannel(&cp)
 
 	typ, affected := TypeAdd, add
 	if len(remove) > 0 {
@@ -395,6 +548,7 @@ func (s *Service) append(key string, m Message) {
 	}
 	s.convs[key] = c
 	s.mu.Unlock()
+	s.persistMsg(m)
 }
 
 // less is the total order over messages: by send timestamp, then by ID.

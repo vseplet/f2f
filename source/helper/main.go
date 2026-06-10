@@ -143,11 +143,16 @@ func run(bind string, console bool, autostart bool) error {
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
-	// Messaging — direct messages and channels over the bus, in memory for
-	// now (the SQLite Store in the package is dormant until persistence is
-	// wired). Identity (our pub) comes from the engine so a camp switch is
-	// picked up without re-wiring.
-	msgSvc := messenger.NewService(busSvc, func() string { return eng.Status().IdentityPub })
+	// Messaging — direct messages and channels over the bus, backed by a
+	// per-camp SQLite store for durable history. Identity (our pub) and the
+	// active camp come from the engine so a camp switch is picked up; the
+	// camp's history is hydrated in OnStarted (LoadCamp).
+	msgStore := messenger.NewStore(store.CampDir)
+	defer msgStore.Close()
+	msgSvc := messenger.NewService(busSvc,
+		func() string { return eng.Status().IdentityPub },
+		msgStore,
+		func() string { return eng.Status().CampID })
 	msgSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
@@ -289,6 +294,7 @@ func run(bind string, console bool, autostart bool) error {
 				clog.Warn("main", "switch camp log: %v", err)
 			}
 		}
+		msgSvc.LoadCamp() // hydrate chat history for the now-active camp
 		for _, s := range services {
 			if s.start == nil {
 				continue

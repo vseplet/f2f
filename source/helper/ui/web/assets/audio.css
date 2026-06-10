@@ -2258,16 +2258,28 @@ a.ax-domain-link:hover {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 4px 0;
+    padding: 4px 20px;
 }
+/* Message rows are flex columns so the bubble can hug a side: own messages
+   align right, everyone else's left (classic chat layout). */
 .ax-msg {
-    padding: 1px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin: 2px 0;
+}
+.ax-msg.is-mine {
+    align-items: flex-end;
 }
 .ax-msg-head {
     display: flex;
     align-items: baseline;
     gap: 8px;
-    margin-top: 10px;
+    margin-top: 8px;
+    padding: 0 4px;
+}
+.ax-msg.is-mine .ax-msg-head {
+    flex-direction: row-reverse;
 }
 .ax-msg-author {
     color: var(--accent);
@@ -2280,6 +2292,13 @@ a.ax-domain-link:hover {
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+    max-width: 72%;
+    padding: 5px 10px;
+    border-radius: 10px;
+    background: var(--panel-2);
+}
+.ax-msg.is-mine .ax-msg-text {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
 }
 /* Channel lifecycle line (created / members changed) — centred, muted, so
    it reads as an event rather than a chat line. */
@@ -2329,6 +2348,21 @@ a.ax-domain-link:hover {
 .ax-chat-members-note {
     color: var(--muted);
     font-style: italic;
+}
+.ax-chat-members-actions {
+    margin-left: auto;
+}
+.ax-chat-danger {
+    border: 1px solid var(--danger, #e0686e);
+    background: none;
+    color: var(--danger, #e0686e);
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+}
+.ax-chat-danger:hover {
+    background: color-mix(in srgb, var(--danger, #e0686e) 12%, transparent);
 }
 .ax-chat-input {
     display: flex;
