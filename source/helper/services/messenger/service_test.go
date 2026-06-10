@@ -1,10 +1,32 @@
 package messenger
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
+
+// fakeBus simulates the transport: deliveries fail while down, succeed (and
+// are counted) while up.
+type fakeBus struct {
+	down atomic.Bool
+	sent atomic.Int64
+}
+
+func (f *fakeBus) Request(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	if f.down.Load() {
+		return nil, fmt.Errorf("peer unreachable")
+	}
+	f.sent.Add(1)
+	return nil, nil
+}
+func (f *fakeBus) Handle(string, bus.HandlerFunc) {}
+func (f *fakeBus) Label(pub string) string        { return pub }
 
 // newTestService builds a Service without a bus (onMsg/append/Messages
 // never touch it) for unit-testing the in-memory ordering and dedup logic.
@@ -16,6 +38,41 @@ func newTestService() *Service {
 		convs:    map[string][]Message{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
+	}
+}
+
+func TestRedelivery(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(func(id string) string {
+		d := filepath.Join(dir, id)
+		_ = os.MkdirAll(d, 0o755)
+		return d
+	})
+	defer st.Close()
+	fb := &fakeBus{}
+	s := newTestService()
+	s.bus = fb
+	s.store = st
+	s.camp = func() string { return "c1" }
+
+	// Peer down: the DM fails and must land in the outbox.
+	fb.down.Store(true)
+	if !s.deliver("m1", "bob", []byte(`{"id":"m1"}`)) {
+		// expected — verify it's queued
+	}
+	items, _ := st.Outbox("c1")
+	if len(items) != 1 || items[0].MsgID != "m1" || items[0].Recipient != "bob" {
+		t.Fatalf("outbox after failed delivery = %+v", items)
+	}
+
+	// Peer back: flush drains the outbox and the wire was actually sent.
+	fb.down.Store(false)
+	s.flush("bob")
+	if items, _ = st.Outbox("c1"); len(items) != 0 {
+		t.Fatalf("outbox after flush = %+v, want empty", items)
+	}
+	if fb.sent.Load() != 1 {
+		t.Fatalf("sent = %d, want 1", fb.sent.Load())
 	}
 }
 

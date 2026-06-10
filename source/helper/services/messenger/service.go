@@ -1,6 +1,7 @@
 package messenger
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -33,10 +34,18 @@ const (
 	TypeLeave  = "leave"  // a member left — the owner ratifies with a remove
 )
 
+// busAPI is the slice of bus.Service the messenger uses — an interface so
+// tests can fake the transport.
+type busAPI interface {
+	Request(ctx context.Context, pub, typ string, payload []byte) ([]byte, error)
+	Handle(typ string, fn bus.HandlerFunc)
+	Label(pub string) string
+}
+
 // Service owns the in-memory message store and the bus transport, backed by
 // a per-camp SQLite Store for durability.
 type Service struct {
-	bus   *bus.Service
+	bus   busAPI
 	self  func() string // our identity pub, from the engine
 	store *Store        // durable backing; nil disables persistence
 	camp  func() string // current camp id, for the per-camp database
@@ -94,8 +103,12 @@ func (s *Service) LoadCamp() {
 	s.mu.Unlock()
 }
 
-// Register wires the bus handler. Call once after constructing the bus.
-func (s *Service) Register() { s.bus.Handle(typeMsg, s.onMsg) }
+// Register wires the bus handler and starts the redelivery loop. Call once
+// after constructing the bus.
+func (s *Service) Register() {
+	s.bus.Handle(typeMsg, s.onMsg)
+	go s.flushLoop()
+}
 
 // SplitChannelID splits a channel ID ("<owner_pub>/<name>") into its owner
 // pub and name. Returns ("","") if it isn't a channel ID.
@@ -116,6 +129,9 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	selfPub := s.self()
 	m.From = fromPub // trust the bus-attested sender over the claimed field
 	m.Mine = false
+	// Anything inbound proves the peer is reachable — push them whatever
+	// we still owe (cheap no-op when the outbox has nothing for them).
+	go s.flush(fromPub)
 	if m.ID == "" || !s.markSeen(m.ID) {
 		return nil, nil // duplicate (retransmit / future relay) or id-less — drop
 	}
@@ -229,6 +245,84 @@ func (s *Service) reconcileChannel(m Message, selfPub string) {
 	s.persistChannel(&cp)
 }
 
+// --- delivery ---
+//
+// Delivery is at-least-once with sender-side retry: every send is a bus
+// Request, and the recipient's (deduped) handler reply is the ACK. A failed
+// send lands in the outbox (SQLite — survives restarts) and is retried by
+// flushLoop, plus immediately when the recipient shows signs of life
+// (anything inbound from them). Only the AUTHOR retries its own messages —
+// nobody relays anyone else's — which is what keeps the no-signature trust
+// model sound.
+
+// deliverTimeout bounds one delivery attempt. Generous enough for a cold
+// AWG+QUIC handshake chain, short enough not to pile up goroutines.
+const deliverTimeout = 10 * time.Second
+
+// deliver sends wire to pub and returns whether it was ACKed. On failure
+// the item is queued for redelivery.
+func (s *Service) deliver(msgID, pub string, wire []byte) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
+	_, err := s.bus.Request(ctx, pub, typeMsg, wire)
+	cancel()
+	if err == nil {
+		return true
+	}
+	clog.Debug("chat", "deliver %s to %s: %v (queued)", msgID, s.bus.Label(pub), err)
+	if s.store != nil {
+		if qerr := s.store.AddOutbox(s.camp(), OutboxItem{MsgID: msgID, Recipient: pub, Payload: wire, TS: nowMs()}); qerr != nil {
+			clog.Warn("chat", "outbox enqueue: %v", qerr)
+		}
+	}
+	return false
+}
+
+// outboxTTL is how long an undelivered message waits for its recipient.
+const outboxTTL = 14 * 24 * time.Hour
+
+// flushLoop retries the outbox forever (the service lives for the process).
+func (s *Service) flushLoop() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		s.flush("")
+	}
+}
+
+// flush retries undelivered items — all of them, or only those owed to one
+// recipient (onlyPub != ""). Per recipient it stops at the first failure:
+// if the oldest message doesn't get through, the peer is still unreachable
+// and hammering the rest just burns timeouts.
+func (s *Service) flush(onlyPub string) {
+	if s.store == nil {
+		return
+	}
+	camp := s.camp()
+	_ = s.store.PruneOutbox(camp, nowMs()-outboxTTL.Milliseconds())
+	items, err := s.store.Outbox(camp)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	dead := map[string]bool{}
+	for _, it := range items {
+		if onlyPub != "" && it.Recipient != onlyPub {
+			continue
+		}
+		if dead[it.Recipient] {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
+		_, err := s.bus.Request(ctx, it.Recipient, typeMsg, it.Payload)
+		cancel()
+		if err != nil {
+			dead[it.Recipient] = true
+			continue
+		}
+		clog.Debug("chat", "redelivered %s to %s", it.MsgID, s.bus.Label(it.Recipient))
+		_ = s.store.DeleteOutbox(camp, it.MsgID, it.Recipient)
+	}
+}
+
 // --- outbound ---
 
 // SendDM delivers a direct message to peerPub and records our own copy.
@@ -245,9 +339,7 @@ func (s *Service) SendDM(peerPub, body string) (Message, error) {
 	local.Mine = true
 	s.append(peerPub, local)
 	s.publish(local)
-	if err := s.bus.Notify(peerPub, typeMsg, mustJSON(m)); err != nil {
-		clog.Warn("chat", "dm to %s: %v", s.bus.Label(peerPub), err)
-	}
+	go s.deliver(m.ID, peerPub, mustJSON(m))
 	return local, nil
 }
 
@@ -327,14 +419,13 @@ func (s *Service) LeaveChannel(chanID string) error {
 // peers. Not stored locally — it mutates state, it isn't conversation.
 func (s *Service) sendControl(chanID, typ string, fanout []string) {
 	selfPub := s.self()
-	wire := mustJSON(Message{ID: newID(), Kind: "channel", Peer: chanID, Type: typ, From: selfPub, TS: nowMs()})
+	m := Message{ID: newID(), Kind: "channel", Peer: chanID, Type: typ, From: selfPub, TS: nowMs()}
+	wire := mustJSON(m)
 	for _, pub := range fanout {
 		if pub == selfPub || pub == "" {
 			continue
 		}
-		if err := s.bus.Notify(pub, typeMsg, wire); err != nil {
-			clog.Debug("chat", "%s to %s: %v", typ, s.bus.Label(pub), err)
-		}
+		go s.deliver(m.ID, pub, wire)
 	}
 }
 
@@ -435,9 +526,7 @@ func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []st
 		if pub == selfPub || pub == "" {
 			continue
 		}
-		if err := s.bus.Notify(pub, typeMsg, wire); err != nil {
-			clog.Debug("chat", "post to %s: %v", s.bus.Label(pub), err)
-		}
+		go s.deliver(m.ID, pub, wire)
 	}
 	return local, nil
 }

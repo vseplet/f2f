@@ -2349,6 +2349,26 @@ a.ax-domain-link:hover {
     color: var(--muted);
     font-style: italic;
 }
+/* The add-member dropdown inherits the OS's white select by default —
+   restyle it to the dark theme. */
+.ax-chat-members-add select {
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--bg);
+    color: var(--text-2);
+    border: 1px solid var(--panel-2);
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12px;
+    padding: 2px 18px 2px 8px;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+}
+.ax-chat-members-add select:hover {
+    border-color: var(--border-2);
+}
 .ax-chat-members-actions {
     margin-left: auto;
 }

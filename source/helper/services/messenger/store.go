@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS channels (
   owner      TEXT    NOT NULL DEFAULT '',
   members    TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
   created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS outbox (
+  msg_id    TEXT    NOT NULL,            -- message ID (dedup key on the peer)
+  recipient TEXT    NOT NULL,            -- peer pub still owed this message
+  payload   TEXT    NOT NULL,            -- full wire JSON, resent verbatim
+  ts        INTEGER NOT NULL,            -- unix ms enqueued, for pruning
+  PRIMARY KEY (msg_id, recipient)
 );`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("messenger: migrate: %w", err)
@@ -251,6 +259,72 @@ func (s *Store) Channels(campID string) ([]Channel, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// OutboxItem is one undelivered (message, recipient) pair.
+type OutboxItem struct {
+	MsgID     string
+	Recipient string
+	Payload   []byte
+	TS        int64
+}
+
+// AddOutbox records an undelivered message for a recipient (idempotent).
+func (s *Store) AddOutbox(campID string, it OutboxItem) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(
+		`INSERT INTO outbox(msg_id, recipient, payload, ts) VALUES(?,?,?,?)
+		 ON CONFLICT(msg_id, recipient) DO NOTHING`,
+		it.MsgID, it.Recipient, string(it.Payload), it.TS)
+	return err
+}
+
+// Outbox returns every undelivered item, oldest-first.
+func (s *Store) Outbox(campID string) ([]OutboxItem, error) {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT msg_id, recipient, payload, ts FROM outbox ORDER BY ts ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OutboxItem
+	for rows.Next() {
+		var it OutboxItem
+		var payload string
+		if err := rows.Scan(&it.MsgID, &it.Recipient, &payload, &it.TS); err != nil {
+			return nil, err
+		}
+		it.Payload = []byte(payload)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// DeleteOutbox drops one delivered (message, recipient) pair.
+func (s *Store) DeleteOutbox(campID, msgID, recipient string) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM outbox WHERE msg_id=? AND recipient=?`, msgID, recipient)
+	return err
+}
+
+// PruneOutbox drops items enqueued before cutoff (unix ms) — a recipient
+// that hasn't been seen for that long forfeits the backlog.
+func (s *Store) PruneOutbox(campID string, cutoff int64) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM outbox WHERE ts < ?`, cutoff)
+	return err
 }
 
 func jsonArr(v []string) string {
