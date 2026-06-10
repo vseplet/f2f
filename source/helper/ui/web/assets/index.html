@@ -254,6 +254,7 @@
                                     <th>endpoint</th>
                                     <th>rtt</th>
                                     <th>joined</th>
+                                    <th class="ax-peers-actions"></th>
                                 </tr>
                             </thead>
                             <tbody id="camp-peers-tbody"></tbody>
@@ -1082,6 +1083,14 @@
                         <span id="chat-title">— chat</span>
                         <button
                             type="button"
+                            id="chat-members"
+                            class="ax-engine-btn ax-chat-call"
+                            title="members"
+                            aria-label="members"
+                            style="display: none"
+                        ><i class="bi bi-people-fill"></i></button>
+                        <button
+                            type="button"
                             id="chat-call"
                             class="ax-engine-btn ax-chat-call"
                             title="call"
@@ -1089,6 +1098,7 @@
                             style="display: none"
                         ><i class="bi bi-telephone-fill"></i></button>
                     </div>
+                    <div id="chat-members-panel" class="ax-chat-members hidden"></div>
                     <div id="chat-messages" class="ax-chat-messages"></div>
                     <form id="chat-form" class="ax-chat-input">
                         <button

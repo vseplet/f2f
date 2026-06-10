@@ -1556,6 +1556,40 @@ func (e *Engine) SetActivePeer(pub string) error {
 	return nil
 }
 
+// ForgetPeer drops a peer from the live in-memory map and from the seed
+// catalog so it stops showing in the UI. Reports whether it was present.
+// The camp only advertises ACTIVE peers, so an offline peer forgotten here
+// stays gone; if it comes back online and re-announces, the next poll
+// re-adds it (which is the correct outcome). Persisting the removal from
+// the on-disk catalog is the caller's job (it owns the store).
+func (e *Engine) ForgetPeer(pub string) bool {
+	if pub == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.peers[pub]
+	delete(e.peers, pub)
+	if a := e.activePub.Load(); a != nil && *a == pub {
+		e.activePub.Store(nil)
+	}
+	// Prune the in-memory seed catalog too, so a restart-within-process
+	// (wake/NAT rebind re-Start) doesn't re-hydrate the forgotten peer.
+	if e.camp != nil {
+		kept := e.camp.PeerCatalog[:0]
+		for _, p := range e.camp.PeerCatalog {
+			if p.Pub != pub {
+				kept = append(kept, p)
+			}
+		}
+		e.camp.PeerCatalog = kept
+	}
+	if ok {
+		clog.Info("camp", "forgot peer %s", identity.Label("", pub))
+	}
+	return ok
+}
+
 func (e *Engine) tunToPeerLoop(ctx context.Context) {
 	defer e.workers.Done()
 	hasPeer := e.udp != nil

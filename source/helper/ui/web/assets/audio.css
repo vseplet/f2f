@@ -402,6 +402,28 @@
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* Forget-peer "×" — sits at the row's right edge, revealed on row hover so
+   it doesn't clutter the list. Click is handled in app.js (stops the row
+   navigation). */
+.ax-tree-remove {
+    flex: 0 0 auto;
+    margin-left: 2px;
+    padding: 0 4px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s, color 0.1s;
+}
+.ax-tree-row:hover .ax-tree-remove {
+    opacity: 1;
+}
+.ax-tree-remove:hover {
+    color: var(--danger, #e0686e);
+}
 .ax-tree-children {
     margin-left: 8px;
     margin-top: 2px;
@@ -1209,6 +1231,29 @@ details.ax-advanced > .ax-advanced-body {
 
 .ax-frame .ax-peers-dot {
     width: 16px;
+}
+/* Forget-peer "×" cell in the main peers table. Narrow, right-aligned;
+   the button is revealed on row hover (mirrors the sidebar affordance). */
+.ax-frame .ax-peers-actions {
+    width: 24px;
+    text-align: right;
+}
+.ax-frame .ax-peers-remove {
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s, color 0.1s;
+}
+.ax-frame .ax-peers tbody tr:hover .ax-peers-remove {
+    opacity: 1;
+}
+.ax-frame .ax-peers-remove:hover {
+    color: var(--danger, #e0686e);
 }
 
 .ax-frame .ax-dot {
@@ -2235,6 +2280,55 @@ a.ax-domain-link:hover {
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+}
+/* Channel lifecycle line (created / members changed) — centred, muted, so
+   it reads as an event rather than a chat line. */
+.ax-msg-system {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+    margin: 6px 0;
+    font-style: italic;
+}
+/* Channel members panel (toggled from the chat header). */
+.ax-chat-members {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px dotted var(--panel-2);
+    font-size: 12px;
+}
+.ax-chat-members-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.ax-chat-member {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border: 1px solid var(--panel-2);
+    border-radius: 10px;
+    color: var(--text-2);
+}
+.ax-chat-member-rm {
+    border: none;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+}
+.ax-chat-member-rm:hover {
+    color: var(--danger, #e0686e);
+}
+.ax-chat-members-note {
+    color: var(--muted);
+    font-style: italic;
 }
 .ax-chat-input {
     display: flex;

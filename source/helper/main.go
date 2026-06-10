@@ -143,10 +143,12 @@ func run(bind string, console bool, autostart bool) error {
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
-	// Local message/channel store — one SQLite file per camp under ~/.f2f
-	// (<camp_id>.messenger.db), opened lazily.
-	msgSvc := messenger.New(store.CampDir)
-	defer msgSvc.Close()
+	// Messaging — direct messages and channels over the bus, in memory for
+	// now (the SQLite Store in the package is dormant until persistence is
+	// wired). Identity (our pub) comes from the engine so a camp switch is
+	// picked up without re-wiring.
+	msgSvc := messenger.NewService(busSvc, func() string { return eng.Status().IdentityPub })
+	msgSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); bus activity (pings)
