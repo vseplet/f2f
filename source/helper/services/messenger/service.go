@@ -26,12 +26,14 @@ const maxPerConv = 1000
 
 // message Type values.
 const (
-	TypeText   = "text"
-	TypeCreate = "create"
-	TypeAdd    = "add"
-	TypeRemove = "remove"
-	TypeDelete = "delete" // owner tore the channel down — recipients drop it
-	TypeLeave  = "leave"  // a member left — the owner ratifies with a remove
+	TypeText      = "text"
+	TypeCreate    = "create"
+	TypeAdd       = "add"
+	TypeRemove    = "remove"
+	TypeDelete    = "delete" // owner tore the channel down — recipients drop it
+	TypeLeave     = "leave"  // a member left — the owner ratifies with a remove
+	TypeCallStart = "call_start"
+	TypeCallEnd   = "call_end"
 )
 
 // busAPI is the slice of bus.Service the messenger uses — an interface so
@@ -347,6 +349,29 @@ func (s *Service) SendDM(peerPub, body string) (Message, error) {
 // fanned out to every member, carrying the current roster snapshot.
 func (s *Service) Post(chanID, body string) (Message, error) {
 	return s.emit(chanID, TypeText, body, nil)
+}
+
+// SendEvent posts a contentful-less system event (call started/ended, …)
+// into a conversation. It travels, persists and dedups exactly like a text
+// message — events ARE messages — and renders as a system line.
+func (s *Service) SendEvent(kind, key, typ string) (Message, error) {
+	if kind == "channel" {
+		return s.emit(key, typ, "", nil)
+	}
+	selfPub := s.self()
+	if selfPub == "" {
+		return Message{}, fmt.Errorf("chat: no identity")
+	}
+	m := Message{
+		ID: newID(), Kind: "dm", Peer: key, Type: typ,
+		From: selfPub, To: key, TS: nowMs(),
+	}
+	local := m
+	local.Mine = true
+	s.append(key, local)
+	s.publish(local)
+	go s.deliver(m.ID, key, mustJSON(m))
+	return local, nil
 }
 
 // CreateChannel makes a named channel owned by us with the given members

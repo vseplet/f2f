@@ -301,8 +301,13 @@ $(function () {
       if (m.type === 'create') line = who + ' created the channel';
       else if (m.type === 'add') line = who + ' added ' + (names || 'members');
       else if (m.type === 'remove') line = who + ' removed ' + (names || 'members');
+      else if (m.type === 'call_start') line = '☎ ' + who + ' started a call';
+      else if (m.type === 'call_end') line = '☎ call ended';
       else line = who + ' ' + m.type;
-      return `<div class="ax-msg ax-msg-system">${esc(line)}</div>`;
+      // A channel call announcement doubles as the join affordance.
+      const join = (m.type === 'call_start' && m.kind === 'channel')
+        ? ` <a href="#call:group:${esc(m.peer)}" class="ax-msg-join">join</a>` : '';
+      return `<div class="ax-msg ax-msg-system">${esc(line)}${join}</div>`;
     }
     // Own messages bubble on the right, everyone else's on the left.
     const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
@@ -554,8 +559,10 @@ $(function () {
     const a = window.f2fCall && window.f2fCall.active;
     const callRoutes = [];
     if (a) {
-      callRoutes.push('call:' + a.kind + ':' + a.id);
-      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + a.id : 'chat:channel:' + a.id);
+      // dm routes are keyed by pub (display name lives in a.id/a.title).
+      const key = a.kind === 'dm' ? (a.pub || a.id) : a.id;
+      callRoutes.push('call:' + (a.kind === 'dm' ? 'dm' : a.kind) + ':' + key);
+      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + key : 'chat:channel:' + a.id);
     }
     $('#ax-tree .ax-tree-row').each(function () {
       const r = $(this).attr('data-route');
@@ -1041,7 +1048,7 @@ $(function () {
     // Our current call (p2p or group) — routable + highlightable like chats.
     // No state dot: the in-call pulse pip already marks it.
     if (activeCall && activeCall.kind === 'dm') {
-      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
+      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + (activeCall.pub || activeCall.id));
     } else if (activeCall && activeCall.kind === 'group') {
       meetRows += row(null, '# ' + activeCall.title, 'group', null, 'call:group:' + activeCall.id);
     }
@@ -1052,7 +1059,9 @@ $(function () {
     const directsBody = directs.length
       ? directs.map(p => {
           const name = p.name || (p.pub || '').slice(0, 12);
-          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.id === p.pub;
+          // The active dm call stores the peer's pub separately (id is the
+          // display label) — match on pub.
+          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.pub === p.pub;
           const tags = [];
           if (inCall) tags.push('● in call');
           if (chatUnread[p.pub]) tags.push(`${chatUnread[p.pub]} new`);
@@ -1066,6 +1075,8 @@ $(function () {
       ? chatChannels.slice().sort((a, b) => a.name.localeCompare(b.name)).map(ch => {
           const tags = [`${(ch.members || []).length} members`];
           if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
+          // Our group call is bound to a channel id — surface it on the row.
+          if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
           return row(null, '# ' + ch.name, tags.join(' · '), null, 'chat:channel:' + ch.id);
         }).join('')
       : empty('no channels'))

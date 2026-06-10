@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/vseplet/f2f/source/helper/services/messenger"
 )
 
 // handleChatChannels lists the channels we belong to.
@@ -110,29 +112,43 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChatSend posts a message. Body: {kind, key, body} — kind "dm"
-// (key = peer pub) or "channel" (key = channel id).
+// (key = peer pub) or "channel" (key = channel id). An optional type turns
+// it into a system event (call lifecycle); body is ignored then.
 func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Kind string `json:"kind"`
 		Key  string `json:"key"`
 		Body string `json:"body"`
+		Type string `json:"type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Body == "" || req.Key == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("key and body required"))
+	if req.Kind != "dm" && req.Kind != "channel" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("kind must be dm or channel"))
+		return
+	}
+	if req.Key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
 		return
 	}
 	var err error
-	switch req.Kind {
-	case "dm":
-		_, err = s.msg.SendDM(req.Key, req.Body)
-	case "channel":
-		_, err = s.msg.Post(req.Key, req.Body)
+	switch req.Type {
+	case "": // plain text
+		if req.Body == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("body required"))
+			return
+		}
+		if req.Kind == "dm" {
+			_, err = s.msg.SendDM(req.Key, req.Body)
+		} else {
+			_, err = s.msg.Post(req.Key, req.Body)
+		}
+	case messenger.TypeCallStart, messenger.TypeCallEnd:
+		_, err = s.msg.SendEvent(req.Kind, req.Key, req.Type)
 	default:
-		writeError(w, http.StatusBadRequest, fmt.Errorf("kind must be dm or channel"))
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad type %q", req.Type))
 		return
 	}
 	if err != nil {

@@ -44,7 +44,16 @@ const (
 // calls share the same shape; Remote=true distinguishes peer-hosted
 // calls discovered via polling.
 type State struct {
-	CallID       string                `json:"call_id"`
+	// CallID is "<channel_id>/<initiator_pub>" for a channel-bound call —
+	// self-describing and deterministic, so the same (channel, initiator)
+	// pair never spawns two identities. Calls created outside any channel
+	// (legacy meet tab) fall back to a timestamp id.
+	CallID string `json:"call_id"`
+	// Channel is the messenger channel this call belongs to ("" = unbound).
+	// Joiners match on it, so a call in #dev never captures #general's join.
+	Channel string `json:"channel,omitempty"`
+	// Initiator is the pub of the peer that started the call.
+	Initiator    string                `json:"initiator,omitempty"`
 	SFUHost      string                `json:"sfu_host"`
 	Participants []sfu.ParticipantInfo `json:"participants"`
 	StartedAt    time.Time             `json:"started_at"`
@@ -257,10 +266,11 @@ func (s *Service) SFU() *sfu.SFU {
 
 // --- lifecycle ---
 
-// Create starts a new SFU on this peer and adds the local user as
-// the first participant. Errors if a call is already in progress or
-// the engine isn't running.
-func (s *Service) Create() (*State, error) {
+// Create starts a new SFU on this peer and adds the local user as the
+// first participant. channel binds the call to a messenger channel ("" =
+// unbound). Errors if a call is already in progress or the engine isn't
+// running.
+func (s *Service) Create(channel string) (*State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cc := s.loadCall(); cc != nil {
@@ -276,9 +286,15 @@ func (s *Service) Create() (*State, error) {
 		s.deliverSignal(to, msg)
 	})
 
+	callID := fmt.Sprintf("%d", time.Now().UnixNano())
+	if channel != "" {
+		callID = channel + "/" + st.IdentityPub
+	}
 	cc := &callCtx{
 		state: State{
-			CallID:    fmt.Sprintf("%d", time.Now().UnixNano()),
+			CallID:    callID,
+			Channel:   channel,
+			Initiator: st.IdentityPub,
 			SFUHost:   st.LocalIP,
 			StartedAt: time.Now(),
 		},

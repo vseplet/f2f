@@ -2308,6 +2308,16 @@ a.ax-domain-link:hover {
     text-align: center;
     margin: 6px 0;
     font-style: italic;
+    align-items: center;
+}
+.ax-msg-join {
+    color: var(--ok);
+    text-decoration: none;
+    font-style: normal;
+    margin-left: 4px;
+}
+.ax-msg-join:hover {
+    text-decoration: underline;
 }
 /* Channel members panel (toggled from the chat header). */
 .ax-chat-members {

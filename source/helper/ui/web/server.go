@@ -1307,7 +1307,13 @@ func (s *Server) handleCallList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.calls.Create()
+	// Optional body: {channel} — binds the call to a messenger channel so
+	// its id is "<channel>/<initiator_pub>" and joiners match on it.
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // empty body = unbound call
+	cs, err := s.calls.Create(req.Channel)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
