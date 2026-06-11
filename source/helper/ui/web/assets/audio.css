@@ -148,6 +148,7 @@
     background: var(--panel);
 }
 .ax-sidebar.ax-collapsed .ax-search,
+.ax-sidebar.ax-collapsed #ax-notifications-clear,
 .ax-sidebar.ax-collapsed .ax-sidebar-scroll {
     display: none;
 }
@@ -171,6 +172,23 @@
    The accent bar's colour encodes the event kind (positive / warning
    / passive). Hover lifts the row subtly so users can tell it's
    clickable once the real handlers ship. */
+/* Permission nudge at the top of the list: a clickable "enable desktop
+   notifications" banner (Chrome only grants on a user gesture), or a muted
+   "blocked" note when the user has denied it. */
+.ax-notif-perm {
+    padding: 9px 12px;
+    border-bottom: 1px dotted var(--panel-2);
+    font-size: 12px;
+    color: var(--accent, var(--text));
+    cursor: pointer;
+}
+.ax-notif-perm:hover { background: var(--panel); }
+.ax-notif-perm.muted {
+    color: var(--text-2);
+    cursor: default;
+}
+.ax-notif-perm.muted:hover { background: none; }
+
 .ax-notif {
     display: grid;
     grid-template-columns: 3px 1fr auto auto;
@@ -2300,6 +2318,35 @@ a.ax-domain-link:hover {
 .ax-msg.is-mine .ax-msg-text {
     background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
 }
+
+/* Inline attachments. Images and clips preview directly; other files show a
+   compact download chip. All capped so a big media file can't blow up the row. */
+.ax-msg-attach { display: inline-block; max-width: 72%; }
+.ax-msg-img,
+.ax-msg-video {
+    max-width: 100%;
+    max-height: 320px;
+    border-radius: 10px;
+    display: block;
+}
+.ax-msg-video { max-width: 72%; background: #000; }
+.ax-msg-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 72%;
+    padding: 8px 11px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 13px;
+}
+.ax-msg-file:hover { background: var(--panel); }
+.ax-msg.is-mine .ax-msg-file {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+}
+.ax-msg-file-size { color: var(--muted); font-size: 11px; margin-left: auto; }
 /* Channel lifecycle line (created / members changed) — centred, muted, so
    it reads as an event rather than a chat line. */
 .ax-msg-system {

@@ -116,11 +116,15 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 // it into a system event (call lifecycle); body is ignored then.
 func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Kind string `json:"kind"`
-		Key  string `json:"key"`
-		Body string `json:"body"`
-		Type string `json:"type"`
+		Kind string                `json:"kind"`
+		Key  string                `json:"key"`
+		Body string                `json:"body"`
+		Type string                `json:"type"`
+		File *messenger.Attachment `json:"file"`
 	}
+	// Cap the body generously above MaxAttachment (base64 + JSON overhead) so
+	// an oversized upload is rejected cleanly rather than read into memory.
+	r.Body = http.MaxBytesReader(w, r.Body, messenger.MaxAttachment*2)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -133,17 +137,28 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
 		return
 	}
+	if req.File != nil {
+		if len(req.File.Data) == 0 {
+			req.File = nil // empty attachment — treat as a plain message
+		} else if len(req.File.Data) > messenger.MaxAttachment {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Errorf("attachment too large (max %d MiB)", messenger.MaxAttachment>>20))
+			return
+		} else {
+			req.File.Size = len(req.File.Data)
+		}
+	}
 	var err error
 	switch req.Type {
-	case "": // plain text
-		if req.Body == "" {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("body required"))
+	case "": // plain text and/or attachment
+		if req.Body == "" && req.File == nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("body or file required"))
 			return
 		}
 		if req.Kind == "dm" {
-			_, err = s.msg.SendDM(req.Key, req.Body)
+			_, err = s.msg.SendDM(req.Key, req.Body, req.File)
 		} else {
-			_, err = s.msg.Post(req.Key, req.Body)
+			_, err = s.msg.Post(req.Key, req.Body, req.File)
 		}
 	case messenger.TypeCallStart, messenger.TypeCallEnd:
 		_, err = s.msg.SendEvent(req.Kind, req.Key, req.Type)

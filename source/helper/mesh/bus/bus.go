@@ -83,9 +83,9 @@ type StreamHandlerFunc func(fromPub string, open []byte, st *quic.Stream)
 
 // Service owns the QUIC listener and the per-peer outbound connections.
 type Service struct {
-	// Events, if set, is called for notable bus activity (ping results,
-	// inbound connects) so a higher layer (the notification hub) can surface
-	// it in the UI. Set once before Start.
+	// Events, if set, is called when a peer's reachability changes — text is
+	// "up" or "down" — so a higher layer (the notification hub) can surface
+	// peer presence in the UI. Set once before Start.
 	Events func(kind, peerPub, text string)
 
 	resolver  Resolver
@@ -267,9 +267,9 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	s.mu.Unlock()
 	switch {
 	case ok && (!had || !prev):
-		s.emit("ping", pub, "QUIC link up · "+rtt.String())
+		s.emit("peer", pub, "up")
 	case !ok && had && prev:
-		s.emit("ping", pub, "QUIC link down")
+		s.emit("peer", pub, "down")
 	}
 }
 

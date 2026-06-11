@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS messages (
   recipient TEXT    NOT NULL DEFAULT '', -- dm recipient pub (Message.To)
   body      TEXT    NOT NULL DEFAULT '',
   members   TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
+  file      TEXT    NOT NULL DEFAULT '', -- JSON Attachment (base64 data), '' if none
   ts        INTEGER NOT NULL,            -- unix ms
   mine      INTEGER NOT NULL DEFAULT 0
 );
@@ -107,6 +108,12 @@ CREATE TABLE IF NOT EXISTS outbox (
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("messenger: migrate: %w", err)
 	}
+	// Add the attachment column to databases created before it existed.
+	// SQLite has no "ADD COLUMN IF NOT EXISTS", so ignore the duplicate error.
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN file TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("messenger: migrate file column: %w", err)
+	}
 	return nil
 }
 
@@ -121,10 +128,10 @@ func (s *Store) AddMessage(campID string, m Message) error {
 		m.TS = time.Now().UnixMilli()
 	}
 	_, err = db.Exec(
-		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, ts, mine)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), m.TS, b2i(m.Mine))
+		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), encodeFile(m.File), m.TS, b2i(m.Mine))
 	if err != nil {
 		return fmt.Errorf("messenger: add message: %w", err)
 	}
@@ -142,7 +149,7 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 		limit = 200
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
 		   FROM messages
 		  WHERE kind=? AND peer=?
 		  ORDER BY ts DESC, id DESC
@@ -156,12 +163,13 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var members string
+		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
+		m.File = decodeFile(file)
 		m.Mine = mine != 0
 		out = append(out, m)
 	}
@@ -180,7 +188,7 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
 		   FROM messages ORDER BY ts ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("messenger: all messages: %w", err)
@@ -189,12 +197,13 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var members string
+		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
+		m.File = decodeFile(file)
 		m.Mine = mine != 0
 		out = append(out, m)
 	}
@@ -349,4 +358,25 @@ func b2i(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// encodeFile serialises an attachment to JSON for the file column ("" if none).
+func encodeFile(a *Attachment) string {
+	if a == nil {
+		return ""
+	}
+	b, _ := json.Marshal(a)
+	return string(b)
+}
+
+// decodeFile parses a stored attachment ("" → nil).
+func decodeFile(s string) *Attachment {
+	if s == "" {
+		return nil
+	}
+	var a Attachment
+	if json.Unmarshal([]byte(s), &a) != nil {
+		return nil
+	}
+	return &a
 }

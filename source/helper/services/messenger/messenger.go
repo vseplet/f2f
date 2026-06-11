@@ -35,8 +35,26 @@ type Message struct {
 	// Targets names the peers a membership event acted on (added or removed),
 	// so the UI can say WHO — the full roster alone doesn't reveal the delta.
 	Targets []string `json:"targets,omitempty"`
-	TS      int64    `json:"ts"` // unix ms
-	Mine    bool     `json:"mine"`
+	// File is an optional inline attachment (a small photo, clip or document)
+	// riding alongside the text. nil for a plain message.
+	File *Attachment `json:"file,omitempty"`
+	TS   int64       `json:"ts"` // unix ms
+	Mine bool        `json:"mine"`
+}
+
+// MaxAttachment caps an inline attachment's raw size. The bus frame limit is
+// 16 MiB and base64 inflates by ~33%, so this keeps a message well under it;
+// bigger files belong in the file-sharing drop, not chat.
+const MaxAttachment = 8 << 20 // 8 MiB
+
+// Attachment is an inline file carried by a message. Data holds the raw bytes
+// (encoding/json marshals a []byte as a base64 string, so it travels and
+// persists as text without extra work).
+type Attachment struct {
+	Name string `json:"name"`
+	Mime string `json:"mime"`
+	Size int    `json:"size"`
+	Data []byte `json:"data"`
 }
 
 // Channel is a named room. ID is "<owner_pub>/<name>"; Owner and Name are

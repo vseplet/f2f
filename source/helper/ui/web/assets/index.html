@@ -1083,20 +1083,20 @@
                         <span id="chat-title">— chat</span>
                         <button
                             type="button"
-                            id="chat-members"
-                            class="ax-engine-btn ax-chat-call"
-                            title="members"
-                            aria-label="members"
-                            style="display: none"
-                        ><i class="bi bi-people-fill"></i></button>
-                        <button
-                            type="button"
                             id="chat-call"
                             class="ax-engine-btn ax-chat-call"
                             title="call"
                             aria-label="call"
                             style="display: none"
                         ><i class="bi bi-telephone-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-members"
+                            class="ax-engine-btn ax-chat-call"
+                            title="members"
+                            aria-label="members"
+                            style="display: none"
+                        ><i class="bi bi-people-fill"></i></button>
                     </div>
                     <div id="chat-members-panel" class="ax-chat-members hidden"></div>
                     <div id="chat-messages" class="ax-chat-messages"></div>
@@ -1105,9 +1105,10 @@
                             type="button"
                             id="chat-attach"
                             class="ax-engine-btn ax-chat-attach"
-                            title="attach (coming soon)"
+                            title="attach a file (max 8 MiB)"
                             aria-label="attach"
                         ><i class="bi bi-plus-lg"></i></button>
+                        <input id="chat-file" type="file" style="display: none" />
                         <input
                             id="chat-input"
                             type="text"
@@ -1225,6 +1226,10 @@
                             autocomplete="off"
                             spellcheck="false"
                         />
+                        <button type="button" id="ax-notifications-clear"
+                                class="ax-sidebar-toggle"
+                                title="clear all notifications"
+                                aria-label="clear all notifications">⌫</button>
                         <button type="button" id="ax-notifications-toggle"
                                 class="ax-sidebar-toggle"
                                 title="collapse / expand"

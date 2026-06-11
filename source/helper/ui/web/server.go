@@ -120,9 +120,43 @@ func (s *Server) RegisterBus(b *bus.Service) {
 				}
 			}
 		}
+		// A fresh offer is the start of a new p2p call — ring it as a
+		// notification. ICE-restart offers carry no "fresh" flag, so they
+		// don't re-ring an established call.
+		if s.notify != nil && fromPub != "" {
+			var sig struct {
+				Kind  string `json:"kind"`
+				Fresh bool   `json:"fresh"`
+			}
+			if json.Unmarshal(payload, &sig) == nil && sig.Kind == "offer" && sig.Fresh {
+				s.notify.Push(notify.Notification{
+					Kind:  "call",
+					Title: s.peerName(fromPub) + " is calling",
+					From:  fromPub,
+					Route: "chat:dm:" + fromPub,
+				})
+			}
+		}
 		s.signals.broadcast(payload)
 		return nil, nil
 	})
+}
+
+// peerName resolves a peer pub to its display name from the engine roster,
+// falling back to a short fingerprint. Used to title call notifications.
+func (s *Server) peerName(pub string) string {
+	for _, p := range s.engine.Status().Peers {
+		if p.Pub == pub {
+			if p.Name != "" {
+				return p.Name
+			}
+			break
+		}
+	}
+	if len(pub) > 12 {
+		return pub[:12]
+	}
+	return pub
 }
 
 // pubForOverlayIP resolves a peer's overlay v4 to its pub via the
@@ -244,6 +278,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Notifications: recent list + live SSE stream for the UI.
 	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
+	mux.HandleFunc("DELETE /api/notifications", s.handleClearNotifications)
 	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
 
 	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
@@ -413,6 +448,15 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 // handleNotifications returns the buffered notifications (oldest-first).
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.notify.Recent())
+}
+
+// handleClearNotifications drops every notification in the active camp.
+func (s *Server) handleClearNotifications(w http.ResponseWriter, r *http.Request) {
+	if err := s.notify.Clear(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleMesh returns every peer's gossip NodeState — the mesh-wide topology

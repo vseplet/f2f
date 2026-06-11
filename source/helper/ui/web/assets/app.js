@@ -146,7 +146,7 @@ $(function () {
   // render. Real notification service will mint these server-side; for
   // now we generate from the index at module load time.
   // Live notifications from the backend (/api/notifications + SSE). Newest
-  // first. The bus pushes QUIC ping results here; more sources to come.
+  // first. Sources: inbound messages, calls, and peer presence (up/down).
   let notifications = [];
   let selectedNotifId = null;
 
@@ -158,7 +158,6 @@ $(function () {
   function notifAccent(n) {
     const t = (n.title || '').toLowerCase();
     if (/fail|down|denied|blocked|offline|error/.test(t)) return 'warn';
-    if (n.kind === 'ping') return 'ok';
     return ({ message: 'info', call: 'ok', cert: 'warn', peer: 'info', system: 'muted' })[n.kind] || 'info';
   }
   function notifWhen(ts) {
@@ -172,12 +171,13 @@ $(function () {
   }
 
   function renderNotifications() {
+    const banner = notifPermPrompt();
     const q = ($('#ax-notifications-search').val() || '').trim().toLowerCase();
     const items = q
       ? notifications.filter(n => (n.title + ' ' + (n.body || '') + ' ' + notifPeerName(n.from)).toLowerCase().includes(q))
       : notifications;
     if (!items.length) {
-      $('#ax-notifications-list').html(empty('no notifications'));
+      $('#ax-notifications-list').html(banner + empty('no notifications'));
       return;
     }
     const parts = items.map(n => {
@@ -193,8 +193,17 @@ $(function () {
         + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
       + `</div>`;
     });
-    $('#ax-notifications-list').html(parts.join(''));
+    $('#ax-notifications-list').html(banner + parts.join(''));
   }
+  // Clear all — wipes the backend store for the active camp, then the local
+  // list. New notifications keep streaming in over SSE afterwards.
+  $('#ax-notifications-clear').on('click', function () {
+    $.ajax({ url: '/api/notifications', method: 'DELETE' }).always(function () {
+      notifications = [];
+      selectedNotifId = null;
+      renderNotifications();
+    });
+  });
   $('#ax-notifications-search').on('input', renderNotifications);
   $('#ax-notifications-search').on('keydown', function (e) {
     if (e.key === 'Escape') { $(this).val('').trigger('input').blur(); }
@@ -224,6 +233,41 @@ $(function () {
     notifications = (Array.isArray(list) ? list : []).slice().reverse(); // newest-first
     renderNotifications();
   });
+  // Native OS notifications (Web Notifications API). Chrome silently drops a
+  // permission request that isn't tied to a user gesture, so we don't ask on
+  // load — instead notifPermPrompt() renders an "enable" banner the user
+  // clicks (a real gesture), handled below. A toast is only raised when the
+  // tab is hidden; an in-view sidebar already shows the entry.
+  const canNotify = 'Notification' in window;
+  function notifPermPrompt() {
+    if (!canNotify || Notification.permission === 'granted') return '';
+    if (Notification.permission === 'denied') {
+      return `<div class="ax-notif-perm muted">${esc('desktop notifications blocked — allow them in the browser site settings')}</div>`;
+    }
+    return `<div class="ax-notif-perm" id="ax-notif-enable">enable desktop notifications</div>`;
+  }
+  // Gesture-driven permission request (reliable, unlike an on-load ask).
+  $('#ax-notifications-list').on('click', '#ax-notif-enable', function () {
+    if (!canNotify) return;
+    Promise.resolve(Notification.requestPermission()).then(renderNotifications);
+  });
+  function osNotify(n) {
+    if (!canNotify || Notification.permission !== 'granted') return;
+    if (!document.hidden) return; // tab is focused — the sidebar already shows it
+    let note;
+    try {
+      note = new Notification(n.title || 'f2f', {
+        body: n.body || '',
+        tag: 'f2f:' + (n.id || ''), // collapse rapid repeats from the same event
+      });
+    } catch (_) { return; }
+    note.onclick = function () {
+      window.focus();
+      if (n.route) location.hash = n.route;
+      note.close();
+    };
+  }
+
   (function notifStream() {
     let es;
     try { es = new EventSource('/api/notifications/stream'); } catch (_) { return; }
@@ -232,6 +276,7 @@ $(function () {
       notifications.unshift(n);
       if (notifications.length > 200) notifications.length = 200;
       renderNotifications();
+      osNotify(n);
     };
   })();
   setInterval(renderNotifications, 30000); // refresh relative timestamps
@@ -317,10 +362,31 @@ $(function () {
         + `<span class="ax-msg-author">${esc(author)}</span>`
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
       + `</div>`;
+    const text = m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '';
     return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
       + head
-      + `<div class="ax-msg-text">${esc(m.body)}</div>`
+      + attachHtml(m.file)
+      + text
       + `</div>`;
+  }
+
+  // attachHtml renders an inline attachment: images and short clips preview in
+  // place, anything else becomes a download chip. The data URL is built from
+  // the base64 bytes the backend sent on the message.
+  function attachHtml(f) {
+    if (!f || !f.data) return '';
+    const url = 'data:' + (f.mime || 'application/octet-stream') + ';base64,' + f.data;
+    const mime = f.mime || '';
+    if (mime.indexOf('image/') === 0) {
+      return `<a class="ax-msg-attach" href="${url}" target="_blank" rel="noopener">`
+        + `<img class="ax-msg-img" src="${url}" alt="${esc(f.name || 'image')}"></a>`;
+    }
+    if (mime.indexOf('video/') === 0) {
+      return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`;
+    }
+    return `<a class="ax-msg-file" href="${url}" download="${esc(f.name || 'file')}">`
+      + `<i class="bi bi-paperclip"></i> <span>${esc(f.name || 'file')}</span>`
+      + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
   }
 
   function renderChat(msgs) {
@@ -591,6 +657,41 @@ $(function () {
       url: '/api/chat/send', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+  });
+
+  // Attachments: the + button opens a file picker; the chosen file rides
+  // inline (base64) on a message, with the current input text as its caption.
+  // Capped client-side to match the backend's MaxAttachment (8 MiB).
+  const MAX_ATTACH = 8 * 1024 * 1024;
+  $('#chat-attach').on('click', function () {
+    if (chatConv) $('#chat-file').trigger('click');
+  });
+  $('#chat-file').on('change', function () {
+    const file = this.files && this.files[0];
+    this.value = ''; // allow re-picking the same file later
+    if (!file || !chatConv) return;
+    if (file.size > MAX_ATTACH) {
+      alert('file too large: ' + fmtBytes(file.size) + ' (max 8 MiB)');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function () {
+      // readAsDataURL gives "data:<mime>;base64,<payload>" — keep the payload;
+      // Go decodes the []byte field straight from that base64 string.
+      const b64 = String(reader.result).split(',', 2)[1] || '';
+      const $in = $('#chat-input');
+      const caption = $in.val().trim();
+      $in.val('');
+      $.ajax({
+        url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({
+          kind: chatConv.kind, key: chatConv.key, body: caption,
+          file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
+        }),
+      }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+    };
+    reader.onerror = function () { alert('could not read file'); };
+    reader.readAsDataURL(file);
   });
 
   const $btnEngine = $('#btn-engine');
@@ -1038,12 +1139,20 @@ $(function () {
     // its duplicate from the status list.
     const myGroupHost = (activeCall && activeCall.kind === 'group' && window.f2fGroup) ? window.f2fGroup.sfuHost : '';
     let meetRows = '';
+    function channelNameById(cid) {
+      if (!cid) return '';
+      const ch = chatChannels.find(ch => ch.id === cid);
+      return ch ? ch.name : '';
+    }
     for (const c of calls) {
       if (myGroupHost && c.sfu_host === myGroupHost) continue;
-      const owner = peerNameByIP(c.sfu_host) || 'group';
-      const id = c.call_id || c.sfu_host || owner;
+      // A channel-bound call shows its channel name; fall back to the host
+      // peer's name for unbound calls.
+      const chName = channelNameById(c.channel);
+      const title = chName ? '# ' + chName : (peerNameByIP(c.sfu_host) || 'group');
+      const id = c.call_id || c.sfu_host || title;
       const n = (c.participants || []).length;
-      meetRows += row('online', owner, n + ' in · group', null, 'call:group:' + id);
+      meetRows += row('online', title, n + ' in · group', null, 'call:group:' + id);
     }
     // Our current call (p2p or group) — routable + highlightable like chats.
     // No state dot: the in-call pulse pip already marks it.
