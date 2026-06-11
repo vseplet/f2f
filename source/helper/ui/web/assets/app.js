@@ -362,34 +362,71 @@ $(function () {
         + `<span class="ax-msg-author">${esc(author)}</span>`
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
       + `</div>`;
-    const text = m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '';
+    // A previewable attachment (image/video) and its caption share one bubble
+    // so they read as a single message. A non-previewable file is its own
+    // download chip with the caption as a separate text bubble. Plain text is
+    // just the text bubble.
+    const mime = (m.file && m.file.mime) || '';
+    const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
+    const caption = m.body ? `<div class="ax-msg-caption">${esc(m.body)}</div>` : '';
+    let body;
+    if (m.file && previewable) {
+      body = `<div class="ax-msg-media">${attachHtml(m.file)}${caption}</div>`;
+    } else if (m.file) {
+      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '');
+    } else {
+      body = `<div class="ax-msg-text">${esc(m.body)}</div>`;
+    }
     return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
       + head
-      + attachHtml(m.file)
-      + text
+      + body
       + `</div>`;
   }
 
-  // attachHtml renders an inline attachment: images and short clips preview in
-  // place, anything else becomes a download chip. The data URL is built from
-  // the base64 bytes the backend sent on the message.
+  // Object URLs minted for the currently-rendered attachments. Revoked and
+  // rebuilt on every full chat redraw so they don't leak across conversations.
+  let chatBlobUrls = [];
+  function attachUrl(f) {
+    // Decode the base64 the backend sent (Go marshals []byte as std base64)
+    // into a Blob and hand back an object URL. Unlike a data: URL, a blob:
+    // URL can be opened in a new tab, downloaded, and plays reliably in
+    // <video> — data: URLs are blocked for top-frame navigation in Chrome.
+    const bin = atob(f.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }));
+    chatBlobUrls.push(url);
+    return url;
+  }
+
+  // attachHtml renders the attachment element itself (the enclosing .ax-msg-media
+  // bubble in msgRow handles sizing/alignment). Images and clips preview in
+  // place; anything else is a download chip. Built from a blob: URL (see above).
   function attachHtml(f) {
     if (!f || !f.data) return '';
-    const url = 'data:' + (f.mime || 'application/octet-stream') + ';base64,' + f.data;
+    let url;
+    try { url = attachUrl(f); } catch (_) { return ''; }
     const mime = f.mime || '';
+    const name = esc(f.name || 'file');
     if (mime.indexOf('image/') === 0) {
-      return `<a class="ax-msg-attach" href="${url}" target="_blank" rel="noopener">`
-        + `<img class="ax-msg-img" src="${url}" alt="${esc(f.name || 'image')}"></a>`;
+      return `<a href="${url}" target="_blank" rel="noopener" title="${name}">`
+        + `<img class="ax-msg-img" src="${url}" alt="${name}"></a>`;
     }
     if (mime.indexOf('video/') === 0) {
-      return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`;
+      // Always offer a download link too: a codec Chrome can't decode (e.g. an
+      // HEVC .mov) shows no picture, but the file is still saveable.
+      return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`
+        + `<a class="ax-msg-video-dl" href="${url}" download="${name}">⤓ ${name}</a>`;
     }
-    return `<a class="ax-msg-file" href="${url}" download="${esc(f.name || 'file')}">`
-      + `<i class="bi bi-paperclip"></i> <span>${esc(f.name || 'file')}</span>`
+    return `<a class="ax-msg-file" href="${url}" download="${name}">`
+      + `<i class="bi bi-paperclip"></i> <span>${name}</span>`
       + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
   }
 
   function renderChat(msgs) {
+    // A full redraw replaces the DOM wholesale, orphaning the previous blobs.
+    chatBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+    chatBlobUrls = [];
     let html = '', prevFrom = null, prevTs = 0;
     const GROUP_MS = 5 * 60 * 1000; // collapse the header only within 5 minutes
     for (const m of (msgs || [])) {
