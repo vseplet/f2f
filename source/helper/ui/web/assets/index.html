@@ -1120,6 +1120,26 @@
                 </div>
             </div>
             <!-- /#tab-chat -->
+
+            <!-- Channel notes — a shared text document, opened from the notes
+                 icon on a channel row (note:<id>). A clean, full-pane writing
+                 surface; edits auto-save and fan out to channel members. -->
+            <div id="tab-note" class="tab-panel hidden">
+                <div class="ax-frame ax-note">
+                    <div class="ax-section-title ax-note-header">
+                        <span id="note-title">— notes</span>
+                        <span class="ax-meta" id="note-status"></span>
+                    </div>
+                    <textarea
+                        id="note-text"
+                        class="ax-note-text"
+                        spellcheck="false"
+                        placeholder="shared notes — editable by any member…"
+                    ></textarea>
+                </div>
+            </div>
+            <!-- /#tab-note -->
+
             <!-- Remote terminal (services/shell over the bus), rendered in the
                  main column like the other tabs. Opened from the sidebar
                  "machines" rows (term.js). -->

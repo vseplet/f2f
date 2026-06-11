@@ -95,7 +95,10 @@ CREATE TABLE IF NOT EXISTS channels (
   name       TEXT    NOT NULL DEFAULT '',
   owner      TEXT    NOT NULL DEFAULT '',
   members    TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  notes      TEXT    NOT NULL DEFAULT '', -- shared doc body
+  notes_ts   INTEGER NOT NULL DEFAULT 0,  -- unix ms of the winning edit
+  notes_by   TEXT    NOT NULL DEFAULT ''  -- author pub of the winning edit
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
@@ -104,6 +107,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   payload   TEXT    NOT NULL,            -- full wire JSON, resent verbatim
   ts        INTEGER NOT NULL,            -- unix ms enqueued, for pruning
   PRIMARY KEY (msg_id, recipient)
+);
+
+CREATE TABLE IF NOT EXISTS conv_notes (
+  scope  TEXT    NOT NULL PRIMARY KEY,   -- channel id, or peer pub for a DM
+  body   TEXT    NOT NULL DEFAULT '',    -- shared doc body
+  ts     INTEGER NOT NULL DEFAULT 0,     -- unix ms of the winning edit
+  author TEXT    NOT NULL DEFAULT ''     -- pub of the winning edit's author
 );`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("messenger: migrate: %w", err)
@@ -113,6 +123,25 @@ CREATE TABLE IF NOT EXISTS outbox (
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN file TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("messenger: migrate file column: %w", err)
+	}
+	// Notes once hung off the channels table; they now live in conv_notes
+	// (so DMs can carry notes too). Ensure the old columns exist, then seed
+	// conv_notes from any channel notes written before the move. The seed is
+	// idempotent (ON CONFLICT DO NOTHING) — it never clobbers a newer edit.
+	for _, col := range []string{
+		`ALTER TABLE channels ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN notes_ts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN notes_by TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("messenger: migrate notes columns: %w", err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO conv_notes(scope, body, ts, author)
+		 SELECT id, notes, notes_ts, notes_by FROM channels WHERE notes != ''
+		 ON CONFLICT(scope) DO NOTHING`); err != nil {
+		return fmt.Errorf("messenger: seed conv_notes: %w", err)
 	}
 	return nil
 }
@@ -266,6 +295,48 @@ func (s *Store) Channels(campID string) ([]Channel, error) {
 		}
 		c.Members = parseArr(members)
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UpsertNote writes a conversation's shared notes doc (best-effort; the caller
+// has already applied last-writer-wins in memory).
+func (s *Store) UpsertNote(campID string, d NoteDoc) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	if d.Scope == "" {
+		return errors.New("messenger: note scope required")
+	}
+	_, err = db.Exec(
+		`INSERT INTO conv_notes(scope, body, ts, author) VALUES(?,?,?,?)
+		 ON CONFLICT(scope) DO UPDATE SET body=excluded.body, ts=excluded.ts, author=excluded.author`,
+		d.Scope, d.Body, d.TS, d.By)
+	if err != nil {
+		return fmt.Errorf("messenger: upsert note: %w", err)
+	}
+	return nil
+}
+
+// Notes loads every conversation's shared notes doc for campID.
+func (s *Store) Notes(campID string) ([]NoteDoc, error) {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT scope, body, ts, author FROM conv_notes`)
+	if err != nil {
+		return nil, fmt.Errorf("messenger: notes: %w", err)
+	}
+	defer rows.Close()
+	var out []NoteDoc
+	for rows.Next() {
+		var d NoteDoc
+		if err := rows.Scan(&d.Scope, &d.Body, &d.TS, &d.By); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

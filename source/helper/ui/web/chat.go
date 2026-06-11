@@ -98,6 +98,43 @@ func (s *Server) handleChatLeaveChannel(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleChatGetNotes returns a conversation's shared notes doc.
+// Query: key=<channel id | peer pub>.
+func (s *Server) handleChatGetNotes(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.msg.Notes(key))
+}
+
+// handleChatNotes sets a conversation's shared notes document. Body:
+// {key, body} where key is a channel id or a peer pub (a DM is a channel too).
+// Any participant may edit; the write fans out to the conversation and
+// converges last-writer-wins.
+func (s *Server) handleChatNotes(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key  string `json:"key"`
+		Body string `json:"body"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // notes are text — 1 MiB is plenty
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
+		return
+	}
+	doc, err := s.msg.SetNotes(req.Key, req.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
 // handleChatMessages returns recent messages for a conversation.
 // Query: kind=dm|channel, key=<peer pub | channel id>, limit=<n>.
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {

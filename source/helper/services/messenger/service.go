@@ -42,6 +42,7 @@ const (
 	TypeLeave     = "leave"  // a member left — the owner ratifies with a remove
 	TypeCallStart = "call_start"
 	TypeCallEnd   = "call_end"
+	TypeNotes     = "notes" // shared-doc edit — mutates channel state, not feed
 )
 
 // busAPI is the slice of bus.Service the messenger uses — an interface so
@@ -64,6 +65,7 @@ type Service struct {
 	mu       sync.Mutex
 	channels map[string]*Channel  // id → materialised channel (fold of its messages)
 	convs    map[string][]Message // conversation key → ring buffer
+	notes    map[string]NoteDoc   // conversation scope → shared notes doc
 	seen     map[string]struct{}  // message IDs already accepted, for dedup
 
 	subMu sync.Mutex
@@ -83,6 +85,7 @@ func NewService(b *bus.Service, selfFn func() string, store *Store, campFn func(
 		peers:    peersFn,
 		channels: map[string]*Channel{},
 		convs:    map[string][]Message{},
+		notes:    map[string]NoteDoc{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
 	}
@@ -112,10 +115,15 @@ func (s *Service) LoadCamp() {
 	camp := s.camp()
 	chans, _ := s.store.Channels(camp)
 	msgs, _ := s.store.AllMessages(camp)
+	docs, _ := s.store.Notes(camp)
 	selfPub := s.self()
 	s.mu.Lock()
 	s.channels = map[string]*Channel{}
 	s.convs = map[string][]Message{}
+	s.notes = map[string]NoteDoc{}
+	for _, d := range docs {
+		s.notes[d.Scope] = d
+	}
 	s.seen = map[string]struct{}{}
 	for i := range chans {
 		c := chans[i]
@@ -161,12 +169,28 @@ func (s *Service) IsMember(scope, pub string) bool {
 }
 
 // SplitChannelID splits a channel ID ("<owner_pub>/<name>") into its owner
-// pub and name. Returns ("","") if it isn't a channel ID.
+// pub and name. The owner pub never contains "/", so the split is on the
+// FIRST slash — anything after it is the name, slashes included (hierarchy).
 func SplitChannelID(id string) (owner, name string) {
 	if i := strings.IndexByte(id, '/'); i > 0 {
 		return id[:i], id[i+1:]
 	}
 	return "", ""
+}
+
+// validChannelName accepts a slash-separated path of non-empty, space-free
+// segments ("dev", "dev/backend") — the "/" is the hierarchy separator. No
+// leading/trailing slash, no empty or whitespace segments.
+func validChannelName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || strings.ContainsAny(seg, " \t") {
+			return false
+		}
+	}
+	return true
 }
 
 // --- inbound ---
@@ -184,6 +208,13 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	go s.flush(fromPub)
 	if m.ID == "" || !s.markSeen(m.ID) {
 		return nil, nil // duplicate (retransmit / future relay) or id-less — drop
+	}
+	// A notes edit (channel OR dm) mutates the conversation's shared doc, not
+	// its feed — fold it in last-writer-wins and let UIs refresh.
+	if m.Type == TypeNotes {
+		s.applyNotes(m, selfPub)
+		s.publish(m)
+		return nil, nil
 	}
 	// Control events aren't conversation content — they mutate channel state
 	// and are not stored as messages.
@@ -293,6 +324,85 @@ func (s *Service) reconcileChannel(m Message, selfPub string) {
 	cp := *existing
 	s.mu.Unlock()
 	s.persistChannel(&cp)
+}
+
+// applyNotes folds a notes edit into the conversation's shared doc, keyed by
+// the LOCAL scope (channel id, or the other peer's pub for a DM — exactly how
+// convKey keys messages). Edits converge last-writer-wins, ordered by (TS, By)
+// so every node picks the same winner.
+func (s *Service) applyNotes(m Message, selfPub string) {
+	scope := convKey(m, selfPub)
+	if scope == "" {
+		return
+	}
+	s.mu.Lock()
+	cur := s.notes[scope]
+	if m.TS < cur.TS || (m.TS == cur.TS && m.From <= cur.By) {
+		s.mu.Unlock() // a stale (or already-applied) edit — ignore
+		return
+	}
+	doc := NoteDoc{Scope: scope, Body: m.Body, TS: m.TS, By: m.From}
+	s.notes[scope] = doc
+	s.mu.Unlock()
+	if s.store != nil {
+		if err := s.store.UpsertNote(s.camp(), doc); err != nil {
+			clog.Debug("chat", "persist note: %v", err)
+		}
+	}
+}
+
+// Notes returns the shared doc for a conversation scope (channel id or, for a
+// DM, the peer's pub). Zero value (empty body) if none yet.
+func (s *Service) Notes(scope string) NoteDoc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.notes[scope]
+	d.Scope = scope
+	return d
+}
+
+// SetNotes replaces a conversation's shared doc with body and fans the edit to
+// the other participants: a channel's members, or — for a DM — the peer. Any
+// participant may call it (notes are collaborative); the write converges last-
+// writer-wins (see applyNotes). scope is a channel id or a peer pub.
+func (s *Service) SetNotes(scope, body string) (NoteDoc, error) {
+	selfPub := s.self()
+	if selfPub == "" {
+		return NoteDoc{}, fmt.Errorf("chat: no identity")
+	}
+	var (
+		m      Message
+		roster []string
+	)
+	switch {
+	case isGeneral(scope):
+		roster = s.generalRoster()
+		m = Message{Kind: "channel", Peer: scope, Members: roster}
+	case strings.Contains(scope, "/"): // channel id
+		s.mu.Lock()
+		ch := s.channels[scope]
+		s.mu.Unlock()
+		if ch == nil {
+			return NoteDoc{}, fmt.Errorf("chat: unknown channel %q", scope)
+		}
+		roster = append([]string(nil), ch.Members...)
+		m = Message{Kind: "channel", Peer: scope, Members: roster}
+	default: // a DM — scope is the peer's pub
+		roster = []string{scope}
+		m = Message{Kind: "dm", Peer: scope, To: scope}
+	}
+	m.ID, m.Type, m.From, m.Body, m.TS = newID(), TypeNotes, selfPub, body, nowMs()
+	s.markSeen(m.ID) // our own copy is authoritative; ignore any echo
+	s.applyNotes(m, selfPub)
+	s.publish(m) // refresh our own UI (carries the new notes)
+	wire := mustJSON(m)
+	for _, pub := range roster {
+		if pub == selfPub || pub == "" {
+			continue
+		}
+		go s.deliver(m.ID, pub, wire)
+	}
+	return s.Notes(scope), nil
 }
 
 // --- delivery ---
@@ -431,7 +541,7 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 	if selfPub == "" {
 		return Channel{}, fmt.Errorf("chat: no identity")
 	}
-	if name == "" || strings.ContainsAny(name, "/ ") {
+	if !validChannelName(name) {
 		return Channel{}, fmt.Errorf("chat: bad channel name %q", name)
 	}
 	id := selfPub + "/" + name

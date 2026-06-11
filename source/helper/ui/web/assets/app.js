@@ -287,6 +287,18 @@ $(function () {
     $(this).toggleClass('collapsed');
   });
 
+  // Channel sub-tree collapse — the caret is a separate control: it toggles
+  // the node's children and does NOT open the channel (stopPropagation keeps
+  // the row's data-route handler from firing).
+  $('#ax-tree').on('click', '.ax-chan-caret', function (e) {
+    e.stopPropagation();
+    toggleChanPath($(this).attr('data-chan-path'));
+  });
+  // A virtual folder routes nowhere, so clicking its body toggles it too.
+  $('#ax-tree').on('click', '.ax-tree-row.ax-tree-folder', function () {
+    toggleChanPath($(this).attr('data-chan-path'));
+  });
+
   // Rows carrying data-url (e.g. domains) open their target in a new tab.
   $('#ax-tree').on('click', '.ax-tree-row[data-url]', function () {
     const url = $(this).attr('data-url');
@@ -315,6 +327,16 @@ $(function () {
 
   // --- messaging (services/messenger over the bus) ---
   const GENERAL_ID = '*/general'; // camp-wide channel everyone is in (no leave)
+  // URL routes: a conversation is "channel:<key>" — there's no separate "dm:"
+  // because a DM is just the degenerate channel. The key's SHAPE tells them
+  // apart: a bare peer pub is a DM, while "general" or an "<owner>/<name>" id
+  // is a room. Notes are "note:<id>". general's ownerless "*/general" id is
+  // shown in the URL as the clean "general" alias ("*/" is plumbing).
+  function convKey(id) { return id === GENERAL_ID ? 'general' : id; }
+  function convRoute(id) { return 'channel:' + convKey(id); }
+  function noteRoute(id) { return 'note:' + convKey(id); }
+  // convKind infers a conversation's kind from a (de-aliased) key.
+  function convKind(key) { return (key === GENERAL_ID || key.includes('/')) ? 'channel' : 'dm'; }
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
@@ -490,6 +512,10 @@ $(function () {
       chatChannels = Array.isArray(list) ? list : [];
       if (lastStatus && typeof renderSidebarTree === 'function') renderSidebarTree(lastStatus);
       if (!$('#chat-members-panel').hasClass('hidden')) renderMembersPanel();
+      // Refresh the open notes editor — renderNote keeps unsaved edits (so
+      // this fills the editor on first paint after a reload, once the list
+      // arrives, and reflects remote edits otherwise).
+      if (noteConv && !$('#tab-note').hasClass('hidden')) renderNote();
     });
   }
 
@@ -549,6 +575,92 @@ $(function () {
   $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/chat/channels/delete', 'delete'));
   $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/chat/channels/leave', 'leave'));
 
+  // --- channel notes (the shared doc, opened in the main pane) ---
+  //
+  // A conversation's notes open as their own main-window view (note:<scope>),
+  // not a dropdown — a clean full-pane editor (whitepaper-style). A DM is a
+  // channel too, so DMs carry notes as well; the doc is fetched/saved by scope
+  // (channel id or peer pub). Edits debounce-save (last-writer-wins).
+  let noteConv = null;       // scope of the open note, or null
+  let noteSaveTimer = null;
+  let noteDirty = false;     // unsaved local edits — guards against clobbering
+  let noteDoc = null;        // last doc from the server: {scope, body, ts, by}
+
+  // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
+  // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
+  function noteTitle(scope) {
+    if (scope === GENERAL_ID || scope.includes('/')) {
+      const ch = chatChannels.find((c) => c.id === scope);
+      return '# ' + ((ch && ch.name) || scope.split('/').pop()) + ' · notes';
+    }
+    return nameForPub(scope) + ' · notes';
+  }
+
+  function openNote(scope) {
+    noteConv = scope;
+    noteDirty = false;
+    noteDoc = null;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-note').removeClass('hidden');
+    $('#note-title').text(noteTitle(scope));
+    $('#note-status').text('loading…');
+    $('#note-text').val('');
+    fetchNote(scope);
+    setTimeout(() => $('#note-text').focus(), 0);
+  }
+
+  // fetchNote loads the doc for a scope from the backend, then paints it.
+  function fetchNote(scope) {
+    $.getJSON('/api/chat/notes?key=' + encodeURIComponent(scope), (doc) => {
+      if (noteConv !== scope) return; // navigated away mid-flight
+      noteDoc = doc || {};
+      renderNote();
+    }).fail(() => { if (noteConv === scope) $('#note-status').text('load failed'); });
+  }
+
+  // renderNote paints the editor from the fetched doc. It mirrors the server
+  // copy UNLESS there are unsaved local edits — so it reflects remote edits
+  // without ever eating what you're typing.
+  function renderNote() {
+    if (!noteConv) return;
+    $('#note-title').text(noteTitle(noteConv));
+    $('#note-status').text(noteDoc && noteDoc.by ? 'last edit · ' + nameForPub(noteDoc.by) : '');
+    if (!noteDirty) $('#note-text').val((noteDoc && noteDoc.body) || '');
+  }
+
+  function saveNote(scope, body) {
+    $('#note-status').text('saving…');
+    $.ajax({
+      url: '/api/chat/notes', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ key: scope, body }),
+    }).done((doc) => {
+      if (noteConv !== scope) return;
+      noteDoc = doc || noteDoc;
+      // Clear dirty only if no edit happened during the request (the textarea
+      // still holds exactly what we sent) — otherwise a newer edit is pending.
+      if ($('#note-text').val() === body) noteDirty = false;
+      $('#note-status').text('saved');
+    }).fail((xhr) => { if (noteConv === scope) $('#note-status').text('save failed: ' + errorOf(xhr)); });
+  }
+
+  // Debounced auto-save on every edit (whitepaper-style — no save button).
+  $('#note-text').on('input', function () {
+    if (!noteConv) return;
+    noteDirty = true;
+    const body = $(this).val();
+    $('#note-status').text('editing…');
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = setTimeout(() => saveNote(noteConv, body), 600);
+  });
+
+  // Open a channel's notes from the hover icon on its sidebar row.
+  $('#ax-tree').on('click', '.ax-tree-note', function (e) {
+    e.stopPropagation();
+    const id = $(this).attr('data-note');
+    if (id) location.hash = noteRoute(id);
+  });
+
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
     const $p = $('#chat-members-panel');
@@ -583,6 +695,13 @@ $(function () {
       // A channel lifecycle event may have created/changed/removed a channel
       // — refresh the list so it (dis)appears.
       if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
+      // A notes edit mutates the conversation's shared doc, not the feed:
+      // re-fetch if its scope is the one we're viewing, and never render it as
+      // a chat line. (key, computed above, is the conversation scope.)
+      if (m.type === 'notes') {
+        if (noteConv && noteConv === key && !$('#tab-note').hasClass('hidden')) fetchNote(noteConv);
+        return;
+      }
       // The open channel was deleted (or we left) → close the view.
       if ((m.type === 'delete' || m.type === 'leave')
           && chatConv && chatConv.kind === 'channel' && chatConv.key === m.peer) {
@@ -607,9 +726,9 @@ $(function () {
   openChatStream();
   fetchChannels();
 
-  // Hash router. Currently handles chat routes (chat:channel:<id> /
-  // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
-  // keeps working.
+  // Hash router. Handles conversation routes (channel:<key>, where a bare pub
+  // key is a DM), notes (note:<id>), and resource tabs (peer:/tunnel:/…);
+  // unknown hashes are ignored so normal tab switching keeps working.
   function activateTab(tab) {
     $('.ax-tab').removeClass('ax-tab-active');
     $('.ax-tab[data-tab="' + tab + '"]').addClass('ax-tab-active');
@@ -641,11 +760,11 @@ $(function () {
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
-    // "+ channel" → prompt for a name, create EMPTY (just us), open it and
+    // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
-    if (h === 'chat:new') {
-      const name = (prompt('channel name') || '').trim();
+    if (h === 'channel:new') {
+      const name = (prompt('channel name (use / for hierarchy, e.g. dev/backend)') || '').trim();
       if (name) {
         $.ajax({
           url: '/api/chat/channels', method: 'POST', contentType: 'application/json',
@@ -653,7 +772,7 @@ $(function () {
         }).done((ch) => {
           fetchChannels();
           if (ch && ch.id) {
-            location.hash = 'chat:channel:' + ch.id;
+            location.hash = convRoute(ch.id);
             setTimeout(renderMembersPanel, 0); // open the panel to add members
           }
         }).fail((xhr) => alert('create channel: ' + errorOf(xhr)));
@@ -661,9 +780,26 @@ $(function () {
       location.hash = '';
       return;
     }
-    const m = h.match(/^chat:(channel|dm):(.+)$/);
+    // note:<id> → open the channel's shared notes in the main pane.
+    const nm = h.match(/^note:(.+)$/);
+    if (nm) {
+      let key = nm[1];
+      if (key === GENERAL_ID) { location.hash = noteRoute(GENERAL_ID); return; }
+      if (key === 'general') key = GENERAL_ID;
+      openNote(key);
+      return;
+    }
+    // A conversation: channel:<key>. Everything is a channel — a DM is the
+    // degenerate one, keyed by the peer's pub; convKind() tells them apart by
+    // the key's shape. general's clean "general" alias ↔ its internal
+    // "*/general" id; a raw "*/general" in the hash (e.g. a notification deep-
+    // link) is rewritten to the alias so URL + sidebar highlight stay in sync.
+    const m = h.match(/^channel:(.+)$/);
     if (!m) return;
-    const [, kind, key] = m;
+    let key = m[1];
+    if (key === GENERAL_ID) { location.hash = convRoute(GENERAL_ID); return; }
+    if (key === 'general') key = GENERAL_ID;
+    const kind = convKind(key);
     chatConv = { kind, key };
     chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
     $('.ax-tab').removeClass('ax-tab-active');
@@ -680,7 +816,11 @@ $(function () {
   // so the user can see where they are. Re-run after every tree rebuild
   // (the sidebar is regenerated from status each tick).
   function highlightActiveRoute() {
-    const route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    let route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // A note view keeps its channel's row highlighted — map note:<id> to the
+    // channel's own route so the row matches.
+    const noteM = route.match(/^note:(.+)$/);
+    if (noteM) route = 'channel:' + noteM[1];
     // An ongoing call stays flagged in the sidebar even when we navigate
     // away to a chat. Mark both its meet row and the peer's DM row.
     const a = window.f2fCall && window.f2fCall.active;
@@ -689,7 +829,7 @@ $(function () {
       // dm routes are keyed by pub (display name lives in a.id/a.title).
       const key = a.kind === 'dm' ? (a.pub || a.id) : a.id;
       callRoutes.push('call:' + (a.kind === 'dm' ? 'dm' : a.kind) + ':' + key);
-      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + key : 'chat:channel:' + a.id);
+      callRoutes.push(convRoute(a.kind === 'dm' ? key : a.id));
     }
     $('#ax-tree .ax-tree-row').each(function () {
       const r = $(this).attr('data-route');
@@ -1097,6 +1237,22 @@ $(function () {
   }
   let collapsedCats = loadCollapsed();
 
+  // Channel sub-tree collapse — independent of category collapse, keyed by the
+  // channel's name path ("dev", "dev/backend") so it survives re-renders.
+  const CHAN_COLLAPSED_KEY = 'f2f:channels-collapsed';
+  function loadCollapsedChans() {
+    try { return new Set(JSON.parse(localStorage.getItem(CHAN_COLLAPSED_KEY) || '[]')); }
+    catch (_) { return new Set(); }
+  }
+  let collapsedChans = loadCollapsedChans();
+  function toggleChanPath(path) {
+    if (!path) return;
+    if (collapsedChans.has(path)) collapsedChans.delete(path);
+    else collapsedChans.add(path);
+    try { localStorage.setItem(CHAN_COLLAPSED_KEY, JSON.stringify([...collapsedChans])); } catch (_) {}
+    if (lastStatus) renderSidebarTree(lastStatus);
+  }
+
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1322,27 +1478,102 @@ $(function () {
           const tags = [];
           if (inCall) tags.push('● in call');
           if (chatUnread[p.pub]) tags.push(`${chatUnread[p.pub]} new`);
-          return row(null, name, tags.join(' · '), null, 'chat:dm:' + p.pub);
+          // A DM is a channel too → same hover notes affordance as a channel.
+          const note = `<button class="ax-tree-note" data-note="${esc(p.pub)}" title="open notes" aria-label="notes"><i class="bi bi-journal-text"></i></button>`;
+          const meta = tags.join(' · ');
+          return `<div class="ax-tree-row" data-route="${esc(convRoute(p.pub))}" title="${esc(name)}">`
+            + `<span class="ax-tree-label">${esc(name)}</span>`
+            + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
+            + note
+            + `</div>`;
         }).join('')
       : empty('no peers');
 
-    // CHANNELS = the rooms we belong to (from /api/chat/channels). Member
-    // count and unread ride in the meta column.
-    const groupsBody = (chatChannels.length
-      ? chatChannels.slice().sort((a, b) => {
-          // general is the camp-wide channel — pin it to the top.
-          if (a.id === GENERAL_ID) return -1;
-          if (b.id === GENERAL_ID) return 1;
-          return a.name.localeCompare(b.name);
-        }).map(ch => {
-          const tags = [`${(ch.members || []).length} members`];
-          if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
-          // Our group call is bound to a channel id — surface it on the row.
-          if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
-          return row(null, '# ' + ch.name, tags.join(' · '), null, 'chat:channel:' + ch.id);
-        }).join('')
-      : empty('no groups'))
-      + addRow('+ channel', 'chat:new');
+    // CHANNELS = the rooms we belong to (from /api/chat/channels). A name may
+    // carry a "/" path ("dev/backend") which folds into a tree: each segment
+    // nests under the channel — or a virtual folder — named by the prefix
+    // above it. general (the camp-wide room) is pinned to the top, outside
+    // the tree. Only unread / live-call markers ride in the meta column —
+    // the member count was noise.
+    function channelMeta(ch) {
+      const tags = [];
+      if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
+      // Our group call is bound to a channel id — surface it on the row.
+      if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
+      return tags.join(' · ');
+    }
+    function treeIndent(depth) {
+      return depth > 0 ? ` style="padding-left:${5 + depth * 13}px"` : '';
+    }
+    // A node with children opens with a caret that toggles its sub-tree; a
+    // leaf gets a same-width spacer so labels line up. The caret is a SEPARATE
+    // control from the row body — clicking the channel name still opens it,
+    // only the caret collapses. path identifies the node for persisted state.
+    function nodeCaret(path, hasKids) {
+      if (!hasKids) return `<span class="ax-chan-spacer"></span>`;
+      return `<span class="ax-tree-caret ax-chan-caret" data-chan-path="${esc(path)}">▾</span>`;
+    }
+    function channelRow(ch, depth, path, hasKids, collapsed) {
+      const leaf = ((ch.name || ch.id).split('/').pop()) || ch.id;
+      const meta = channelMeta(ch);
+      // A notes affordance revealed on row hover (Zed-style) — opens the
+      // channel's shared doc in the main pane without opening the chat.
+      const note = `<button class="ax-tree-note" data-note="${esc(ch.id)}" title="open notes" aria-label="notes"><i class="bi bi-journal-text"></i></button>`;
+      return `<div class="ax-tree-row${collapsed ? ' collapsed' : ''}" data-route="${esc(convRoute(ch.id))}"${treeIndent(depth)} title="${esc(ch.name || ch.id)}">`
+        + nodeCaret(path, hasKids)
+        + `<span class="ax-tree-label"># ${esc(leaf)}</span>`
+        + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
+        + note
+        + `</div>`;
+    }
+    function folderRow(seg, depth, path, collapsed) {
+      // A path prefix with no channel of its own — clicking it (or its caret)
+      // just toggles the sub-tree; it routes nowhere.
+      return `<div class="ax-tree-row ax-tree-folder${collapsed ? ' collapsed' : ''}" data-chan-path="${esc(path)}"${treeIndent(depth)} title="${esc(seg)}">`
+        + nodeCaret(path, true)
+        + `<span class="ax-tree-label">${esc(seg)}/</span></div>`;
+    }
+    function buildChannelTree(chans) {
+      const root = { kids: {}, order: [] };
+      for (const ch of chans) {
+        const parts = ((ch.name || ch.id.split('/').pop()) || '').split('/').filter(Boolean);
+        let node = root;
+        parts.forEach((seg, i) => {
+          if (!node.kids[seg]) { node.kids[seg] = { kids: {}, order: [], ch: null }; node.order.push(seg); }
+          node = node.kids[seg];
+          if (i === parts.length - 1) node.ch = ch;
+        });
+      }
+      return root;
+    }
+    function renderChannelTree() {
+      const tree = buildChannelTree(chatChannels.filter(c => c.id !== GENERAL_ID));
+      let html = '';
+      const gen = chatChannels.find(c => c.id === GENERAL_ID);
+      if (gen) html += channelRow(gen, 0, '', false, false); // general pinned to the top
+      // Each node renders its row, then its children wrapped in a collapsible
+      // block (.ax-chan-children, hidden when the row carries .collapsed).
+      (function walk(node, depth, prefix) {
+        node.order.sort((a, b) => a.localeCompare(b));
+        for (const seg of node.order) {
+          const kid = node.kids[seg];
+          const path = prefix ? prefix + '/' + seg : seg;
+          const hasKids = kid.order.length > 0;
+          const collapsed = hasKids && collapsedChans.has(path);
+          html += kid.ch
+            ? channelRow(kid.ch, depth, path, hasKids, collapsed)
+            : folderRow(seg, depth, path, collapsed);
+          if (hasKids) {
+            html += `<div class="ax-chan-children">`;
+            walk(kid, depth + 1, path);
+            html += `</div>`;
+          }
+        }
+      })(tree, 0, '');
+      return html;
+    }
+    const groupsBody = (chatChannels.length ? renderChannelTree() : empty('no groups'))
+      + addRow('+ channel', 'channel:new');
 
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
@@ -1442,12 +1673,12 @@ $(function () {
     const q = sidebarQuery.trim().toLowerCase();
     const $tree = $('#ax-tree');
     if (!q) {
-      $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+      $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-chan-children, .ax-tree-section, .ax-tree-empty')
         .css('display', '');
       return;
     }
     // Hide everything first.
-    $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+    $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-chan-children, .ax-tree-section, .ax-tree-empty')
       .css('display', 'none');
     // Leaf rows that match show themselves.
     $tree.find('.ax-tree-row').each(function () {
@@ -1455,6 +1686,21 @@ $(function () {
         $(this).css('display', '');
       }
     });
+    // Reveal channel sub-trees that contain a match: deepest-first so the
+    // chain of parents up to the top cascades visible. Expand any collapsed
+    // node for the search duration (not persisted — the next render restores
+    // it from collapsedChans).
+    const allChanChildren = $tree.find('.ax-chan-children').toArray().reverse();
+    for (const cc of allChanChildren) {
+      const $cc = $(cc);
+      const hasVisible = $cc.children().filter(function () {
+        return $(this).css('display') !== 'none';
+      }).length > 0;
+      if (hasVisible) {
+        $cc.css('display', '');
+        $cc.prev('.ax-tree-row').css('display', '').removeClass('collapsed');
+      }
+    }
     // Walk each .ax-tree-children: if any descendant is visible OR the
     // owning category's label matches, the children block + its
     // category header become visible. Iterate deepest-first so parent

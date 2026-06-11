@@ -446,6 +446,29 @@
 .ax-tree-remove:hover {
     color: var(--danger, #e0686e);
 }
+/* Notes affordance on a channel row — a Zed-style icon revealed on hover,
+   opening the channel's shared doc. Hidden until the row is hovered so it
+   doesn't clutter the list. */
+.ax-tree-note {
+    flex: 0 0 auto;
+    margin-left: 2px;
+    padding: 0 4px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s, color 0.1s;
+}
+.ax-tree-row:hover .ax-tree-note {
+    opacity: 0.75;
+}
+.ax-tree-note:hover {
+    opacity: 1;
+    color: var(--accent);
+}
 .ax-tree-children {
     margin-left: 8px;
     margin-top: 2px;
@@ -453,6 +476,34 @@
 }
 .ax-tree-category.collapsed + .ax-tree-children {
     display: none;
+}
+/* Channel sub-tree wrapper. Indentation is carried by each row's inline
+   padding (by depth), so the wrapper itself adds no margin. A collapsed
+   parent row hides the block that immediately follows it. */
+.ax-chan-children {
+    margin: 0;
+}
+.ax-tree-row.collapsed + .ax-chan-children {
+    display: none;
+}
+/* The channel caret is a clickable control of its own (unlike the category
+   caret, which is part of the whole-row toggle). */
+.ax-chan-caret {
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.ax-chan-caret:hover {
+    color: var(--accent);
+}
+.ax-tree-row.collapsed .ax-chan-caret {
+    transform: rotate(-90deg);
+}
+/* Leaf rows: a spacer the width of a caret so labels align under their
+   siblings that do have a caret. */
+.ax-chan-spacer {
+    display: inline-block;
+    width: 10px;
+    flex: 0 0 auto;
 }
 .ax-tree-row {
     display: flex;
@@ -501,6 +552,16 @@
 }
 .ax-tree-row.ax-tree-add:hover {
     color: var(--accent);
+}
+/* A virtual channel folder — a name prefix ("dev/") with no channel of its
+   own, grouping the sub-channels nested beneath it. Not clickable. */
+.ax-tree-row.ax-tree-folder {
+    cursor: default;
+    color: var(--muted);
+}
+.ax-tree-row.ax-tree-folder:hover {
+    color: var(--muted);
+    background: none;
 }
 .ax-tree-row:hover {
     color: var(--text);
@@ -2518,6 +2579,42 @@ a.ax-domain-link:hover {
 }
 .ax-chat-danger:hover {
     background: color-mix(in srgb, var(--danger, #e0686e) 12%, transparent);
+}
+/* Channel notes editor — a clean, full-pane writing surface (whitepaper-
+   style): borderless textarea, transparent background, roomy line-height,
+   auto-saved. Lives in its own main-window tab (#tab-note). */
+.ax-frame.ax-note {
+    display: flex;
+    flex-direction: column;
+}
+.ax-note-header #note-title {
+    flex: 1;
+}
+.ax-note-header #note-status {
+    color: var(--muted);
+    font-size: 11px;
+}
+.ax-note-text {
+    flex: 1;
+    width: 100%;
+    box-sizing: border-box;
+    resize: none;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    padding: 16px 18px;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+    font-size: 14px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    overflow: hidden auto;
+    -webkit-font-smoothing: antialiased;
+}
+.ax-note-text::placeholder {
+    color: var(--muted);
 }
 .ax-chat-input {
     display: flex;

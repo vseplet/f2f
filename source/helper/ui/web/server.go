@@ -133,7 +133,7 @@ func (s *Server) RegisterBus(b *bus.Service) {
 					Kind:  "call",
 					Title: s.peerName(fromPub) + " is calling",
 					From:  fromPub,
-					Route: "chat:dm:" + fromPub,
+					Route: "channel:" + fromPub, // a DM is the degenerate channel
 				})
 			}
 		}
@@ -220,6 +220,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/channels/delete", s.handleChatDeleteChannel)
 	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
 	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
+	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
 	mux.HandleFunc("POST /api/chat/share", s.handleChatShare)
 	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)

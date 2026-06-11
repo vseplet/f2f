@@ -63,10 +63,24 @@ type Attachment struct {
 
 // Channel is a named room. ID is "<owner_pub>/<name>"; Owner and Name are
 // also derivable from it (see SplitChannelID) but kept explicit for clarity.
+// A "/" inside Name denotes hierarchy ("dev/backend" nests under "dev") — a
+// pure display convention the UI folds into a tree; the wire model is flat.
 type Channel struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Owner     string   `json:"owner"`
 	Members   []string `json:"members"`
 	CreatedAt int64    `json:"created_at"` // unix ms
+}
+
+// NoteDoc is a conversation's shared text document. It hangs off the
+// conversation SCOPE (a channel id, or — for a DM — the other peer's pub),
+// not the Channel, so every conversation can carry notes including DMs. Any
+// participant may edit it; edits converge last-writer-wins by (TS, By) and
+// ride the bus as a "notes" message, separate from the chat feed.
+type NoteDoc struct {
+	Scope string `json:"scope"`
+	Body  string `json:"body"`
+	TS    int64  `json:"ts"` // unix ms of the winning edit
+	By    string `json:"by"` // pub of the winning edit's author
 }
