@@ -20,6 +20,14 @@ import (
 // there's nothing else to send: a channel is the fold of its messages.
 const typeMsg = "chat.msg"
 
+// GeneralChannelID is the reserved id of the camp-wide "general" channel every
+// peer implicitly belongs to. The "*" owner marks it ownerless: no single peer
+// controls its roster (which is the live camp membership), and it can't be
+// created, deleted or left — it simply always exists.
+const GeneralChannelID = "*/general"
+
+func isGeneral(id string) bool { return id == GeneralChannelID }
+
 // maxPerConv bounds the in-memory ring per conversation. Without a DB wired
 // in, there's no recall beyond this window.
 const maxPerConv = 1000
@@ -48,9 +56,10 @@ type busAPI interface {
 // a per-camp SQLite Store for durability.
 type Service struct {
 	bus   busAPI
-	self  func() string // our identity pub, from the engine
-	store *Store        // durable backing; nil disables persistence
-	camp  func() string // current camp id, for the per-camp database
+	self  func() string   // our identity pub, from the engine
+	store *Store          // durable backing; nil disables persistence
+	camp  func() string   // current camp id, for the per-camp database
+	peers func() []string // current camp peer pubs (excl. self), for general fanout
 
 	mu       sync.Mutex
 	channels map[string]*Channel  // id → materialised channel (fold of its messages)
@@ -65,17 +74,32 @@ type Service struct {
 // campFn the active camp id (for the per-camp database). store may be nil to
 // run purely in memory. Both funcs are called per operation so a camp switch
 // is picked up without re-wiring; call LoadCamp after a switch to hydrate.
-func NewService(b *bus.Service, selfFn func() string, store *Store, campFn func() string) *Service {
+func NewService(b *bus.Service, selfFn func() string, store *Store, campFn func() string, peersFn func() []string) *Service {
 	return &Service{
 		bus:      b,
 		self:     selfFn,
 		store:    store,
 		camp:     campFn,
+		peers:    peersFn,
 		channels: map[string]*Channel{},
 		convs:    map[string][]Message{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
 	}
+}
+
+// generalRoster is the live membership of the camp-wide general channel: every
+// known camp peer plus ourselves. Computed on demand — general has no stored
+// roster — so it tracks the camp as peers come and go.
+func (s *Service) generalRoster() []string {
+	var r []string
+	if s.peers != nil {
+		r = s.peers()
+	}
+	if self := s.self(); self != "" {
+		r = append(r, self)
+	}
+	return dedupe(r)
 }
 
 // LoadCamp clears in-memory state and hydrates it from the durable store for
@@ -97,6 +121,10 @@ func (s *Service) LoadCamp() {
 		c := chans[i]
 		s.channels[c.ID] = &c
 	}
+	// general always exists — materialise it if the store didn't carry it.
+	if s.channels[GeneralChannelID] == nil {
+		s.channels[GeneralChannelID] = &Channel{ID: GeneralChannelID, Name: "general", Owner: "*", CreatedAt: nowMs()}
+	}
 	for _, m := range msgs {
 		s.seen[m.ID] = struct{}{}
 		k := convKey(m, selfPub)
@@ -110,6 +138,26 @@ func (s *Service) LoadCamp() {
 func (s *Service) Register() {
 	s.bus.Handle(typeMsg, s.onMsg)
 	go s.flushLoop()
+}
+
+// IsMember reports whether pub may access files scoped to a conversation.
+// scope is a channel id ("<owner>/<name>") or a DM key (the other party's
+// pub). general is camp-wide (any peer); a normal channel checks its roster;
+// a DM is the pair, so the requester must be the keyed peer.
+func (s *Service) IsMember(scope, pub string) bool {
+	if scope == "" || pub == "" {
+		return false
+	}
+	if isGeneral(scope) {
+		return true
+	}
+	if strings.Contains(scope, "/") { // channel id
+		s.mu.Lock()
+		ch := s.channels[scope]
+		s.mu.Unlock()
+		return ch != nil && contains(ch.Members, pub)
+	}
+	return scope == pub // DM: scope is the peer's pub
 }
 
 // SplitChannelID splits a channel ID ("<owner_pub>/<name>") into its owner
@@ -402,6 +450,9 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 // DeleteChannel tears a channel down (owner only): tells the members, then
 // drops it locally and from the store.
 func (s *Service) DeleteChannel(chanID string) error {
+	if isGeneral(chanID) {
+		return fmt.Errorf("chat: the general channel can't be deleted")
+	}
 	selfPub := s.self()
 	s.mu.Lock()
 	ch := s.channels[chanID]
@@ -425,6 +476,9 @@ func (s *Service) DeleteChannel(chanID string) error {
 // to ratify the departure (which propagates an authoritative remove). The
 // owner can't leave their own channel — they delete it instead.
 func (s *Service) LeaveChannel(chanID string) error {
+	if isGeneral(chanID) {
+		return fmt.Errorf("chat: you can't leave the general channel")
+	}
 	selfPub := s.self()
 	owner, _ := SplitChannelID(chanID)
 	if owner == selfPub {
@@ -519,6 +573,11 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 // (used by create/add/remove); otherwise the channel's current roster is
 // used.
 func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachment) (Message, error) {
+	// general has no stored channel/roster — fan out to the whole camp.
+	if isGeneral(chanID) {
+		peers := s.generalRoster()
+		return s.emitTo(chanID, typ, body, peers, nil, peers, file)
+	}
 	s.mu.Lock()
 	ch := s.channels[chanID]
 	s.mu.Unlock()
@@ -564,10 +623,24 @@ func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []st
 // Channels returns the channels we currently belong to.
 func (s *Service) Channels() []Channel {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Channel, 0, len(s.channels))
+	out := make([]Channel, 0, len(s.channels)+1)
+	hasGeneral := false
 	for _, ch := range s.channels {
+		if isGeneral(ch.ID) {
+			hasGeneral = true
+		}
 		out = append(out, *ch)
+	}
+	s.mu.Unlock()
+	if !hasGeneral { // surface general even before LoadCamp ran
+		out = append(out, Channel{ID: GeneralChannelID, Name: "general", Owner: "*"})
+	}
+	// general's roster is the live camp membership, not a stored snapshot.
+	roster := s.generalRoster()
+	for i := range out {
+		if isGeneral(out[i].ID) {
+			out[i].Members = roster
+		}
 	}
 	return out
 }

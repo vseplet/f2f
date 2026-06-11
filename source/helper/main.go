@@ -153,8 +153,20 @@ func run(bind string, console bool, autostart bool) error {
 	msgSvc := messenger.NewService(busSvc,
 		func() string { return eng.Status().IdentityPub },
 		msgStore,
-		func() string { return eng.Status().CampID })
+		func() string { return eng.Status().CampID },
+		func() []string { // camp peer pubs (excl. self) — general fanout target
+			var pubs []string
+			for _, p := range eng.Status().Peers {
+				if !p.Self && p.Pub != "" {
+					pubs = append(pubs, p.Pub)
+				}
+			}
+			return pubs
+		})
 	msgSvc.Register()
+	// Scoped (channel/DM) files are served over torrent only to members of
+	// that conversation — the drop catalog asks the messenger who's in.
+	dropSvc.SetMembershipCheck(msgSvc.IsMember)
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); we also surface peer

@@ -314,6 +314,7 @@ $(function () {
 
 
   // --- messaging (services/messenger over the bus) ---
+  const GENERAL_ID = '*/general'; // camp-wide channel everyone is in (no leave)
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
@@ -403,7 +404,21 @@ $(function () {
   // bubble in msgRow handles sizing/alignment). Images and clips preview in
   // place; anything else is a download chip. Built from a blob: URL (see above).
   function attachHtml(f) {
-    if (!f || !f.data) return '';
+    if (!f) return '';
+    // Torrent attachment: no inline bytes, carries a magnet. Rendered as a
+    // chip with a download button + live status (updated by updateTorrentChips).
+    if (f.info_hash) {
+      const tn = esc(f.name || 'file');
+      return `<div class="ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
+        + `<div class="ax-msg-torrent-main">`
+          + `<i class="bi bi-file-earmark-arrow-down"></i>`
+          + `<span class="ax-msg-torrent-name">${tn}</span>`
+          + `<span class="ax-msg-torrent-size">${esc(fmtBytes(f.size || 0))}</span>`
+        + `</div>`
+        + `<div class="ax-msg-torrent-status"></div>`
+      + `</div>`;
+    }
+    if (!f.data) return '';
     let url;
     try { url = attachUrl(f); } catch (_) { return ''; }
     const mime = f.mime || '';
@@ -441,6 +456,8 @@ $(function () {
     const $m = $('#chat-messages');
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
+    updateTorrentChips(); // paint cached status, then refresh from the backend
+    pollTorrents();
   }
 
   // setChatTitle resolves the open conversation's header (channel name or
@@ -485,7 +502,8 @@ $(function () {
     const ch = chatChannels.find((c) => c.id === chatConv.key);
     if (!ch) { $p.empty(); return; }
     const selfPub = lastStatus && lastStatus.identity_pub;
-    const isOwner = ch.owner === selfPub;
+    const isGeneral = ch.id === GENERAL_ID;
+    const isOwner = !isGeneral && ch.owner === selfPub;
     let html = '<div class="ax-chat-members-list">';
     (ch.members || []).forEach((pub) => {
       const rm = (isOwner && pub !== selfPub)
@@ -502,15 +520,20 @@ $(function () {
           + candidates.map((p) => `<option value="${esc(p.pub)}">${esc(p.name || p.pub.slice(0, 8))}</option>`).join('')
           + '</select></div>';
       }
+    } else if (isGeneral) {
+      html += '<div class="ax-chat-members-note">everyone in the camp is a member</div>';
     } else {
       html += '<div class="ax-chat-members-note">only the owner can change members</div>';
     }
-    // Owner tears the channel down for everyone; a member just leaves.
-    html += '<div class="ax-chat-members-actions">'
-      + (isOwner
-          ? '<button class="ax-chat-danger" id="chat-delete-channel">delete channel</button>'
-          : '<button class="ax-chat-danger" id="chat-leave-channel">leave channel</button>')
-      + '</div>';
+    // Owner tears the channel down for everyone; a member just leaves. The
+    // general channel is permanent — no delete or leave.
+    if (!isGeneral) {
+      html += '<div class="ax-chat-members-actions">'
+        + (isOwner
+            ? '<button class="ax-chat-danger" id="chat-delete-channel">delete channel</button>'
+            : '<button class="ax-chat-danger" id="chat-leave-channel">leave channel</button>')
+        + '</div>';
+    }
     $p.html(html).removeClass('hidden');
   }
 
@@ -574,6 +597,7 @@ $(function () {
         $('#chat-messages').append(msgRow(m, false));
         const $m = $('#chat-messages');
         $m.scrollTop($m[0].scrollHeight);
+        if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
       } else if (!m.mine) {
         chatUnread[key] = (chatUnread[key] || 0) + 1;
       }
@@ -696,10 +720,10 @@ $(function () {
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
 
-  // Attachments: the + button opens a file picker; the chosen file rides
-  // inline (base64) on a message, with the current input text as its caption.
-  // Capped client-side to match the backend's MaxAttachment (8 MiB).
-  const MAX_ATTACH = 8 * 1024 * 1024;
+  // Attachments: the + button opens a file picker. Small files ride inline
+  // (base64) on the message; larger ones are seeded and shared over torrent
+  // (the message carries the magnet, the recipient downloads from the chat).
+  const MAX_ATTACH = 8 * 1024 * 1024; // matches the backend's inline cap
   $('#chat-attach').on('click', function () {
     if (chatConv) $('#chat-file').trigger('click');
   });
@@ -707,10 +731,7 @@ $(function () {
     const file = this.files && this.files[0];
     this.value = ''; // allow re-picking the same file later
     if (!file || !chatConv) return;
-    if (file.size > MAX_ATTACH) {
-      alert('file too large: ' + fmtBytes(file.size) + ' (max 8 MiB)');
-      return;
-    }
+    if (file.size > MAX_ATTACH) { shareViaTorrent(file); return; } // large → torrent
     const reader = new FileReader();
     reader.onload = function () {
       // readAsDataURL gives "data:<mime>;base64,<payload>" — keep the payload;
@@ -730,6 +751,94 @@ $(function () {
     reader.onerror = function () { alert('could not read file'); };
     reader.readAsDataURL(file);
   });
+
+  // Seed a large file and post it as a torrent message (multipart upload).
+  // The backend pins the seed to this conversation (private to it) and echoes
+  // the message back over the chat stream, where it renders with a download
+  // affordance + live transfer status.
+  function shareViaTorrent(file) {
+    const $in = $('#chat-input');
+    const caption = $in.val().trim();
+    $in.val('');
+    const fd = new FormData();
+    fd.append('kind', chatConv.kind);
+    fd.append('key', chatConv.key);
+    fd.append('body', caption);
+    fd.append('file', file);
+    $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })
+      .fail((xhr) => alert('share: ' + errorOf(xhr)));
+  }
+
+  // --- torrent transfers surfaced in chat ---
+  let torrentStatus = {}; // info_hash → /api/files/downloads row
+  // The BT client listens on the overlay v4 alias at the default torrent port;
+  // anacrolix needs a host:port (a bare IP is not a dialable peer address).
+  function overlayForPub(pub) {
+    const p = (livePeers || []).find((x) => x.pub === pub);
+    return (p && p.overlay_v4) ? p.overlay_v4 + ':6881' : '';
+  }
+  // Source addresses to feed a download: the sender (a guaranteed seeder) plus
+  // the other conversation members (potential seeders). anacrolix only dials
+  // fed peers — there's no DHT — so we hand it everyone who might have it.
+  function torrentPeers($chip) {
+    const ips = [];
+    const add = (pub) => { const ip = overlayForPub(pub); if (ip && ips.indexOf(ip) === -1) ips.push(ip); };
+    add($chip.closest('.ax-msg').data('author'));
+    if (chatConv && chatConv.kind === 'channel') {
+      const ch = chatChannels.find((c) => c.id === chatConv.key);
+      ((ch && ch.members) || []).forEach(add);
+    }
+    return ips;
+  }
+  function updateTorrentChips() {
+    $('#chat-messages .ax-msg-torrent').each(function () {
+      const $c = $(this);
+      const mine = $c.closest('.ax-msg').hasClass('is-mine');
+      const st = torrentStatus[$c.attr('data-infohash')];
+      let html;
+      if (mine) {
+        html = '<span class="t-seed">● seeding</span>';
+      } else if (!st) {
+        html = '<button type="button" class="ax-msg-torrent-dl">⤓ download</button>';
+      } else if (st.complete) {
+        html = '<span class="t-done">✓ downloaded</span>'
+          + (st.path ? ' <a class="ax-msg-torrent-open">open</a>' : '');
+      } else if (st.fetching_metadata) {
+        html = '<span class="t-wait">' + (st.source_online ? 'connecting…' : 'source offline') + '</span>';
+      } else {
+        const pct = st.size > 0 ? Math.floor((st.bytes_completed / st.size) * 100) : 0;
+        html = '<span class="t-prog">' + pct + '% · '
+          + fmtBytes(st.bytes_completed || 0) + ' / ' + fmtBytes(st.size || 0) + '</span>';
+      }
+      $c.find('.ax-msg-torrent-status').html(html);
+    });
+  }
+  function pollTorrents() {
+    if (!$('#chat-messages .ax-msg-torrent').length) return;
+    $.getJSON('/api/files/downloads', function (list) {
+      const m = {};
+      (Array.isArray(list) ? list : []).forEach((d) => { m[d.info_hash] = d; });
+      torrentStatus = m;
+      updateTorrentChips();
+    });
+  }
+  $('#chat-messages').on('click', '.ax-msg-torrent-dl', function () {
+    const $c = $(this).closest('.ax-msg-torrent');
+    const magnet = $c.attr('data-magnet');
+    if (!magnet) return;
+    $c.find('.ax-msg-torrent-status').html('<span class="t-wait">starting…</span>');
+    $.ajax({
+      url: '/api/files/download', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ magnet: magnet, peers: torrentPeers($c) }),
+    }).done(pollTorrents).fail((xhr) => alert('download: ' + errorOf(xhr)));
+  });
+  $('#chat-messages').on('click', '.ax-msg-torrent-open', function () {
+    const st = torrentStatus[$(this).closest('.ax-msg-torrent').attr('data-infohash')];
+    if (st && st.path) {
+      $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });
+    }
+  });
+  setInterval(pollTorrents, 2500);
 
   const $btnEngine = $('#btn-engine');
   const $engineState = $btnEngine.find('.ax-engine-state');
@@ -1218,7 +1327,12 @@ $(function () {
     // CHANNELS = the rooms we belong to (from /api/chat/channels). Member
     // count and unread ride in the meta column.
     const groupsBody = (chatChannels.length
-      ? chatChannels.slice().sort((a, b) => a.name.localeCompare(b.name)).map(ch => {
+      ? chatChannels.slice().sort((a, b) => {
+          // general is the camp-wide channel — pin it to the top.
+          if (a.id === GENERAL_ID) return -1;
+          if (b.id === GENERAL_ID) return 1;
+          return a.name.localeCompare(b.name);
+        }).map(ch => {
           const tags = [`${(ch.members || []).length} members`];
           if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
           // Our group call is bound to a channel id — surface it on the row.

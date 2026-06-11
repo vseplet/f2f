@@ -47,14 +47,18 @@ type Message struct {
 // bigger files belong in the file-sharing drop, not chat.
 const MaxAttachment = 8 << 20 // 8 MiB
 
-// Attachment is an inline file carried by a message. Data holds the raw bytes
-// (encoding/json marshals a []byte as a base64 string, so it travels and
-// persists as text without extra work).
+// Attachment is a file carried by a message. A small file rides inline: Data
+// holds the raw bytes (encoding/json marshals a []byte as a base64 string, so
+// it travels and persists as text). A large file rides as a torrent: Data is
+// empty and InfoHash/Magnet point at the seeded torrent the recipient fetches
+// over the drop (BitTorrent) transport.
 type Attachment struct {
-	Name string `json:"name"`
-	Mime string `json:"mime"`
-	Size int    `json:"size"`
-	Data []byte `json:"data"`
+	Name     string `json:"name"`
+	Mime     string `json:"mime"`
+	Size     int    `json:"size"`
+	Data     []byte `json:"data,omitempty"`
+	InfoHash string `json:"info_hash,omitempty"`
+	Magnet   string `json:"magnet,omitempty"`
 }
 
 // Channel is a named room. ID is "<owner_pub>/<name>"; Owner and Name are

@@ -41,6 +41,18 @@ func newTestService() *Service {
 	}
 }
 
+// userChannels returns the user-created channels, excluding the always-present
+// camp-wide general channel — so tests can assert on the channels they made.
+func userChannels(s *Service) []Channel {
+	var out []Channel
+	for _, c := range s.Channels() {
+		if c.ID != GeneralChannelID {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func TestRedelivery(t *testing.T) {
 	dir := t.TempDir()
 	st := NewStore(func(id string) string {
@@ -99,7 +111,7 @@ func TestPersistAndLoad(t *testing.T) {
 	// A fresh service hydrates the same state from the store.
 	s2 := mk()
 	s2.LoadCamp()
-	if chs := s2.Channels(); len(chs) != 1 || chs[0].ID != "alice/dev" {
+	if chs := userChannels(s2); len(chs) != 1 || chs[0].ID != "alice/dev" {
 		t.Fatalf("hydrated channels = %+v", chs)
 	}
 	msgs := s2.Messages("channel", "alice/dev", 0)
@@ -115,7 +127,7 @@ func TestPersistAndLoad(t *testing.T) {
 
 	// Owner deletes the channel → dropped from memory and store.
 	s2.onMsg("alice", mustJSON(Message{ID: "3", Kind: "channel", Peer: "alice/dev", Type: TypeDelete, TS: 3}))
-	if chs := s2.Channels(); len(chs) != 0 {
+	if chs := userChannels(s2); len(chs) != 0 {
 		t.Fatalf("delete left channels: %+v", chs)
 	}
 	if chs, _ := st.Channels("c1"); len(chs) != 0 {
@@ -144,17 +156,17 @@ func TestChannelMembershipAuthority(t *testing.T) {
 	const id = "alice/dev" // owner = "alice"
 	// First sighting from the owner creates the channel with us in it.
 	s.onMsg("alice", mustJSON(Message{ID: "1", Kind: "channel", Peer: id, Type: TypeCreate, Members: []string{"alice", "self"}, TS: 1}))
-	if chs := s.Channels(); len(chs) != 1 || len(chs[0].Members) != 2 {
+	if chs := userChannels(s); len(chs) != 1 || len(chs[0].Members) != 2 {
 		t.Fatalf("create: channels=%+v", chs)
 	}
 	// A non-owner's roster must NOT rewrite membership.
 	s.onMsg("mallory", mustJSON(Message{ID: "2", Kind: "channel", Peer: id, Type: TypeText, Members: []string{"mallory"}, Body: "hi", TS: 2}))
-	if chs := s.Channels(); len(chs[0].Members) != 2 {
-		t.Fatalf("non-owner rewrote roster: %+v", chs[0].Members)
+	if chs := userChannels(s); len(chs) != 1 || len(chs[0].Members) != 2 {
+		t.Fatalf("non-owner rewrote roster: %+v", chs)
 	}
 	// The owner removing us drops the channel.
 	s.onMsg("alice", mustJSON(Message{ID: "3", Kind: "channel", Peer: id, Type: TypeRemove, Members: []string{"alice"}, TS: 3}))
-	if chs := s.Channels(); len(chs) != 0 {
+	if chs := userChannels(s); len(chs) != 0 {
 		t.Fatalf("owner removal didn't drop channel: %+v", chs)
 	}
 }
