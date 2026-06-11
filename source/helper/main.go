@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -143,20 +144,112 @@ func run(bind string, console bool, autostart bool) error {
 	campSvc := camp.New(eng, store)
 	proxySvc := proxy.New(dnsSvc, pkiSvc)
 
-	// Local message/channel store — one SQLite file per camp under ~/.f2f
-	// (<camp_id>.messenger.db), opened lazily.
-	msgSvc := messenger.New(store.CampDir)
-	defer msgSvc.Close()
+	// Messaging — direct messages and channels over the bus, backed by a
+	// per-camp SQLite store for durable history. Identity (our pub) and the
+	// active camp come from the engine so a camp switch is picked up; the
+	// camp's history is hydrated in OnStarted (LoadCamp).
+	msgStore := messenger.NewStore(store.CampDir)
+	defer msgStore.Close()
+	msgSvc := messenger.NewService(busSvc,
+		func() string { return eng.Status().IdentityPub },
+		msgStore,
+		func() string { return eng.Status().CampID })
+	msgSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
-	// notifications to us over the bus ("notify" type); bus activity (pings)
-	// is surfaced too.
+	// notifications to us over the bus ("notify" type); we also surface peer
+	// presence (bus link up/down) and inbound chat/call activity below.
 	notifySvc := notify.New(store.CampDir, func() string { return eng.Status().CampID })
 	defer notifySvc.Close()
 	busSvc.Handle("notify", notifySvc.FromBus)
-	busSvc.Events = func(kind, peerPub, text string) {
-		notifySvc.Push(notify.Notification{Kind: kind, Title: text, From: peerPub})
+
+	// peerName resolves a peer pub to its display name (falls back to a short
+	// fingerprint) from the live roster — used to title presence/chat alerts.
+	peerName := func(pub string) string {
+		for _, p := range eng.Status().Peers {
+			if p.Pub == pub {
+				if p.Name != "" {
+					return p.Name
+				}
+				break
+			}
+		}
+		if len(pub) > 12 {
+			return pub[:12]
+		}
+		return pub
 	}
+
+	// Peer presence: the bus reports a reachability change as "up"/"down".
+	// Surface it as a peer notification routed to that peer's DM.
+	busSvc.Events = func(_, peerPub, text string) {
+		up := text == "up"
+		state := "offline"
+		if up {
+			state = "online"
+		}
+		notifySvc.Push(notify.Notification{
+			Kind:  "peer",
+			Title: peerName(peerPub) + " " + state,
+			From:  peerPub,
+			Route: "chat:dm:" + peerPub,
+		})
+	}
+
+	// Inbound chat/call activity: every message another peer sends us is
+	// published on the messenger stream. Text becomes a "message" alert; a
+	// channel call announcement becomes a "call" alert that opens to join.
+	go func() {
+		ch, _ := msgSvc.Subscribe(64)
+		for m := range ch {
+			if m.Mine || m.From == "" || m.From == eng.Status().IdentityPub {
+				continue // our own echo, not an inbound event
+			}
+			switch m.Type {
+			case messenger.TypeText:
+				// Prefer the text; fall back to an attachment label so a
+				// file-only message still reads sensibly in the toast.
+				preview := m.Body
+				if preview == "" && m.File != nil {
+					switch {
+					case strings.HasPrefix(m.File.Mime, "image/"):
+						preview = "📷 photo"
+					case strings.HasPrefix(m.File.Mime, "video/"):
+						preview = "🎬 video"
+					default:
+						preview = "📎 " + m.File.Name
+					}
+				}
+				if m.Kind == "channel" {
+					_, name := messenger.SplitChannelID(m.Peer)
+					notifySvc.Push(notify.Notification{
+						Kind:  "message",
+						Title: "#" + name,
+						Body:  peerName(m.From) + ": " + preview,
+						From:  m.From,
+						Route: "chat:channel:" + m.Peer,
+					})
+				} else {
+					notifySvc.Push(notify.Notification{
+						Kind:  "message",
+						Title: peerName(m.From),
+						Body:  preview,
+						From:  m.From,
+						Route: "chat:dm:" + m.From,
+					})
+				}
+			case messenger.TypeCallStart:
+				_, name := messenger.SplitChannelID(m.Peer)
+				notifySvc.Push(notify.Notification{
+					Kind:  "call",
+					Title: "Call in #" + name,
+					Body:  peerName(m.From) + " started a call",
+					From:  m.From,
+					Route: "call:group:" + m.Peer + "/" + m.From,
+				})
+			}
+		}
+	}()
 
 	// gossip: replicate our fabric-level NodeState (platform + peer-view)
 	// across the mesh. Source assembles it from engine.Status() + runtime.
@@ -287,6 +380,7 @@ func run(bind string, console bool, autostart bool) error {
 				clog.Warn("main", "switch camp log: %v", err)
 			}
 		}
+		msgSvc.LoadCamp() // hydrate chat history for the now-active camp
 		for _, s := range services {
 			if s.start == nil {
 				continue

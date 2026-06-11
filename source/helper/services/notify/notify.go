@@ -24,7 +24,7 @@ const keepRecent = 500 // prune older notifications past this per camp
 // Notification is one UI-facing event.
 type Notification struct {
 	ID    string `json:"id"`
-	Kind  string `json:"kind"`            // "message" | "call" | "cert" | "peer" | "ping" | "system" …
+	Kind  string `json:"kind"`            // "message" | "call" | "cert" | "peer" | "system" …
 	Title string `json:"title"`           // short headline
 	Body  string `json:"body,omitempty"`  // optional detail
 	From  string `json:"from,omitempty"`  // peer pub, if it originated from a peer
@@ -165,6 +165,21 @@ func (s *Service) Recent() []Notification {
 		out[i], out[j] = out[j], out[i]
 	}
 	return out
+}
+
+// Clear deletes every notification in the active camp's database. The UI
+// drops its in-memory list separately; new notifications keep flowing.
+func (s *Service) Clear() error {
+	camp := ""
+	if s.current != nil {
+		camp = s.current()
+	}
+	db, err := s.dbFor(camp)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM notifications`)
+	return err
 }
 
 // Subscribe returns a channel of new notifications and an unsubscribe func.

@@ -3,6 +3,8 @@ $(function () {
   // first because applyRoute() runs during init, before later code.
   let selectedPeer = '';   // peerKey of the peer whose details fill the identity panel
   let lastStatus = null;   // last /api/status sample, for re-rendering on route change
+  let livePeers = [];      // last seen camp peers from /api/status (declared early:
+                           // nameForPub/applyRoute reference it during init)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -144,7 +146,7 @@ $(function () {
   // render. Real notification service will mint these server-side; for
   // now we generate from the index at module load time.
   // Live notifications from the backend (/api/notifications + SSE). Newest
-  // first. The bus pushes QUIC ping results here; more sources to come.
+  // first. Sources: inbound messages, calls, and peer presence (up/down).
   let notifications = [];
   let selectedNotifId = null;
 
@@ -156,7 +158,6 @@ $(function () {
   function notifAccent(n) {
     const t = (n.title || '').toLowerCase();
     if (/fail|down|denied|blocked|offline|error/.test(t)) return 'warn';
-    if (n.kind === 'ping') return 'ok';
     return ({ message: 'info', call: 'ok', cert: 'warn', peer: 'info', system: 'muted' })[n.kind] || 'info';
   }
   function notifWhen(ts) {
@@ -170,12 +171,13 @@ $(function () {
   }
 
   function renderNotifications() {
+    const banner = notifPermPrompt();
     const q = ($('#ax-notifications-search').val() || '').trim().toLowerCase();
     const items = q
       ? notifications.filter(n => (n.title + ' ' + (n.body || '') + ' ' + notifPeerName(n.from)).toLowerCase().includes(q))
       : notifications;
     if (!items.length) {
-      $('#ax-notifications-list').html(empty('no notifications'));
+      $('#ax-notifications-list').html(banner + empty('no notifications'));
       return;
     }
     const parts = items.map(n => {
@@ -191,8 +193,17 @@ $(function () {
         + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
       + `</div>`;
     });
-    $('#ax-notifications-list').html(parts.join(''));
+    $('#ax-notifications-list').html(banner + parts.join(''));
   }
+  // Clear all — wipes the backend store for the active camp, then the local
+  // list. New notifications keep streaming in over SSE afterwards.
+  $('#ax-notifications-clear').on('click', function () {
+    $.ajax({ url: '/api/notifications', method: 'DELETE' }).always(function () {
+      notifications = [];
+      selectedNotifId = null;
+      renderNotifications();
+    });
+  });
   $('#ax-notifications-search').on('input', renderNotifications);
   $('#ax-notifications-search').on('keydown', function (e) {
     if (e.key === 'Escape') { $(this).val('').trigger('input').blur(); }
@@ -222,6 +233,41 @@ $(function () {
     notifications = (Array.isArray(list) ? list : []).slice().reverse(); // newest-first
     renderNotifications();
   });
+  // Native OS notifications (Web Notifications API). Chrome silently drops a
+  // permission request that isn't tied to a user gesture, so we don't ask on
+  // load — instead notifPermPrompt() renders an "enable" banner the user
+  // clicks (a real gesture), handled below. A toast is only raised when the
+  // tab is hidden; an in-view sidebar already shows the entry.
+  const canNotify = 'Notification' in window;
+  function notifPermPrompt() {
+    if (!canNotify || Notification.permission === 'granted') return '';
+    if (Notification.permission === 'denied') {
+      return `<div class="ax-notif-perm muted">${esc('desktop notifications blocked — allow them in the browser site settings')}</div>`;
+    }
+    return `<div class="ax-notif-perm" id="ax-notif-enable">enable desktop notifications</div>`;
+  }
+  // Gesture-driven permission request (reliable, unlike an on-load ask).
+  $('#ax-notifications-list').on('click', '#ax-notif-enable', function () {
+    if (!canNotify) return;
+    Promise.resolve(Notification.requestPermission()).then(renderNotifications);
+  });
+  function osNotify(n) {
+    if (!canNotify || Notification.permission !== 'granted') return;
+    if (!document.hidden) return; // tab is focused — the sidebar already shows it
+    let note;
+    try {
+      note = new Notification(n.title || 'f2f', {
+        body: n.body || '',
+        tag: 'f2f:' + (n.id || ''), // collapse rapid repeats from the same event
+      });
+    } catch (_) { return; }
+    note.onclick = function () {
+      window.focus();
+      if (n.route) location.hash = n.route;
+      note.close();
+    };
+  }
+
   (function notifStream() {
     let es;
     try { es = new EventSource('/api/notifications/stream'); } catch (_) { return; }
@@ -230,6 +276,7 @@ $(function () {
       notifications.unshift(n);
       if (notifications.length > 200) notifications.length = 200;
       renderNotifications();
+      osNotify(n);
     };
   })();
   setInterval(renderNotifications, 30000); // refresh relative timestamps
@@ -255,41 +302,286 @@ $(function () {
     if (route) location.hash = route;
   });
 
+  // Forget-peer button (offline ghosts only). Stops the row's own
+  // navigation, DELETEs the peer, then refreshes the tree.
+  $('#ax-tree').on('click', '.ax-tree-remove[data-remove-peer]', function (e) {
+    e.stopPropagation();
+    const pub = $(this).attr('data-remove-peer');
+    if (!pub) return;
+    $.ajax({ url: '/api/peers/' + encodeURIComponent(pub), method: 'DELETE' })
+      .always(() => { if (typeof refreshStatus === 'function') refreshStatus(); });
+  });
 
-  // Mock conversation — placeholder until messaging is wired to the
-  // engine. Same thread shown for every chat for now.
-  const MOCK_MESSAGES = [
-    { author: 'mac-mini-m4', time: '14:02', text: 'deployed the new camp build' },
-    { author: 'mac-mini-m4', time: '14:02', text: 'gitea should be reachable again' },
-    { author: 'sevapp',      time: '14:03', text: 'yep, opens now 🎉' },
-    { author: 'artpani',     time: '14:10', text: 'can someone drop the agents doc?' },
-    { author: 'mac-mini-m4', time: '14:11', text: 'AGENTS.md is in the drop tab' },
-  ];
 
-  // msgRow renders one Slack-style message. grouped=true omits the
-  // author/time header (consecutive message from the same author).
+  // --- messaging (services/messenger over the bus) ---
+  let chatChannels = [];      // /api/chat/channels — channels we belong to
+  let chatConv = null;        // { kind:'dm'|'channel', key } currently open
+  let chatMsgs = [];          // messages of the open conversation (cached for redraw)
+  let chatNamesPending = false; // redraw the open chat once /api/status lands so
+                                // authors/title resolve to names, not pub prefixes
+  const chatUnread = {};      // conversation key → unread count
+
+  // nameForPub renders a peer pub as its display name (falls back to a fp-ish
+  // prefix). Self resolves to "you". Drives message authorship in the UI.
+  function nameForPub(pub) {
+    if (!pub) return '?';
+    const self = lastStatus && lastStatus.identity_pub;
+    if (pub === self) return 'you';
+    const p = (livePeers || []).find((x) => x.pub === pub);
+    return (p && p.name) || pub.slice(0, 8);
+  }
+  function hhmm(ts) {
+    const d = new Date(ts || Date.now());
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  // msgRow renders one message. A type other than "text" is a channel
+  // lifecycle event (create/add/remove) → a muted system line. grouped=true
+  // omits the author/time header for a consecutive line from the same author.
   function msgRow(m, grouped) {
+    if (m.type && m.type !== 'text') {
+      const who = nameForPub(m.from);
+      const names = (m.targets || []).map(nameForPub).join(', ');
+      let line;
+      if (m.type === 'create') line = who + ' created the channel';
+      else if (m.type === 'add') line = who + ' added ' + (names || 'members');
+      else if (m.type === 'remove') line = who + ' removed ' + (names || 'members');
+      else if (m.type === 'call_start') line = '☎ ' + who + ' started a call';
+      else if (m.type === 'call_end') line = '☎ call ended';
+      else line = who + ' ' + m.type;
+      // A channel call announcement doubles as the join affordance.
+      const join = (m.type === 'call_start' && m.kind === 'channel')
+        ? ` <a href="#call:group:${esc(m.peer)}" class="ax-msg-join">join</a>` : '';
+      return `<div class="ax-msg ax-msg-system">${esc(line)}${join}</div>`;
+    }
+    // Own messages bubble on the right, everyone else's on the left.
+    const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
+    const author = mine ? 'you' : nameForPub(m.from);
     const head = grouped ? '' :
       `<div class="ax-msg-head">`
-        + `<span class="ax-msg-author">${esc(m.author)}</span>`
-        + `<span class="ax-msg-time">${esc(m.time)}</span>`
+        + `<span class="ax-msg-author">${esc(author)}</span>`
+        + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
       + `</div>`;
-    return `<div class="ax-msg" data-author="${esc(m.author)}">`
+    // A previewable attachment (image/video) and its caption share one bubble
+    // so they read as a single message. A non-previewable file is its own
+    // download chip with the caption as a separate text bubble. Plain text is
+    // just the text bubble.
+    const mime = (m.file && m.file.mime) || '';
+    const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
+    const caption = m.body ? `<div class="ax-msg-caption">${esc(m.body)}</div>` : '';
+    let body;
+    if (m.file && previewable) {
+      body = `<div class="ax-msg-media">${attachHtml(m.file)}${caption}</div>`;
+    } else if (m.file) {
+      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '');
+    } else {
+      body = `<div class="ax-msg-text">${esc(m.body)}</div>`;
+    }
+    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
       + head
-      + `<div class="ax-msg-text">${esc(m.text)}</div>`
+      + body
       + `</div>`;
   }
 
-  function renderChat() {
-    let html = '', prev = null;
-    for (const m of MOCK_MESSAGES) {
-      html += msgRow(m, m.author === prev);
-      prev = m.author;
+  // Object URLs minted for the currently-rendered attachments. Revoked and
+  // rebuilt on every full chat redraw so they don't leak across conversations.
+  let chatBlobUrls = [];
+  function attachUrl(f) {
+    // Decode the base64 the backend sent (Go marshals []byte as std base64)
+    // into a Blob and hand back an object URL. Unlike a data: URL, a blob:
+    // URL can be opened in a new tab, downloaded, and plays reliably in
+    // <video> — data: URLs are blocked for top-frame navigation in Chrome.
+    const bin = atob(f.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }));
+    chatBlobUrls.push(url);
+    return url;
+  }
+
+  // attachHtml renders the attachment element itself (the enclosing .ax-msg-media
+  // bubble in msgRow handles sizing/alignment). Images and clips preview in
+  // place; anything else is a download chip. Built from a blob: URL (see above).
+  function attachHtml(f) {
+    if (!f || !f.data) return '';
+    let url;
+    try { url = attachUrl(f); } catch (_) { return ''; }
+    const mime = f.mime || '';
+    const name = esc(f.name || 'file');
+    if (mime.indexOf('image/') === 0) {
+      return `<a href="${url}" target="_blank" rel="noopener" title="${name}">`
+        + `<img class="ax-msg-img" src="${url}" alt="${name}"></a>`;
+    }
+    if (mime.indexOf('video/') === 0) {
+      // Always offer a download link too: a codec Chrome can't decode (e.g. an
+      // HEVC .mov) shows no picture, but the file is still saveable.
+      return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`
+        + `<a class="ax-msg-video-dl" href="${url}" download="${name}">⤓ ${name}</a>`;
+    }
+    return `<a class="ax-msg-file" href="${url}" download="${name}">`
+      + `<i class="bi bi-paperclip"></i> <span>${name}</span>`
+      + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
+  }
+
+  function renderChat(msgs) {
+    // A full redraw replaces the DOM wholesale, orphaning the previous blobs.
+    chatBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+    chatBlobUrls = [];
+    let html = '', prevFrom = null, prevTs = 0;
+    const GROUP_MS = 5 * 60 * 1000; // collapse the header only within 5 minutes
+    for (const m of (msgs || [])) {
+      const isText = !m.type || m.type === 'text';
+      // Group consecutive lines from the same author ONLY when close in time,
+      // so messages sent far apart keep their own timestamped header.
+      const grouped = isText && m.from === prevFrom && (m.ts - prevTs) < GROUP_MS;
+      html += msgRow(m, grouped);
+      prevFrom = isText ? m.from : null;
+      prevTs = isText ? m.ts : 0;
     }
     const $m = $('#chat-messages');
-    $m.html(html);
+    $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
   }
+
+  // setChatTitle resolves the open conversation's header (channel name or
+  // peer nickname). Re-callable so it updates once /api/status lands.
+  function setChatTitle() {
+    if (!chatConv) return;
+    const title = chatConv.kind === 'channel'
+      ? '# ' + ((chatChannels.find((c) => c.id === chatConv.key) || {}).name || chatConv.key.split('/').pop())
+      : nameForPub(chatConv.key);
+    $('#chat-title').text(title);
+  }
+
+  // loadConversation fetches history for the open conversation and renders.
+  function loadConversation() {
+    if (!chatConv) return;
+    chatUnread[chatConv.key] = 0;
+    $.getJSON('/api/chat/messages?kind=' + encodeURIComponent(chatConv.kind)
+      + '&key=' + encodeURIComponent(chatConv.key), (msgs) => {
+      if (!chatConv) return;
+      chatMsgs = msgs || [];
+      renderChat(chatMsgs);
+      setChatTitle();
+    });
+  }
+
+  // fetchChannels refreshes the channel list, then rebuilds the sidebar and
+  // (if open) the members panel.
+  function fetchChannels() {
+    $.getJSON('/api/chat/channels', (list) => {
+      chatChannels = Array.isArray(list) ? list : [];
+      if (lastStatus && typeof renderSidebarTree === 'function') renderSidebarTree(lastStatus);
+      if (!$('#chat-members-panel').hasClass('hidden')) renderMembersPanel();
+    });
+  }
+
+  // renderMembersPanel lists a channel's members. The owner gets remove
+  // buttons and an "add member" dropdown of peers not yet in; others see a
+  // read-only roster. Reads from the materialised channel in chatChannels.
+  function renderMembersPanel() {
+    const $p = $('#chat-members-panel');
+    if (!chatConv || chatConv.kind !== 'channel') { $p.addClass('hidden').empty(); return; }
+    const ch = chatChannels.find((c) => c.id === chatConv.key);
+    if (!ch) { $p.empty(); return; }
+    const selfPub = lastStatus && lastStatus.identity_pub;
+    const isOwner = ch.owner === selfPub;
+    let html = '<div class="ax-chat-members-list">';
+    (ch.members || []).forEach((pub) => {
+      const rm = (isOwner && pub !== selfPub)
+        ? `<button class="ax-chat-member-rm" data-rm="${esc(pub)}" title="remove">×</button>` : '';
+      html += `<span class="ax-chat-member">${esc(nameForPub(pub))}${rm}</span>`;
+    });
+    html += '</div>';
+    if (isOwner) {
+      const inChan = ch.members || [];
+      const candidates = (livePeers || []).filter((p) => !p.self && p.pub && inChan.indexOf(p.pub) === -1);
+      if (candidates.length) {
+        html += '<div class="ax-chat-members-add"><select id="chat-add-member">'
+          + '<option value="">+ add member…</option>'
+          + candidates.map((p) => `<option value="${esc(p.pub)}">${esc(p.name || p.pub.slice(0, 8))}</option>`).join('')
+          + '</select></div>';
+      }
+    } else {
+      html += '<div class="ax-chat-members-note">only the owner can change members</div>';
+    }
+    // Owner tears the channel down for everyone; a member just leaves.
+    html += '<div class="ax-chat-members-actions">'
+      + (isOwner
+          ? '<button class="ax-chat-danger" id="chat-delete-channel">delete channel</button>'
+          : '<button class="ax-chat-danger" id="chat-leave-channel">leave channel</button>')
+      + '</div>';
+    $p.html(html).removeClass('hidden');
+  }
+
+  // Delete (owner) / leave (member) the open channel.
+  function chatChannelAction(path, verb) {
+    if (!chatConv || !confirm(verb + ' channel?')) return;
+    $.ajax({
+      url: path, method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: chatConv.key }),
+    }).done(() => { location.hash = ''; fetchChannels(); })
+      .fail((xhr) => alert(verb + ': ' + errorOf(xhr)));
+  }
+  $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/chat/channels/delete', 'delete'));
+  $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/chat/channels/leave', 'leave'));
+
+  // Toggle the members panel.
+  $('#chat-members').on('click', function () {
+    const $p = $('#chat-members-panel');
+    if ($p.hasClass('hidden')) renderMembersPanel();
+    else $p.addClass('hidden');
+  });
+  // Remove a member (owner only).
+  $('#chat-members-panel').on('click', '.ax-chat-member-rm', function () {
+    const pub = $(this).attr('data-rm');
+    if (!pub || !chatConv) return;
+    $.ajax({
+      url: '/api/chat/members', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: chatConv.key, remove: [pub] }),
+    }).done(fetchChannels).fail((xhr) => alert('remove member: ' + errorOf(xhr)));
+  });
+  // Add a member (owner only).
+  $('#chat-members-panel').on('change', '#chat-add-member', function () {
+    const pub = $(this).val();
+    if (!pub || !chatConv) return;
+    $.ajax({
+      url: '/api/chat/members', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: chatConv.key, add: [pub] }),
+    }).done(fetchChannels).fail((xhr) => alert('add member: ' + errorOf(xhr)));
+  });
+
+  // Live message stream: append to the open conversation, else bump unread.
+  function openChatStream() {
+    const es = new EventSource('/api/chat/stream');
+    es.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+      const key = m.kind === 'channel' ? m.peer : (m.mine ? m.to : m.from);
+      // A channel lifecycle event may have created/changed/removed a channel
+      // — refresh the list so it (dis)appears.
+      if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
+      // The open channel was deleted (or we left) → close the view.
+      if ((m.type === 'delete' || m.type === 'leave')
+          && chatConv && chatConv.kind === 'channel' && chatConv.key === m.peer) {
+        chatConv = null;
+        location.hash = '';
+        return;
+      }
+      // System lifecycle lines (create/add/remove) belong in the channel
+      // view; render them too, not just text.
+      if (chatConv && chatConv.kind === m.kind && chatConv.key === key) {
+        chatMsgs.push(m);
+        $('#chat-messages').append(msgRow(m, false));
+        const $m = $('#chat-messages');
+        $m.scrollTop($m[0].scrollHeight);
+      } else if (!m.mine) {
+        chatUnread[key] = (chatUnread[key] || 0) + 1;
+      }
+    };
+    es.onerror = () => {}; // EventSource auto-reconnects
+  }
+  openChatStream();
+  fetchChannels();
 
   // Hash router. Currently handles chat routes (chat:channel:<id> /
   // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
@@ -325,15 +617,40 @@ $(function () {
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
+    // "+ channel" → prompt for a name, create EMPTY (just us), open it and
+    // pop the members panel so the user adds people deliberately — no
+    // surprise "everyone's already in".
+    if (h === 'chat:new') {
+      const name = (prompt('channel name') || '').trim();
+      if (name) {
+        $.ajax({
+          url: '/api/chat/channels', method: 'POST', contentType: 'application/json',
+          data: JSON.stringify({ name, members: [] }),
+        }).done((ch) => {
+          fetchChannels();
+          if (ch && ch.id) {
+            location.hash = 'chat:channel:' + ch.id;
+            setTimeout(renderMembersPanel, 0); // open the panel to add members
+          }
+        }).fail((xhr) => alert('create channel: ' + errorOf(xhr)));
+      }
+      location.hash = '';
+      return;
+    }
     const m = h.match(/^chat:(channel|dm):(.+)$/);
     if (!m) return;
-    const [, kind, id] = m;
+    const [, kind, key] = m;
+    chatConv = { kind, key };
+    chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-chat').removeClass('hidden');
-    $('#chat-title').text(kind === 'channel' ? '# ' + id : id);
+    setChatTitle();
     $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
-    renderChat();
+    // Members button only for channels; collapse the panel on switch.
+    $('#chat-members').toggle(kind === 'channel');
+    $('#chat-members-panel').addClass('hidden').empty();
+    loadConversation();
   }
   // highlightActiveRoute marks the sidebar row matching the current hash
   // so the user can see where they are. Re-run after every tree rebuild
@@ -345,8 +662,10 @@ $(function () {
     const a = window.f2fCall && window.f2fCall.active;
     const callRoutes = [];
     if (a) {
-      callRoutes.push('call:' + a.kind + ':' + a.id);
-      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + a.id : 'chat:channel:' + a.id);
+      // dm routes are keyed by pub (display name lives in a.id/a.title).
+      const key = a.kind === 'dm' ? (a.pub || a.id) : a.id;
+      callRoutes.push('call:' + (a.kind === 'dm' ? 'dm' : a.kind) + ':' + key);
+      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + key : 'chat:channel:' + a.id);
     }
     $('#ax-tree .ax-tree-row').each(function () {
       const r = $(this).attr('data-route');
@@ -361,21 +680,55 @@ $(function () {
   applyRoute();
   highlightActiveRoute();
 
-  // Local-only send: appends the typed line as our own message. No
-  // backend yet — purely the layout interaction.
+  // Send: POST to the messenger service; the message comes back on the SSE
+  // stream (the backend echoes our own copy), which appends it — so we don't
+  // append here, avoiding a duplicate.
   $('#chat-form').on('submit', function (e) {
     e.preventDefault();
+    if (!chatConv) return;
     const $in = $('#chat-input');
     const text = $in.val().trim();
     if (!text) return;
-    const now = new Date();
-    const time = String(now.getHours()).padStart(2, '0') + ':'
-      + String(now.getMinutes()).padStart(2, '0');
-    const $m = $('#chat-messages');
-    const grouped = $m.children().last().attr('data-author') === 'you';
-    $m.append(msgRow({ author: 'you', time, text }, grouped));
     $in.val('');
-    $m.scrollTop($m[0].scrollHeight);
+    $.ajax({
+      url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text }),
+    }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+  });
+
+  // Attachments: the + button opens a file picker; the chosen file rides
+  // inline (base64) on a message, with the current input text as its caption.
+  // Capped client-side to match the backend's MaxAttachment (8 MiB).
+  const MAX_ATTACH = 8 * 1024 * 1024;
+  $('#chat-attach').on('click', function () {
+    if (chatConv) $('#chat-file').trigger('click');
+  });
+  $('#chat-file').on('change', function () {
+    const file = this.files && this.files[0];
+    this.value = ''; // allow re-picking the same file later
+    if (!file || !chatConv) return;
+    if (file.size > MAX_ATTACH) {
+      alert('file too large: ' + fmtBytes(file.size) + ' (max 8 MiB)');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function () {
+      // readAsDataURL gives "data:<mime>;base64,<payload>" — keep the payload;
+      // Go decodes the []byte field straight from that base64 string.
+      const b64 = String(reader.result).split(',', 2)[1] || '';
+      const $in = $('#chat-input');
+      const caption = $in.val().trim();
+      $in.val('');
+      $.ajax({
+        url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({
+          kind: chatConv.kind, key: chatConv.key, body: caption,
+          file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
+        }),
+      }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+    };
+    reader.onerror = function () { alert('could not read file'); };
+    reader.readAsDataURL(file);
   });
 
   const $btnEngine = $('#btn-engine');
@@ -399,7 +752,6 @@ $(function () {
     .forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
   let liveIntercepts = []; // last seen from /api/status
-  let livePeers = [];      // last seen camp peers from /api/status
   // Shell/VNC discovery is STICKY: bus links flap, so we keep a peer listed
   // for a short TTL after it was last seen reachable instead of dropping it
   // the instant one poll comes back without it. {pub → {name, ts}}.
@@ -600,6 +952,14 @@ $(function () {
 
     liveIntercepts = s.intercepts || [];
     livePeers = s.peers || [];
+    // Names just became available — redraw the open chat once so authors and
+    // the title resolve to nicknames instead of pub prefixes (matters on a
+    // hard reload where the chat renders before /api/status lands).
+    if (chatNamesPending && chatConv) {
+      chatNamesPending = false;
+      setChatTitle();
+      renderChat(chatMsgs);
+    }
     refreshInterceptPeerSelect();
     refreshCallPeerSelect(s.active_peer_pub || '');
     renderIntercepts();
@@ -669,16 +1029,22 @@ $(function () {
     );
   }
 
-  function row(state, label, extra, url, route, tab) {
+  function row(state, label, extra, url, route, tab, removePeer) {
     let attrs = url ? ` data-url="${esc(url)}"` : '';
     if (route) attrs += ` data-route="${esc(route)}"`;
     if (tab) attrs += ` data-tab="${esc(tab)}"`;
     // state === null → render without a status dot (e.g. chat rows).
     const dot = state === null ? '' : `<span class="ax-tree-dot"></span>`;
+    // removePeer (a pub) → a forget button at the end of the row. Used for
+    // offline peer ghosts; the click handler below issues the DELETE.
+    const rm = removePeer
+      ? `<button class="ax-tree-remove" data-remove-peer="${esc(removePeer)}" title="forget peer">×</button>`
+      : '';
     return `<div class="ax-tree-row ${state || ''}"${attrs} title="${esc(url || extra || label)}">`
       + dot
       + `<span class="ax-tree-label">${esc(label)}</span>`
       + (extra ? `<span class="ax-tree-badge">${esc(extra)}</span>` : '')
+      + rm
       + `</div>`;
   }
 
@@ -745,8 +1111,12 @@ $(function () {
         const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
           ? `${p.last_rtt_ms}ms` : '';
         const meta = [ip, rtt].filter(Boolean).join(' · ');
+        // Offline ghosts (no pairing, not in the camp roster) carry a
+        // forget button — the camp only re-sends active peers, so removing
+        // one of these sticks. Live peers have no button (would reappear).
+        const removable = (!p.self && state === 'offline' && p.pub) ? p.pub : null;
         // clicking a peer opens the (hidden) camp tab with this peer's details
-        peersBody += row(state, peerLabel(p), meta, null, 'peer:' + peerKey(p));
+        peersBody += row(state, peerLabel(p), meta, null, 'peer:' + peerKey(p), null, removable);
       }
     }
 
@@ -806,52 +1176,57 @@ $(function () {
     // its duplicate from the status list.
     const myGroupHost = (activeCall && activeCall.kind === 'group' && window.f2fGroup) ? window.f2fGroup.sfuHost : '';
     let meetRows = '';
+    function channelNameById(cid) {
+      if (!cid) return '';
+      const ch = chatChannels.find(ch => ch.id === cid);
+      return ch ? ch.name : '';
+    }
     for (const c of calls) {
       if (myGroupHost && c.sfu_host === myGroupHost) continue;
-      const owner = peerNameByIP(c.sfu_host) || 'group';
-      const id = c.call_id || c.sfu_host || owner;
+      // A channel-bound call shows its channel name; fall back to the host
+      // peer's name for unbound calls.
+      const chName = channelNameById(c.channel);
+      const title = chName ? '# ' + chName : (peerNameByIP(c.sfu_host) || 'group');
+      const id = c.call_id || c.sfu_host || title;
       const n = (c.participants || []).length;
-      meetRows += row('online', owner, n + ' in · group', null, 'call:group:' + id);
+      meetRows += row('online', title, n + ' in · group', null, 'call:group:' + id);
     }
     // Our current call (p2p or group) — routable + highlightable like chats.
     // No state dot: the in-call pulse pip already marks it.
     if (activeCall && activeCall.kind === 'dm') {
-      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + activeCall.id);
+      meetRows += row(null, activeCall.title, 'p2p', null, 'call:dm:' + (activeCall.pub || activeCall.id));
     } else if (activeCall && activeCall.kind === 'group') {
       meetRows += row(null, '# ' + activeCall.title, 'group', null, 'call:group:' + activeCall.id);
     }
 
-    // chats — visual mock until the chat service ships. Direct = 1-1
-    // mapped to a single peer; group = named room with N members. An
-    // active call inside a chat is hinted in the meta column ("in call"
-    // for DMs, "live · N" for groups) so users can see at a glance
-    // where the talking is happening. Same data drives the standalone
-    // `calls` category below — for now the calls list is computed off
-    // these mocks too.
-    const MOCK_GROUPS = [
-      { name: '#general',    members: 5, unread: 3 },
-      { name: '#dev',        members: 3, unread: 0, liveCall: { participants: 2 } },
-      { name: '#offtopic',   members: 8, unread: 0 },
-      { name: '#sf-only',    members: 4, unread: 1 },
-    ];
-
-    // DIRECT = every peer except ourselves; one row each, routed to a DM.
-    const directs = peers.filter(p => !p.self);
+    // DIRECT = every peer except ourselves; one row each, routed to a DM by
+    // pub (the backend keys conversations by pub).
+    const directs = peers.filter(p => !p.self && p.pub);
     const directsBody = directs.length
       ? directs.map(p => {
           const name = p.name || (p.pub || '').slice(0, 12);
-          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.id === name;
-          return row(null, name, inCall ? '● in call' : '', null, 'chat:dm:' + name);
+          // The active dm call stores the peer's pub separately (id is the
+          // display label) — match on pub.
+          const inCall = activeCall && activeCall.kind === 'dm' && activeCall.pub === p.pub;
+          const tags = [];
+          if (inCall) tags.push('● in call');
+          if (chatUnread[p.pub]) tags.push(`${chatUnread[p.pub]} new`);
+          return row(null, name, tags.join(' · '), null, 'chat:dm:' + p.pub);
         }).join('')
       : empty('no peers');
 
-    const groupsBody = MOCK_GROUPS.map(g => {
-      const tags = [`${g.members} members`];
-      if (g.unread) tags.push(`${g.unread} new`);
-      if (g.liveCall) tags.push(`● live · ${g.liveCall.participants}`);
-      const id = g.name.replace(/^#/, '');
-      return row(null, '# ' + id, tags.join(' · '), null, 'chat:channel:' + id);
-    }).join('');
+    // CHANNELS = the rooms we belong to (from /api/chat/channels). Member
+    // count and unread ride in the meta column.
+    const groupsBody = (chatChannels.length
+      ? chatChannels.slice().sort((a, b) => a.name.localeCompare(b.name)).map(ch => {
+          const tags = [`${(ch.members || []).length} members`];
+          if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
+          // Our group call is bound to a channel id — surface it on the row.
+          if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
+          return row(null, '# ' + ch.name, tags.join(' · '), null, 'chat:channel:' + ch.id);
+        }).join('')
+      : empty('no groups'))
+      + addRow('+ channel', 'chat:new');
 
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
@@ -874,7 +1249,7 @@ $(function () {
     // separately collapsible. The unread badge on the outer "messages"
     // header sums new messages across both lists so a collapsed
     // sidebar still shows pending traffic.
-    const totalUnread = MOCK_GROUPS.reduce((n, g) => n + (g.unread || 0), 0);
+    const totalUnread = Object.values(chatUnread).reduce((n, c) => n + (c || 0), 0);
     function section(label) {
       return `<div class="ax-tree-section">${esc(label)}</div>`;
     }
@@ -886,9 +1261,9 @@ $(function () {
     }
     const meetsBody = meetRows || empty('no calls');
     const messagingBody =
-      section('meets')    + meetsBody
-      + section('channels') + groupsBody
-      + section('direct')   + directsBody;
+      section('calls')   + meetsBody
+      + section('groups')  + groupsBody
+      + section('direct')  + directsBody;
 
     // tunnel — outbound intercepts + inbound open ports under one group
     // with section dividers (mirrors the app's "tunnel" tab).
@@ -913,7 +1288,7 @@ $(function () {
 
     $tree.html(
       category('peers',     'peers',     peers.length, peersBody)
-      + category('shells',    'shells',    shellList.length || null, shellsBody)
+      + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'messages',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
@@ -1477,6 +1852,15 @@ $(function () {
       }
       const $rtt = $('<td>').text(rttText).attr('title', rttTitle);
       if (!p.verified) $rtt.addClass('muted');
+      // Actions: forget an offline ghost (same gate/semantics as the
+      // sidebar). Live peers get no button — they'd reappear next poll.
+      const $actions = $('<td>').addClass('ax-peers-actions');
+      if (!p.self && dotClass === 'offline' && p.pub) {
+        $actions.append(
+          $('<button class="ax-peers-remove" title="forget peer">×</button>')
+            .attr('data-remove-peer', p.pub),
+        );
+      }
       // overlay address cell: pub-derived per-camp v6. v4 is no longer
       // a peer-identifying address (every mac uses the same localV4Alias
       // on its own utun, so peer-to-peer addressing is v6 only).
@@ -1488,11 +1872,20 @@ $(function () {
         $('<td>').text(endpoint || '—'),
         $rtt,
         $('<td>').addClass('muted').text(p.joined_at ? humanAgo(p.joined_at) : '—'),
+        $actions,
       );
       $campBody.append($row);
     }
     $campTable.removeClass('hidden');
   }
+
+  // Forget-peer button in the main-window peers table (offline ghosts).
+  $campBody.on('click', '.ax-peers-remove[data-remove-peer]', function () {
+    const pub = $(this).attr('data-remove-peer');
+    if (!pub) return;
+    $.ajax({ url: '/api/peers/' + encodeURIComponent(pub), method: 'DELETE' })
+      .always(() => { if (typeof refreshStatus === 'function') refreshStatus(); });
+  });
 
   // Meet-tab peer selector: set the engine's active peer (the one
   // signalling/HTTP-forward in /api/signal/outbox goes to). Reflected

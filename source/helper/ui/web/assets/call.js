@@ -14,6 +14,22 @@ $(function () {
   console.log('%c[grp] call.js INSTRUMENTED build loaded', 'color:#7fc474;font-weight:bold');
   const PUB_RE = /^[0-9a-f]{64}$/;
 
+  // encHash escapes a value for the URL hash but keeps '/' readable —
+  // channel ids are "<ownerPub>/<name>" and a %2F-littered address bar is
+  // noise; the route regexes capture slashes fine.
+  function encHash(v) { return encodeURIComponent(v).replace(/%2F/gi, '/'); }
+
+  // chatEvent drops a call lifecycle line (started/ended) into the chat the
+  // call belongs to — events are ordinary messages, so they reach every
+  // member's history through the messenger's delivery/outbox machinery.
+  function chatEvent(kind, key, type) {
+    if (!key) return;
+    fetch('/api/chat/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, key, type }),
+    }).catch(() => {});
+  }
+
   // ---- DOM ----
   const $bar = $('#ax-callbar');
   const videoPeer = document.getElementById('call-video-peer');
@@ -248,7 +264,7 @@ $(function () {
       }
       const name = await nameForPub(msg.from);
       Call.adopt('dm', name, name, msg.from);
-      location.hash = 'call:dm:' + encodeURIComponent(name);
+      location.hash = 'call:dm:' + msg.from; // routes key dm calls by pub, like chats
       await ensureLocalStream();
       pc = newPC();
       isOfferer = false;
@@ -345,38 +361,50 @@ $(function () {
         const name = title || (await nameForPub(pub)); // nameForPub falls back to a pub slice
         this.adopt('dm', name, name, pub);
         currentPeerPub = pub;
-        location.hash = 'call:dm:' + encodeURIComponent(name);
+        location.hash = 'call:dm:' + pub; // routes key dm calls by pub, like chats
+        chatEvent('dm', pub, 'call_start'); // caller drops the system line (callee doesn't — no dupes)
         try { await offerTo(); } catch (_) { this.hangup(); }
       } else {
         // group (SFU) — create/join the camp's call and render in this window.
         this.adopt('group', idOrName, title || idOrName, '');
         currentPeerPub = '';
-        location.hash = 'call:group:' + encodeURIComponent(idOrName);
+        location.hash = 'call:group:' + encHash(idOrName);
         Group.start(idOrName, title || idOrName).catch(() => this.hangup());
       }
     },
 
     // hang up. For dm we notify the peer over the p2p channel; for group the
-    // SFU leave happens in Group.leave (via endLocal).
+    // SFU leave happens in Group.leave (via endLocal). The side that ACTS
+    // (presses hangup / hosts the dying SFU) drops the "call ended" line —
+    // the passive side doesn't, so it lands exactly once.
     async hangup(silent) {
       if (this.active && this.active.kind === 'dm') {
         let pub = this.active.pub || currentPeerPub;
         if (pub) { currentPeerPub = pub; try { sendSignal({ kind: 'hangup' }); } catch (_) {} }
+        if (pub) chatEvent('dm', pub, 'call_end');
+      } else if (this.active && this.active.kind === 'group'
+                 && Group.channel && Group.sfuHost === Group.myIP) {
+        chatEvent('channel', Group.channel, 'call_end');
       }
       await this.endLocal(silent);
     },
 
     // tear everything down locally without signalling (used on a remote hangup).
-    // silent = we're switching to another call, so skip the "ended" screen.
+    // silent = we're switching to another call, so skip any navigation.
+    // A finished call drops the user back into the chat it belongs to (the
+    // "call ended" line is already there) instead of a dead-end ended screen.
     async endLocal(silent) {
-      const label = this.active ? (this.active.kind === 'group' ? '# ' : '') + this.active.title : '';
-      if (this.active && this.active.kind === 'group') await Group.leave(true);
+      const a = this.active;
+      const chatRoute = a
+        ? (a.kind === 'group' ? 'chat:channel:' + encHash(a.id) : 'chat:dm:' + (a.pub || a.id))
+        : '';
+      if (a && a.kind === 'group') await Group.leave(true);
       else teardown();
       clearCall();
       this.active = null;
       this.renderBar();
       if (!silent && (location.hash || '').indexOf('#call:') === 0) {
-        location.hash = 'call:ended' + (label ? ':' + encodeURIComponent(label) : '');
+        location.hash = chatRoute;
       }
     },
 
@@ -426,34 +454,39 @@ $(function () {
       return r.json();
     },
 
+    channel: '', // messenger channel id this group call is bound to ('' = unbound)
+
     async start(target) {
       try {
         const s = await (await fetch('/api/status')).json();
         this.myIP = (s && s.local_ip) || '';
         this.myName = (s && s.camp_name) || 'you';
       } catch (_) {}
-      // Resolve the clicked target to an existing call and JOIN it — this is
-      // the meet2 behaviour that the port dropped. `target` may be a call_id,
-      // an sfu_host IP, or a bare channel name (there is no backend room
-      // binding yet). A specific target (digit-leading: call_id or IP) is
-      // worth a few discovery retries because a peer's call may not have been
-      // polled yet; a channel name only falls back to the camp's single
-      // active call, else we create a fresh one.
+      // `target` is a messenger channel id ("<ownerPub>/<name>", started from
+      // a chat), or a call_id / sfu_host IP (clicked an existing meet row).
+      // A channel target binds: we join THAT channel's call or create one
+      // bound to it — never capture another channel's call. A specific
+      // target (digit-leading call_id or IP) is worth a few discovery
+      // retries because a peer's call may not have been polled yet.
+      const isChannel = (target || '').indexOf('/') > 0;
+      this.channel = isChannel ? target : '';
       const specific = /^\d/.test(target || '');
-      const call = await this.findCall(target, specific ? 4 : 1);
+      const call = await this.findCall(target, specific ? 4 : 1, isChannel);
       console.log('[grp] start target=%s myIP=%s → %s', target, this.myIP, call ? 'JOIN host ' + call.sfu_host : 'CREATE new (no existing call found)');
       if (call) { this.sfuHost = call.sfu_host; await this.join(); }
       else { await this.create(); }
     },
-    // findCall locates the call to join: first an exact match on the target
-    // (call_id or sfu_host), then any active call in the camp. Retries to ride
-    // out the ~3s remote-call discovery lag before we give up and create one.
-    async findCall(target, tries) {
+    // findCall locates the call to join: a channel target matches ONLY its
+    // channel's call; otherwise exact call_id/sfu_host match, then any
+    // active call. Retries ride out the ~3s remote-call discovery lag.
+    async findCall(target, tries, channelOnly) {
       for (let i = 0; i < tries; i++) {
         let calls = [];
         try { calls = (await this.jget('/api/call/list')) || []; } catch (_) {}
-        const c = calls.find(x => x.call_id === target || x.sfu_host === target)
-               || calls.find(x => x.sfu_host);
+        const c = channelOnly
+          ? calls.find(x => x.channel === target)
+          : (calls.find(x => x.call_id === target || x.sfu_host === target)
+             || calls.find(x => x.sfu_host));
         if (c) return c;
         if (i < tries - 1) await new Promise(r => setTimeout(r, 1200));
       }
@@ -462,8 +495,14 @@ $(function () {
 
     async create() {
       if (this.inCall) await this.leave(true);
-      await this.jget('/api/call/create', { method: 'POST' });
+      await this.jget('/api/call/create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: this.channel }),
+      });
       this.sfuHost = this.myIP;
+      // Only the creator announces — joiners don't, so the channel gets one
+      // "call started" line per call.
+      chatEvent('channel', this.channel, 'call_start');
       await this.joinSFU();
     },
     async join() {
@@ -774,13 +813,20 @@ $(function () {
     if (inGroup()) { Group.toggleShare(); return; }
     if (screenStream) stopScreenShare(); else startScreenShare();
   }
+  // dm routes (chat and call alike) are keyed by pub; group by channel id.
   function actChat() {
     const a = Call.active;
     if (!a) return;
-    location.hash = (a.kind === 'group' ? 'chat:channel:' : 'chat:dm:') + encodeURIComponent(a.id);
+    location.hash = a.kind === 'group'
+      ? 'chat:channel:' + encHash(a.id)
+      : 'chat:dm:' + (a.pub || a.id);
   }
   function openCall() {
-    if (Call.active) location.hash = 'call:' + Call.active.kind + ':' + encodeURIComponent(Call.active.id);
+    const a = Call.active;
+    if (!a) return;
+    location.hash = a.kind === 'group'
+      ? 'call:group:' + encHash(a.id)
+      : 'call:dm:' + (a.pub || a.id);
   }
   function setShareState(active) {
     if ($btnShare) {
@@ -949,21 +995,28 @@ $(function () {
   setVolume(80);
 
   // --- chat: jump to the DM/channel this call belongs to (call keeps running) ---
+  // Chat routes key conversations by pub (dm) / channel id (group), while
+  // active.id is the display label for a dm — so use the stored pub there.
   $(document).on('click', '#call-chat', function () {
     const a = Call.active;
     if (!a) return;
-    location.hash = (a.kind === 'group' ? 'chat:channel:' : 'chat:dm:') + encodeURIComponent(a.id);
+    location.hash = a.kind === 'group'
+      ? 'chat:channel:' + encHash(a.id)
+      : 'chat:dm:' + encodeURIComponent(a.pub || a.id);
   });
 
   // --- hang up ---
   $(document).on('click', '#call-hangup', function () { Call.hangup(); });
 
-  // The chat header call button starts a call for the chat we're in.
+  // The chat header call button starts a call for the chat we're in. The
+  // channel id is "<ownerPub>/<name>" — ugly as a title, so take the human
+  // name from the chat header instead.
   $('#chat-call').on('click', function () {
     const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
     const m = h.match(/^chat:(dm|channel):(.+)$/);
     if (!m) return;
-    if (m[1] === 'channel') Call.start('group', m[2], m[2]);
+    const title = $('#chat-title').text().replace(/^# /, '');
+    if (m[1] === 'channel') Call.start('group', m[2], title || m[2]);
     else Call.start('dm', m[2]);
   });
 
@@ -991,7 +1044,14 @@ $(function () {
     const m = decodeURIComponent(raw).match(/^call:(dm|group):(.+)$/);
     if (!m) return;
     const [, kind, id] = m;
-    const title = (Call.active && Call.active.id === id) ? Call.active.title : id;
+    // dm routes carry the peer PUB; the active call matches on it (id holds
+    // the display name). Fallback titles: group id is "<ownerPub>/<name>" —
+    // show the name part; a bare pub shows a short prefix until resolved.
+    const a = Call.active;
+    const matches = a && (a.id === id || a.pub === id);
+    const title = matches ? a.title
+      : (kind === 'group' ? (id.split('/').pop() || id)
+         : (PUB_RE.test(id) ? id.slice(0, 12) : id));
     // Paint the stage FIRST so the tiles window is shown regardless of join
     // timing — Call.start below sets the same hash, so it would NOT re-fire this
     // router, and the stage must already be up by then.
@@ -1004,7 +1064,7 @@ $(function () {
     // A group route we're not already in means the user navigated here (clicked
     // a meet in the sidebar, or reloaded mid-call) WITHOUT joining — join now.
     if (kind === 'group' && !(Call.active && Call.active.kind === 'group' && Call.active.id === id)) {
-      Call.start('group', id, id);
+      Call.start('group', id, title);
     }
   }
   window.addEventListener('hashchange', applyCallRoute);

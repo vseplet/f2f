@@ -59,7 +59,7 @@ type Server struct {
 	tunnel   *tunnel.Service
 	camp     *camp.Service
 	dns      *dns.Service
-	msg      *messenger.Store
+	msg      *messenger.Service
 	notify   *notify.Service
 	gossip   *gossip.Service
 	shell    *shell.Service
@@ -72,7 +72,7 @@ type Server struct {
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Store, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -120,9 +120,43 @@ func (s *Server) RegisterBus(b *bus.Service) {
 				}
 			}
 		}
+		// A fresh offer is the start of a new p2p call — ring it as a
+		// notification. ICE-restart offers carry no "fresh" flag, so they
+		// don't re-ring an established call.
+		if s.notify != nil && fromPub != "" {
+			var sig struct {
+				Kind  string `json:"kind"`
+				Fresh bool   `json:"fresh"`
+			}
+			if json.Unmarshal(payload, &sig) == nil && sig.Kind == "offer" && sig.Fresh {
+				s.notify.Push(notify.Notification{
+					Kind:  "call",
+					Title: s.peerName(fromPub) + " is calling",
+					From:  fromPub,
+					Route: "chat:dm:" + fromPub,
+				})
+			}
+		}
 		s.signals.broadcast(payload)
 		return nil, nil
 	})
+}
+
+// peerName resolves a peer pub to its display name from the engine roster,
+// falling back to a short fingerprint. Used to title call notifications.
+func (s *Server) peerName(pub string) string {
+	for _, p := range s.engine.Status().Peers {
+		if p.Pub == pub {
+			if p.Name != "" {
+				return p.Name
+			}
+			break
+		}
+	}
+	if len(pub) > 12 {
+		return pub[:12]
+	}
+	return pub
 }
 
 // pubForOverlayIP resolves a peer's overlay v4 to its pub via the
@@ -177,8 +211,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
+	mux.HandleFunc("DELETE /api/peers/{pub}", s.handleForgetPeer)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
+	mux.HandleFunc("GET /api/chat/channels", s.handleChatChannels)
+	mux.HandleFunc("POST /api/chat/channels", s.handleChatCreateChannel)
+	mux.HandleFunc("POST /api/chat/members", s.handleChatMembers)
+	mux.HandleFunc("POST /api/chat/channels/delete", s.handleChatDeleteChannel)
+	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
+	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
+	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// Remote terminal (services/shell over the bus). /peers lists camp peers
@@ -235,6 +278,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Notifications: recent list + live SSE stream for the UI.
 	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
+	mux.HandleFunc("DELETE /api/notifications", s.handleClearNotifications)
 	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
 
 	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
@@ -404,6 +448,15 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 // handleNotifications returns the buffered notifications (oldest-first).
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.notify.Recent())
+}
+
+// handleClearNotifications drops every notification in the active camp.
+func (s *Server) handleClearNotifications(w http.ResponseWriter, r *http.Request) {
+	if err := s.notify.Clear(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleMesh returns every peer's gossip NodeState — the mesh-wide topology
@@ -1200,6 +1253,35 @@ func (s *Server) handleSetActivePeer(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleForgetPeer drops a peer from the live map and the persisted camp
+// catalog. Intended for offline ghosts the user wants off the list — the
+// camp only re-sends a peer once it's active again, so a forgotten offline
+// peer stays gone. 204 on success; 404 if it wasn't there.
+func (s *Server) handleForgetPeer(w http.ResponseWriter, r *http.Request) {
+	pub := r.PathValue("pub")
+	if pub == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing pub"))
+		return
+	}
+	found := s.engine.ForgetPeer(pub)
+	if campID := s.engine.Status().CampID; campID != "" {
+		_ = s.store.UpdateCamp(campID, func(c *config.Camp) {
+			kept := c.PeerCatalog[:0]
+			for _, p := range c.PeerCatalog {
+				if p.Pub != pub {
+					kept = append(kept, p)
+				}
+			}
+			c.PeerCatalog = kept
+		})
+	}
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1269,7 +1351,13 @@ func (s *Server) handleCallList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCallCreate(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.calls.Create()
+	// Optional body: {channel} — binds the call to a messenger channel so
+	// its id is "<channel>/<initiator_pub>" and joiners match on it.
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // empty body = unbound call
+	cs, err := s.calls.Create(req.Channel)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return

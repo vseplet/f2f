@@ -3,6 +3,7 @@ package messenger
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -13,33 +14,35 @@ func TestPerCampRoundTrip(t *testing.T) {
 		_ = os.MkdirAll(d, 0o755)
 		return d
 	}
-	s := New(campDir)
+	s := NewStore(campDir)
 	defer s.Close()
 
 	const camp = "abc_xyz"
+	const chanID = "alice/general"
 
-	// channels (upsert renames)
-	if err := s.UpsertChannel(camp, Channel{ID: "general", Name: "general"}); err != nil {
+	// channels (upsert updates the roster)
+	if err := s.UpsertChannel(camp, Channel{ID: chanID, Name: "general", Owner: "alice", Members: []string{"alice"}}); err != nil {
 		t.Fatalf("upsert channel: %v", err)
 	}
-	if err := s.UpsertChannel(camp, Channel{ID: "general", Name: "General"}); err != nil {
-		t.Fatalf("upsert channel (rename): %v", err)
+	if err := s.UpsertChannel(camp, Channel{ID: chanID, Name: "general", Owner: "alice", Members: []string{"alice", "bob"}}); err != nil {
+		t.Fatalf("upsert channel (members): %v", err)
 	}
 	chs, err := s.Channels(camp)
 	if err != nil {
 		t.Fatalf("channels: %v", err)
 	}
-	if len(chs) != 1 || chs[0].Name != "General" {
-		t.Fatalf("channels = %+v, want 1 named General", chs)
+	if len(chs) != 1 || len(chs[0].Members) != 2 {
+		t.Fatalf("channels = %+v, want 1 with 2 members", chs)
 	}
 
 	// messages (oldest-first on read)
-	for _, body := range []string{"first", "second", "third"} {
-		if _, err := s.AddMessage(camp, Message{Kind: "channel", Peer: "general", AuthorName: "me", Body: body, Mine: true}); err != nil {
+	for i, body := range []string{"first", "second", "third"} {
+		m := Message{ID: "m" + strconv.Itoa(i), Kind: "channel", Peer: chanID, Type: TypeText, From: "me", Body: body, Mine: true, TS: int64(i + 1)}
+		if err := s.AddMessage(camp, m); err != nil {
 			t.Fatalf("add message: %v", err)
 		}
 	}
-	msgs, err := s.Messages(camp, "channel", "general", 0)
+	msgs, err := s.Messages(camp, "channel", chanID, 0)
 	if err != nil {
 		t.Fatalf("messages: %v", err)
 	}
@@ -56,7 +59,7 @@ func TestPerCampRoundTrip(t *testing.T) {
 	}
 
 	// a different camp is fully isolated (separate file)
-	if other, _ := s.Messages("other_camp", "channel", "general", 0); len(other) != 0 {
+	if other, _ := s.Messages("other_camp", "channel", chanID, 0); len(other) != 0 {
 		t.Fatalf("other camp should be empty, got %d", len(other))
 	}
 }
