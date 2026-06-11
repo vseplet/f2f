@@ -2256,8 +2256,16 @@ a.ax-domain-link:hover {
     margin-bottom: 8px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 8px;
+}
+/* The title eats the free space so the action buttons stay grouped together
+   at the right edge (members, then the call button rightmost). */
+.ax-chat-header #chat-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ax-frame .ax-chat-call {
     flex-shrink: 0;
@@ -2374,6 +2382,45 @@ a.ax-domain-link:hover {
     background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
 }
 .ax-msg-file-size { color: var(--muted); font-size: 11px; margin-left: auto; }
+
+/* Torrent file: a chip carrying a magnet, with a download button + live
+   transfer status (filled by updateTorrentChips). */
+.ax-msg-torrent {
+    max-width: 72%;
+    padding: 8px 11px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    font-size: 13px;
+}
+.ax-msg.is-mine .ax-msg-torrent {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+}
+.ax-msg-torrent-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+}
+.ax-msg-torrent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ax-msg-torrent-size { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
+.ax-msg-torrent-status { margin-top: 5px; font-size: 12px; }
+.ax-msg-torrent-status:empty { display: none; }
+.ax-msg-torrent-dl {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--accent);
+    border-radius: 7px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font: inherit;
+}
+.ax-msg-torrent-dl:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.ax-msg-torrent-status .t-prog,
+.ax-msg-torrent-status .t-wait { color: var(--muted); }
+.ax-msg-torrent-status .t-seed { color: var(--ok); }
+.ax-msg-torrent-status .t-done { color: var(--ok); }
+.ax-msg-torrent-open { color: var(--accent); text-decoration: none; cursor: pointer; margin-left: 6px; }
+.ax-msg-torrent-open:hover { text-decoration: underline; }
 /* Channel lifecycle line (created / members changed) — centred, muted, so
    it reads as an event rather than a chat line. */
 .ax-msg-system {

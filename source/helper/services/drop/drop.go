@@ -63,6 +63,13 @@ type Service struct {
 
 	peerMu    sync.RWMutex
 	peerFiles map[string][]PeerFile // pub → files
+
+	// scopes pins a seeded file to one conversation (channel id or dm key).
+	// A scoped file is private: it's served over torrent to anyone holding the
+	// magnet (which only travels in that conversation) but is hidden from the
+	// public catalog the bus "files" handler returns. infohash → scope.
+	scopeMu sync.RWMutex
+	scopes  map[string]string
 }
 
 // New constructs a Service. campDir resolves a camp's directory
@@ -73,6 +80,7 @@ func New(eng *engine.Engine, campDir func(campID string) string, b *bus.Service)
 		bus:       b,
 		campDir:   campDir,
 		peerFiles: map[string][]PeerFile{},
+		scopes:    map[string]string{},
 	}
 }
 
@@ -90,6 +98,9 @@ func (s *Service) Register() {
 		}
 		out := []PeerFile{}
 		for _, h := range c.ListSeeds() {
+			if s.scopeOf(h.InfoHash) != "" {
+				continue // private to a conversation — not in the public catalog
+			}
 			out = append(out, PeerFile{
 				Name: h.Name, Size: h.Size,
 				InfoHash: h.InfoHash, Magnet: h.Magnet,
@@ -112,6 +123,7 @@ func (s *Service) Start(campID, localIP string) error {
 	s.campID = campID
 	s.sharedDir = filepath.Join(s.campDir(campID), "shared")
 	s.downloads = filepath.Join(s.campDir(campID), "drops")
+	s.loadScopes()
 	t0 := time.Now()
 	opts := internaltorrent.Options{
 		ListenAddr:   net.JoinHostPort(localIP, fmt.Sprint(internaltorrent.DefaultPort)),
@@ -390,6 +402,68 @@ type savedDownload struct {
 	Magnet   string   `json:"magnet"`
 	InfoHash string   `json:"info_hash"`
 	Peers    []string `json:"peers,omitempty"`
+}
+
+// ShareToScope seeds a file and pins it to a conversation (channel id or dm
+// key) so it stays out of the public catalog. Returns the seed's peer-facing
+// metadata (name/size/info_hash/magnet) for embedding in a chat message.
+func (s *Service) ShareToScope(path, scope string) (PeerFile, error) {
+	c := s.Client()
+	if c == nil {
+		return PeerFile{}, fmt.Errorf("drop: torrent client not running")
+	}
+	h, err := c.AddSeed(path)
+	if err != nil {
+		return PeerFile{}, err
+	}
+	s.scopeMu.Lock()
+	s.scopes[h.InfoHash] = scope
+	s.scopeMu.Unlock()
+	s.saveScopes()
+	return PeerFile{Name: h.Name, Size: h.Size, InfoHash: h.InfoHash, Magnet: h.Magnet}, nil
+}
+
+// scopeOf returns the conversation a seeded file is pinned to ("" = public).
+func (s *Service) scopeOf(infoHash string) string {
+	s.scopeMu.RLock()
+	defer s.scopeMu.RUnlock()
+	return s.scopes[infoHash]
+}
+
+func (s *Service) scopesStatePath() string {
+	return filepath.Join(s.campDir(s.campID), "file-scopes.json")
+}
+
+func (s *Service) loadScopes() {
+	data, err := os.ReadFile(s.scopesStatePath())
+	if err != nil {
+		return
+	}
+	m := map[string]string{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		clog.Warn("torrent", "parse scopes: %v", err)
+		return
+	}
+	s.scopeMu.Lock()
+	s.scopes = m
+	s.scopeMu.Unlock()
+}
+
+func (s *Service) saveScopes() {
+	s.scopeMu.RLock()
+	data, err := json.MarshalIndent(s.scopes, "", "  ")
+	s.scopeMu.RUnlock()
+	if err != nil {
+		return
+	}
+	path := s.scopesStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		clog.Warn("torrent", "save scopes: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		clog.Warn("torrent", "save scopes: %v", err)
+	}
 }
 
 func (s *Service) downloadsStatePath() string {

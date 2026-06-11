@@ -221,6 +221,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
 	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
+	mux.HandleFunc("POST /api/chat/share", s.handleChatShare)
 	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 

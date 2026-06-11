@@ -7,7 +7,10 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -165,6 +168,76 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Errorf("bad type %q", req.Type))
 		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleChatShare shares a large file into a conversation over torrent.
+// multipart/form-data: file + kind (dm|channel) + key + optional body caption.
+// The file is seeded (scoped to this conversation so it stays out of the
+// public catalog) and a message carrying its torrent metadata is posted; the
+// recipient downloads it over the drop transport from the chat.
+func (s *Server) handleChatShare(w http.ResponseWriter, r *http.Request) {
+	t := s.drop.Client()
+	if t == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("torrent client not running"))
+		return
+	}
+	if err := r.ParseMultipartForm(8 << 30); err != nil { // 8 GiB cap on one share
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	kind, key := r.FormValue("kind"), r.FormValue("key")
+	if kind != "dm" && kind != "channel" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("kind must be dm or channel"))
+		return
+	}
+	if key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer file.Close()
+	dstPath := filepath.Join(t.SharedDir(), filepath.Base(hdr.Filename))
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		os.Remove(dstPath)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	dst.Close()
+	// Seed it pinned to this conversation, then announce it as a message.
+	pf, err := s.drop.ShareToScope(dstPath, key)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	att := &messenger.Attachment{
+		Name:     pf.Name,
+		Mime:     hdr.Header.Get("Content-Type"),
+		Size:     int(pf.Size),
+		InfoHash: pf.InfoHash,
+		Magnet:   pf.Magnet,
+	}
+	body := r.FormValue("body")
+	if kind == "dm" {
+		_, err = s.msg.SendDM(key, body, att)
+	} else {
+		_, err = s.msg.Post(key, body, att)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
