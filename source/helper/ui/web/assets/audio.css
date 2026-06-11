@@ -398,6 +398,10 @@
 .ax-tree-category[data-cat="domains"]  .ax-tree-label { color: #2fc7b0; }
 .ax-tree-category[data-cat="tunnel"]   .ax-tree-cat-icon,
 .ax-tree-category[data-cat="tunnel"]   .ax-tree-label { color: #e08a4c; }
+.ax-tree-category[data-cat="oidc"]     .ax-tree-cat-icon,
+.ax-tree-category[data-cat="oidc"]     .ax-tree-label { color: #7c5cff; }
+.ax-tree-category[data-cat="secrets"]  .ax-tree-cat-icon,
+.ax-tree-category[data-cat="secrets"]  .ax-tree-label { color: #a3e635; }
 .ax-tree-category[data-cat="policies"] .ax-tree-cat-icon,
 .ax-tree-category[data-cat="policies"] .ax-tree-label { color: #e0686e; }
 .ax-tree-category[data-cat="apps"]     .ax-tree-cat-icon,

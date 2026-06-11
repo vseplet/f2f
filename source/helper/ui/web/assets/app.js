@@ -1115,6 +1115,8 @@ $(function () {
     drop:     'bi-folder-fill',
     domains:  'bi-globe2',
     tunnel:   'bi-hdd-network-fill',
+    oidc:     'bi-person-badge-fill',
+    secrets:  'bi-key-fill',
     policies: 'bi-shield-lock-fill',
     apps:     'bi-grid-3x3-gap-fill',
   };
@@ -1412,6 +1414,8 @@ $(function () {
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
+      + category('oidc',      'OIDC',      null, empty('coming soon'))
+      + category('secrets',   'secrets',   null, empty('coming soon'))
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
