@@ -65,11 +65,23 @@ type Service struct {
 	peerFiles map[string][]PeerFile // pub → files
 
 	// scopes pins a seeded file to one conversation (channel id or dm key).
-	// A scoped file is private: it's served over torrent to anyone holding the
-	// magnet (which only travels in that conversation) but is hidden from the
-	// public catalog the bus "files" handler returns. infohash → scope.
+	// A scoped file is private: it's hidden from the public catalog and only
+	// served to peers who are members of that conversation (see isMember).
+	// infohash → scope.
 	scopeMu sync.RWMutex
 	scopes  map[string]string
+
+	// isMember reports whether a peer may see files scoped to a conversation.
+	// Backed by the messenger (channel roster / dm pair). nil = scoped files
+	// stay fully private (served to nobody but ourselves).
+	isMember func(scope, pub string) bool
+}
+
+// SetMembershipCheck wires the conversation-membership predicate used to
+// decide who may see a scoped (private) file in the catalog. Set once after
+// construction (the messenger isn't built yet at drop.New time).
+func (s *Service) SetMembershipCheck(fn func(scope, pub string) bool) {
+	s.isMember = fn
 }
 
 // New constructs a Service. campDir resolves a camp's directory
@@ -91,15 +103,20 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeFiles, func(string, []byte) ([]byte, error) {
+	s.bus.Handle(busTypeFiles, func(fromPub string, _ []byte) ([]byte, error) {
 		c := s.Client()
 		if c == nil {
 			return nil, fmt.Errorf("torrent client not running")
 		}
 		out := []PeerFile{}
 		for _, h := range c.ListSeeds() {
-			if s.scopeOf(h.InfoHash) != "" {
-				continue // private to a conversation — not in the public catalog
+			// A scoped file is private: serve it only to members of its
+			// conversation, so non-members don't see it but members' downloads
+			// still find it in our catalog (and don't get retired as zombies).
+			if scope := s.scopeOf(h.InfoHash); scope != "" {
+				if s.isMember == nil || !s.isMember(scope, fromPub) {
+					continue
+				}
 			}
 			out = append(out, PeerFile{
 				Name: h.Name, Size: h.Size,

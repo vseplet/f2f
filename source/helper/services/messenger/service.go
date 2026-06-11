@@ -140,6 +140,26 @@ func (s *Service) Register() {
 	go s.flushLoop()
 }
 
+// IsMember reports whether pub may access files scoped to a conversation.
+// scope is a channel id ("<owner>/<name>") or a DM key (the other party's
+// pub). general is camp-wide (any peer); a normal channel checks its roster;
+// a DM is the pair, so the requester must be the keyed peer.
+func (s *Service) IsMember(scope, pub string) bool {
+	if scope == "" || pub == "" {
+		return false
+	}
+	if isGeneral(scope) {
+		return true
+	}
+	if strings.Contains(scope, "/") { // channel id
+		s.mu.Lock()
+		ch := s.channels[scope]
+		s.mu.Unlock()
+		return ch != nil && contains(ch.Members, pub)
+	}
+	return scope == pub // DM: scope is the peer's pub
+}
+
 // SplitChannelID splits a channel ID ("<owner_pub>/<name>") into its owner
 // pub and name. Returns ("","") if it isn't a channel ID.
 func SplitChannelID(id string) (owner, name string) {

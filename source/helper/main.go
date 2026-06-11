@@ -164,6 +164,9 @@ func run(bind string, console bool, autostart bool) error {
 			return pubs
 		})
 	msgSvc.Register()
+	// Scoped (channel/DM) files are served over torrent only to members of
+	// that conversation — the drop catalog asks the messenger who's in.
+	dropSvc.SetMembershipCheck(msgSvc.IsMember)
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); we also surface peer

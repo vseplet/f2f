@@ -771,9 +771,11 @@ $(function () {
 
   // --- torrent transfers surfaced in chat ---
   let torrentStatus = {}; // info_hash → /api/files/downloads row
+  // The BT client listens on the overlay v4 alias at the default torrent port;
+  // anacrolix needs a host:port (a bare IP is not a dialable peer address).
   function overlayForPub(pub) {
     const p = (livePeers || []).find((x) => x.pub === pub);
-    return (p && p.overlay_v4) || '';
+    return (p && p.overlay_v4) ? p.overlay_v4 + ':6881' : '';
   }
   // Source addresses to feed a download: the sender (a guaranteed seeder) plus
   // the other conversation members (potential seeders). anacrolix only dials
