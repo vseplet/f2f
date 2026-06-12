@@ -7,6 +7,7 @@
         <script src="/vendor/tailwind.min.js"></script>
         <script src="/vendor/jquery.min.js"></script>
         <link rel="stylesheet" href="/vendor/bootstrap-icons/bootstrap-icons.min.css" />
+        <link rel="stylesheet" href="/vendor/hljs/github-dark.min.css" />
         <link rel="stylesheet" href="/audio.css" />
         <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
         <style>
@@ -1100,6 +1101,7 @@
                     </div>
                     <div id="chat-members-panel" class="ax-chat-members hidden"></div>
                     <div id="chat-messages" class="ax-chat-messages"></div>
+                    <div id="chat-reply-bar" class="ax-chat-replybar hidden"></div>
                     <form id="chat-form" class="ax-chat-input">
                         <button
                             type="button"
@@ -1281,6 +1283,14 @@
             <span class="ax-status-item" id="status-fp"></span>
         </div>
 
+        <!-- Rich message rendering: markdown (marked), code highlighting
+             (highlight.js), diagrams (mermaid), all sanitised by DOMPurify.
+             Vendored & embedded — the portal serves them locally, no CDN. -->
+        <script src="/vendor/marked.min.js"></script>
+        <script src="/vendor/purify.min.js"></script>
+        <script src="/vendor/hljs/highlight.min.js"></script>
+        <script src="/vendor/mermaid.min.js"></script>
+        <script src="/richtext.js"></script>
         <script src="/app.js"></script>
         <script src="/meet2.js"></script>
         <script src="/call.js"></script>

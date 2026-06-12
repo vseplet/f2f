@@ -38,8 +38,14 @@ type Message struct {
 	// File is an optional inline attachment (a small photo, clip or document)
 	// riding alongside the text. nil for a plain message.
 	File *Attachment `json:"file,omitempty"`
-	TS   int64       `json:"ts"` // unix ms
-	Mine bool        `json:"mine"`
+	// ReplyTo is the id of the message this one replies to (a quoted reply);
+	// Thread is the id of the thread root a message belongs to (threaded
+	// replies under a message). Both empty for a normal message. Carried on
+	// the wire and persisted; older peers ignore the unknown fields.
+	ReplyTo string `json:"reply_to,omitempty"`
+	Thread  string `json:"thread,omitempty"`
+	TS      int64  `json:"ts"` // unix ms
+	Mine    bool   `json:"mine"`
 }
 
 // MaxAttachment caps an inline attachment's raw size. The bus frame limit is

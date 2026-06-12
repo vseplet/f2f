@@ -339,6 +339,7 @@ $(function () {
   function convKind(key) { return (key === GENERAL_ID || key.includes('/')) ? 'channel' : 'dm'; }
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
+  let replyTarget = null;     // message the next send will quote, or null
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
@@ -356,6 +357,42 @@ $(function () {
   function hhmm(ts) {
     const d = new Date(ts || Date.now());
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  // richBody renders a message body through the rich-text pipeline (inline
+  // markdown + fenced code/markdown/mermaid, all sanitised). Falls back to
+  // plain escaped text if richtext.js didn't load.
+  function richBody(text) {
+    return window.f2fRich ? f2fRich.render(text || '') : esc(text);
+  }
+
+  // msgSnippet is a one-line plain-text gist of a message — for reply quotes
+  // and the reply compose bar. Attachments collapse to an emoji + name.
+  function msgSnippet(m) {
+    if (!m) return 'message';
+    if (m.body) return m.body.replace(/\s+/g, ' ').trim().slice(0, 90);
+    if (m.file) {
+      const mime = m.file.mime || '';
+      if (mime.indexOf('image/') === 0) return '📷 photo';
+      if (mime.indexOf('video/') === 0) return '🎬 video';
+      return '📎 ' + (m.file.name || 'file');
+    }
+    return 'message';
+  }
+  function authorOf(m) {
+    return (m && (m.mine || (lastStatus && m.from === lastStatus.identity_pub))) ? 'you' : nameForPub(m && m.from);
+  }
+  // quoteHtml renders the "replying to" preview shown above a message that
+  // quotes another. Resolves the target from the loaded history; click scrolls
+  // to it (handled below). Falls back gracefully if the target isn't loaded.
+  function quoteHtml(replyToId) {
+    if (!replyToId) return '';
+    const ref = chatMsgs.find((x) => x.id === replyToId);
+    const who = ref ? authorOf(ref) : '';
+    const snip = ref ? msgSnippet(ref) : 'message';
+    return `<div class="ax-msg-quote" data-target="${esc(replyToId)}">`
+      + (who ? `<span class="ax-quote-author">${esc(who)}</span>` : '')
+      + `<span class="ax-quote-text">${esc(snip)}</span></div>`;
   }
 
   // msgRow renders one message. A type other than "text" is a channel
@@ -391,18 +428,23 @@ $(function () {
     // just the text bubble.
     const mime = (m.file && m.file.mime) || '';
     const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
-    const caption = m.body ? `<div class="ax-msg-caption">${esc(m.body)}</div>` : '';
+    const caption = m.body ? `<div class="ax-msg-caption">${richBody(m.body)}</div>` : '';
     let body;
     if (m.file && previewable) {
       body = `<div class="ax-msg-media">${attachHtml(m.file)}${caption}</div>`;
     } else if (m.file) {
-      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '');
+      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${richBody(m.body)}</div>` : '');
     } else {
-      body = `<div class="ax-msg-text">${esc(m.body)}</div>`;
+      body = `<div class="ax-msg-text">${richBody(m.body)}</div>`;
     }
-    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
+    // A small reply affordance revealed on hover; the quote preview sits above
+    // the body when this message itself answers another.
+    const replyBtn = `<button class="ax-msg-replybtn" title="reply" aria-label="reply"><i class="bi bi-reply-fill"></i></button>`;
+    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-id="${esc(m.id)}" data-author="${esc(m.from)}">`
       + head
+      + quoteHtml(m.reply_to)
       + body
+      + replyBtn
       + `</div>`;
   }
 
@@ -478,6 +520,7 @@ $(function () {
     const $m = $('#chat-messages');
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
+    if (window.f2fRich) f2fRich.renderDiagrams($m[0]); // turn ```mermaid into SVG
     updateTorrentChips(); // paint cached status, then refresh from the backend
     pollTorrents();
   }
@@ -715,6 +758,7 @@ $(function () {
         chatMsgs.push(m);
         $('#chat-messages').append(msgRow(m, false));
         const $m = $('#chat-messages');
+        if (window.f2fRich) f2fRich.renderDiagrams($m[0]);
         $m.scrollTop($m[0].scrollHeight);
         if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
       } else if (!m.mine) {
@@ -810,6 +854,7 @@ $(function () {
     // Members button only for channels; collapse the panel on switch.
     $('#chat-members').toggle(kind === 'channel');
     $('#chat-members-panel').addClass('hidden').empty();
+    clearReplyTarget(); // a pending reply doesn't carry across conversations
     loadConversation();
   }
   // highlightActiveRoute marks the sidebar row matching the current hash
@@ -844,6 +889,44 @@ $(function () {
   applyRoute();
   highlightActiveRoute();
 
+  // --- replies ---
+  // replyTarget (declared up top) is the message the next send will quote, or
+  // null. Set from a message's hover "reply" button, shown in the compose bar,
+  // cleared on send or cancel. replyId() is the helper the send paths read.
+  function replyId() { return replyTarget ? replyTarget.id : ''; }
+  function setReplyTarget(t) {
+    replyTarget = t;
+    $('#chat-reply-bar').html(
+      `<div class="ax-replybar-in">`
+        + `<i class="bi bi-reply-fill"></i>`
+        + `<span class="ax-replybar-author">${esc(t.author)}</span>`
+        + `<span class="ax-replybar-snip">${esc(t.snippet)}</span>`
+        + `<button type="button" class="ax-replybar-x" title="cancel reply" aria-label="cancel">×</button>`
+      + `</div>`
+    ).removeClass('hidden');
+    $('#chat-input').focus();
+  }
+  function clearReplyTarget() { replyTarget = null; $('#chat-reply-bar').addClass('hidden').empty(); }
+  $('#chat-reply-bar').on('click', '.ax-replybar-x', clearReplyTarget);
+  // Start a reply from a message's hover button.
+  $('#chat-messages').on('click', '.ax-msg-replybtn', function (e) {
+    e.stopPropagation();
+    const $msg = $(this).closest('.ax-msg');
+    const id = $msg.attr('data-id');
+    const ref = chatMsgs.find((x) => x.id === id);
+    if (!id) return;
+    setReplyTarget({ id, author: ref ? authorOf(ref) : nameForPub($msg.attr('data-author')), snippet: msgSnippet(ref) });
+  });
+  // Click a quote to jump to (and briefly flash) the message it answers.
+  $('#chat-messages').on('click', '.ax-msg-quote', function () {
+    const id = $(this).attr('data-target') || '';
+    const $t = $('#chat-messages .ax-msg').filter(function () { return $(this).attr('data-id') === id; });
+    if (!$t.length) return;
+    $t[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $t.addClass('ax-msg-flash');
+    setTimeout(() => $t.removeClass('ax-msg-flash'), 1200);
+  });
+
   // Send: POST to the messenger service; the message comes back on the SSE
   // stream (the backend echoes our own copy), which appends it — so we don't
   // append here, avoiding a duplicate.
@@ -854,9 +937,11 @@ $(function () {
     const text = $in.val().trim();
     if (!text) return;
     $in.val('');
+    const reply_to = replyId();
+    clearReplyTarget();
     $.ajax({
       url: '/api/chat/send', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text }),
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
 
@@ -880,10 +965,12 @@ $(function () {
       const $in = $('#chat-input');
       const caption = $in.val().trim();
       $in.val('');
+      const reply_to = replyId();
+      clearReplyTarget();
       $.ajax({
         url: '/api/chat/send', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({
-          kind: chatConv.kind, key: chatConv.key, body: caption,
+          kind: chatConv.kind, key: chatConv.key, body: caption, reply_to,
           file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
         }),
       }).fail((xhr) => alert('send: ' + errorOf(xhr)));
@@ -904,7 +991,9 @@ $(function () {
     fd.append('kind', chatConv.kind);
     fd.append('key', chatConv.key);
     fd.append('body', caption);
+    fd.append('reply_to', replyId());
     fd.append('file', file);
+    clearReplyTarget();
     $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })
       .fail((xhr) => alert('share: ' + errorOf(xhr)));
   }

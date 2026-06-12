@@ -486,15 +486,16 @@ func (s *Service) flush(onlyPub string) {
 // --- outbound ---
 
 // SendDM delivers a direct message to peerPub and records our own copy. file
-// may be nil; when set it rides inline as an attachment.
-func (s *Service) SendDM(peerPub, body string, file *Attachment) (Message, error) {
+// may be nil; when set it rides inline as an attachment. replyTo is the id of
+// a message this one quotes ("" for none).
+func (s *Service) SendDM(peerPub, body string, file *Attachment, replyTo string) (Message, error) {
 	selfPub := s.self()
 	if selfPub == "" {
 		return Message{}, fmt.Errorf("chat: no identity")
 	}
 	m := Message{
 		ID: newID(), Kind: "dm", Peer: peerPub, Type: TypeText,
-		From: selfPub, To: peerPub, Body: body, File: file, TS: nowMs(),
+		From: selfPub, To: peerPub, Body: body, File: file, ReplyTo: replyTo, TS: nowMs(),
 	}
 	local := m
 	local.Mine = true
@@ -506,9 +507,10 @@ func (s *Service) SendDM(peerPub, body string, file *Attachment) (Message, error
 
 // Post sends a text message to a channel we belong to: stored locally and
 // fanned out to every member, carrying the current roster snapshot. file may
-// be nil; when set it rides inline as an attachment.
-func (s *Service) Post(chanID, body string, file *Attachment) (Message, error) {
-	return s.emit(chanID, TypeText, body, nil, file)
+// be nil; when set it rides inline as an attachment. replyTo is the id of a
+// message this one quotes ("" for none).
+func (s *Service) Post(chanID, body string, file *Attachment, replyTo string) (Message, error) {
+	return s.emit(chanID, TypeText, body, nil, file, replyTo)
 }
 
 // SendEvent posts a contentful-less system event (call started/ended, …)
@@ -516,7 +518,7 @@ func (s *Service) Post(chanID, body string, file *Attachment) (Message, error) {
 // message — events ARE messages — and renders as a system line.
 func (s *Service) SendEvent(kind, key, typ string) (Message, error) {
 	if kind == "channel" {
-		return s.emit(key, typ, "", nil, nil)
+		return s.emit(key, typ, "", nil, nil, "")
 	}
 	selfPub := s.self()
 	if selfPub == "" {
@@ -551,7 +553,7 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 	s.channels[id] = ch
 	s.mu.Unlock()
 	s.persistChannel(ch)
-	if _, err := s.emit(id, TypeCreate, "", roster, nil); err != nil {
+	if _, err := s.emit(id, TypeCreate, "", roster, nil, ""); err != nil {
 		return Channel{}, err
 	}
 	return *s.channelCopy(id), nil
@@ -672,7 +674,7 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 	// Fan the event to the union of old and new members so removed peers
 	// hear it too (they're no longer in the post-change roster). affected
 	// names who was added/removed, for the human-readable system line.
-	if _, err := s.emitTo(chanID, typ, "", roster, affected, union(old, roster), nil); err != nil {
+	if _, err := s.emitTo(chanID, typ, "", roster, affected, union(old, roster), nil, ""); err != nil {
 		return Channel{}, err
 	}
 	return *s.channelCopy(chanID), nil
@@ -682,11 +684,11 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 // current members. roster overrides the carried snapshot when non-nil
 // (used by create/add/remove); otherwise the channel's current roster is
 // used.
-func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachment) (Message, error) {
+func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachment, replyTo string) (Message, error) {
 	// general has no stored channel/roster — fan out to the whole camp.
 	if isGeneral(chanID) {
 		peers := s.generalRoster()
-		return s.emitTo(chanID, typ, body, peers, nil, peers, file)
+		return s.emitTo(chanID, typ, body, peers, nil, peers, file, replyTo)
 	}
 	s.mu.Lock()
 	ch := s.channels[chanID]
@@ -697,7 +699,7 @@ func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachme
 	if roster == nil {
 		roster = ch.Members
 	}
-	return s.emitTo(chanID, typ, body, roster, nil, roster, file)
+	return s.emitTo(chanID, typ, body, roster, nil, roster, file, replyTo)
 }
 
 // emitTo stores a channel message and fans it out. roster is the carried
@@ -705,11 +707,11 @@ func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachme
 // a text post); fanout is the explicit recipient set (may differ from the
 // roster, e.g. a removal that must also reach removed peers); file is an
 // optional inline attachment (nil for control events).
-func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []string, file *Attachment) (Message, error) {
+func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []string, file *Attachment, replyTo string) (Message, error) {
 	selfPub := s.self()
 	m := Message{
 		ID: newID(), Kind: "channel", Peer: chanID, Type: typ,
-		From: selfPub, Body: body, File: file,
+		From: selfPub, Body: body, File: file, ReplyTo: replyTo,
 		Members: append([]string(nil), roster...),
 		Targets: append([]string(nil), affected...),
 		TS:      nowMs(),

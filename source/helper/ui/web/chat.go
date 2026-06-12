@@ -156,11 +156,12 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 // it into a system event (call lifecycle); body is ignored then.
 func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Kind string                `json:"kind"`
-		Key  string                `json:"key"`
-		Body string                `json:"body"`
-		Type string                `json:"type"`
-		File *messenger.Attachment `json:"file"`
+		Kind    string                `json:"kind"`
+		Key     string                `json:"key"`
+		Body    string                `json:"body"`
+		Type    string                `json:"type"`
+		ReplyTo string                `json:"reply_to"`
+		File    *messenger.Attachment `json:"file"`
 	}
 	// Cap the body generously above MaxAttachment (base64 + JSON overhead) so
 	// an oversized upload is rejected cleanly rather than read into memory.
@@ -196,9 +197,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.Kind == "dm" {
-			_, err = s.msg.SendDM(req.Key, req.Body, req.File)
+			_, err = s.msg.SendDM(req.Key, req.Body, req.File, req.ReplyTo)
 		} else {
-			_, err = s.msg.Post(req.Key, req.Body, req.File)
+			_, err = s.msg.Post(req.Key, req.Body, req.File, req.ReplyTo)
 		}
 	case messenger.TypeCallStart, messenger.TypeCallEnd:
 		_, err = s.msg.SendEvent(req.Kind, req.Key, req.Type)
@@ -271,10 +272,11 @@ func (s *Server) handleChatShare(w http.ResponseWriter, r *http.Request) {
 		Magnet:   pf.Magnet,
 	}
 	body := r.FormValue("body")
+	replyTo := r.FormValue("reply_to")
 	if kind == "dm" {
-		_, err = s.msg.SendDM(key, body, att)
+		_, err = s.msg.SendDM(key, body, att, replyTo)
 	} else {
-		_, err = s.msg.Post(key, body, att)
+		_, err = s.msg.Post(key, body, att, replyTo)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

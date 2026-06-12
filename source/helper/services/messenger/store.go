@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS messages (
   body      TEXT    NOT NULL DEFAULT '',
   members   TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
   file      TEXT    NOT NULL DEFAULT '', -- JSON Attachment (base64 data), '' if none
+  reply_to  TEXT    NOT NULL DEFAULT '', -- id of the quoted message, '' if none
+  thread    TEXT    NOT NULL DEFAULT '', -- id of the thread root, '' if none
   ts        INTEGER NOT NULL,            -- unix ms
   mine      INTEGER NOT NULL DEFAULT 0
 );
@@ -124,6 +126,15 @@ CREATE TABLE IF NOT EXISTS conv_notes (
 		!strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("messenger: migrate file column: %w", err)
 	}
+	// Reply/thread columns, added to message tables created before them.
+	for _, col := range []string{
+		`ALTER TABLE messages ADD COLUMN reply_to TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE messages ADD COLUMN thread TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("messenger: migrate reply/thread columns: %w", err)
+		}
+	}
 	// Notes once hung off the channels table; they now live in conv_notes
 	// (so DMs can carry notes too). Ensure the old columns exist, then seed
 	// conv_notes from any channel notes written before the move. The seed is
@@ -157,10 +168,10 @@ func (s *Store) AddMessage(campID string, m Message) error {
 		m.TS = time.Now().UnixMilli()
 	}
 	_, err = db.Exec(
-		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, ts, mine)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), encodeFile(m.File), m.TS, b2i(m.Mine))
+		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), encodeFile(m.File), m.ReplyTo, m.Thread, m.TS, b2i(m.Mine))
 	if err != nil {
 		return fmt.Errorf("messenger: add message: %w", err)
 	}
@@ -178,7 +189,7 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 		limit = 200
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, ts, mine
 		   FROM messages
 		  WHERE kind=? AND peer=?
 		  ORDER BY ts DESC, id DESC
@@ -194,7 +205,7 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 		var m Message
 		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.ReplyTo, &m.Thread, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
@@ -217,7 +228,7 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, ts, mine
 		   FROM messages ORDER BY ts ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("messenger: all messages: %w", err)
@@ -228,7 +239,7 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 		var m Message
 		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.ReplyTo, &m.Thread, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
