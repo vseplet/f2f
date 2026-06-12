@@ -2406,6 +2406,14 @@ a.ax-domain-link:hover {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* Clear-messages is destructive — muted by default, danger on hover, not the
+   green of the call/members buttons. */
+.ax-frame #chat-clear { color: var(--muted); }
+.ax-frame #chat-clear:hover {
+    color: var(--danger, #e0686e);
+    border-color: var(--danger, #e0686e);
+    background: color-mix(in srgb, var(--danger, #e0686e) 16%, transparent);
+}
 .ax-frame .ax-chat-call {
     flex-shrink: 0;
     width: 30px;
@@ -2725,32 +2733,23 @@ a.ax-domain-link:hover {
 .ax-msg-doc:hover .ax-msg-doc-name { text-decoration: underline; }
 .ax-msg-doc-sub { color: var(--muted); font-size: 11px; }
 
-/* Torrent file: carries a magnet, with a download button + live transfer
-   status (filled by updateTorrentChips). Lives inside the filecard bubble, so
-   it's transparent and the wrapper provides the bubble. */
-.ax-msg-torrent {
-    padding: 8px 11px;
-    font-size: 13px;
+/* Torrent file: the same doc card as an inline file (only a transfer icon),
+   with the live download/seed status riding in the subtitle after the size,
+   filled by updateTorrentChips. */
+.ax-msg-torrent-status:not(:empty)::before {
+    content: "·";
+    margin: 0 5px;
+    color: var(--muted);
 }
-.ax-msg-torrent-main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-}
-.ax-msg-torrent-main > .bi { color: var(--accent); flex-shrink: 0; }
-.ax-msg-torrent-name { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ax-msg-torrent-size { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
-.ax-msg-torrent-status { margin-top: 5px; font-size: 12px; }
-.ax-msg-torrent-status:empty { display: none; }
 .ax-msg-torrent-dl {
     border: 1px solid var(--border);
     background: transparent;
     color: var(--accent);
-    border-radius: 7px;
-    padding: 3px 10px;
+    border-radius: 6px;
+    padding: 1px 8px;
     cursor: pointer;
     font: inherit;
+    font-size: 11px;
 }
 .ax-msg-torrent-dl:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .ax-msg-torrent-status .t-prog,
@@ -2860,6 +2859,13 @@ a.ax-domain-link:hover {
     display: flex;
     flex-direction: column;
 }
+/* Same header layout as the chat frame — flex row with a gap so the action
+   buttons don't touch. */
+.ax-note-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 .ax-note-header #note-title {
     flex: 1;
 }
@@ -2886,6 +2892,47 @@ a.ax-domain-link:hover {
     overflow: hidden auto;
     -webkit-font-smoothing: antialiased;
 }
+/* Rendered-markdown preview of a note (full markdown, not the chat subset).
+   Code blocks (.ax-code) and diagrams (.ax-mermaid) are styled globally. */
+.ax-note-preview {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 22px;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.7;
+    word-break: break-word;
+}
+.ax-note-preview > :first-child { margin-top: 0; }
+.ax-note-preview a { color: var(--accent); text-decoration: underline; }
+.ax-note-preview strong { font-weight: 700; }
+.ax-note-preview em { font-style: italic; }
+.ax-note-preview code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--mono, ui-monospace, monospace);
+    font-size: 0.9em;
+}
+.ax-note-preview p { margin: 0.5em 0; }
+.ax-note-preview ul, .ax-note-preview ol { margin: 0.5em 0; padding-left: 1.6em; }
+.ax-note-preview li { margin: 0.2em 0; }
+.ax-note-preview h1, .ax-note-preview h2, .ax-note-preview h3,
+.ax-note-preview h4, .ax-note-preview h5, .ax-note-preview h6 {
+    margin: 0.8em 0 0.35em;
+    font-weight: 700;
+    line-height: 1.25;
+}
+.ax-note-preview h1 { font-size: 1.7em; }
+.ax-note-preview h2 { font-size: 1.4em; }
+.ax-note-preview h3 { font-size: 1.2em; }
+.ax-note-preview h1, .ax-note-preview h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+.ax-note-preview blockquote { margin: 0.5em 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
+.ax-note-preview hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.ax-note-preview table { border-collapse: collapse; margin: 0.5em 0; }
+.ax-note-preview th, .ax-note-preview td { border: 1px solid var(--border); padding: 4px 8px; }
+.ax-note-preview img { max-width: 100%; border-radius: 6px; }
+.ax-note-preview .ax-code { margin: 0.6em 0; }
 .ax-note-text::placeholder {
     color: var(--muted);
 }

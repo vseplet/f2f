@@ -490,13 +490,14 @@ $(function () {
     // chip with a download button + live status (updated by updateTorrentChips).
     if (f.info_hash) {
       const tn = esc(f.name || 'file');
-      return `<div class="ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
-        + `<div class="ax-msg-torrent-main">`
-          + `<i class="bi bi-file-earmark-arrow-down"></i>`
-          + `<span class="ax-msg-torrent-name">${tn}</span>`
-          + `<span class="ax-msg-torrent-size">${esc(fmtBytes(f.size || 0))}</span>`
-        + `</div>`
-        + `<div class="ax-msg-torrent-status"></div>`
+      // Same doc card as an inline file, only a transfer icon — the size and
+      // the live status/download action ride in the subtitle.
+      return `<div class="ax-msg-doc ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
+        + `<span class="ax-msg-doc-ic"><i class="bi bi-cloud-arrow-down-fill"></i></span>`
+        + `<span class="ax-msg-doc-meta">`
+          + `<span class="ax-msg-doc-name">${tn}</span>`
+          + `<span class="ax-msg-doc-sub"><span class="ax-msg-doc-size">${esc(fmtBytes(f.size || 0))}</span><span class="ax-msg-torrent-status"></span></span>`
+        + `</span>`
       + `</div>`;
     }
     if (!f.data) return '';
@@ -683,6 +684,7 @@ $(function () {
   let noteSaveTimer = null;
   let noteDirty = false;     // unsaved local edits — guards against clobbering
   let noteDoc = null;        // last doc from the server: {scope, body, ts, by}
+  let notePreview = false;   // true → show rendered markdown instead of the editor
 
   // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
   // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
@@ -694,10 +696,11 @@ $(function () {
     return nameForPub(scope) + ' · notes';
   }
 
-  function openNote(scope) {
+  function openNote(scope, preview) {
     noteConv = scope;
     noteDirty = false;
     noteDoc = null;
+    notePreview = !!preview;
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-note').removeClass('hidden');
@@ -705,7 +708,7 @@ $(function () {
     $('#note-status').text('loading…');
     $('#note-text').val('');
     fetchNote(scope);
-    setTimeout(() => $('#note-text').focus(), 0);
+    if (!notePreview) setTimeout(() => $('#note-text').focus(), 0);
   }
 
   // fetchNote loads the doc for a scope from the backend, then paints it.
@@ -724,7 +727,23 @@ $(function () {
     if (!noteConv) return;
     $('#note-title').text(noteTitle(noteConv));
     $('#note-status').text(noteDoc && noteDoc.by ? 'last edit · ' + nameForPub(noteDoc.by) : '');
-    if (!noteDirty) $('#note-text').val((noteDoc && noteDoc.body) || '');
+    // Mode toggle reflects the current view: an eye to enter preview, a pencil
+    // to return to editing.
+    $('#note-mode')
+      .html(notePreview ? '<i class="bi bi-pencil-fill"></i>' : '<i class="bi bi-eye-fill"></i>')
+      .attr('title', notePreview ? 'edit' : 'preview');
+    if (notePreview) {
+      // Render the live content (unsaved edits included) as full markdown.
+      const src = noteDirty ? $('#note-text').val() : ((noteDoc && noteDoc.body) || '');
+      const $pv = $('#note-preview');
+      $pv.html(window.f2fRich ? f2fRich.markdown(src) : esc(src)).removeClass('hidden');
+      if (window.f2fRich) f2fRich.renderDiagrams($pv[0]);
+      $('#note-text').addClass('hidden');
+    } else {
+      $('#note-preview').addClass('hidden').empty();
+      $('#note-text').removeClass('hidden');
+      if (!noteDirty) $('#note-text').val((noteDoc && noteDoc.body) || '');
+    }
   }
 
   function saveNote(scope, body) {
@@ -758,12 +777,40 @@ $(function () {
     const id = $(this).attr('data-note');
     if (id) location.hash = noteRoute(id);
   });
+  // Toggle the notes view between edit and rendered-markdown preview (the mode
+  // rides in the URL as a ":preview" suffix).
+  $('#note-mode').on('click', function () {
+    if (noteConv) location.hash = noteRoute(noteConv) + (notePreview ? '' : ':preview');
+  });
+  // Back from the notes view to its conversation.
+  $('#note-back').on('click', function () {
+    if (noteConv) location.hash = convRoute(noteConv);
+  });
 
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
     const $p = $('#chat-members-panel');
     if ($p.hasClass('hidden')) renderMembersPanel();
     else $p.addClass('hidden');
+  });
+  // Open the current conversation's shared notes (header button, mirrors the
+  // sidebar hover icon) — routes to note:<key> so it's the same deep-link.
+  $('#chat-notes').on('click', function () {
+    if (chatConv) location.hash = noteRoute(chatConv.key);
+  });
+  // Clear the open conversation's messages — LOCAL only (memory + SQLite);
+  // peers keep their copies.
+  $('#chat-clear').on('click', function () {
+    if (!chatConv) return;
+    if (!confirm('Clear all messages here? This removes only your local copy — others keep theirs.')) return;
+    $.ajax({
+      url: '/api/chat/clear', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key }),
+    }).done(() => {
+      chatMsgs = [];
+      renderChat(chatMsgs);
+      closeThread(); // its messages are gone too
+    }).fail((xhr) => alert('clear: ' + errorOf(xhr)));
   });
   // Remove a member (owner only).
   $('#chat-members-panel').on('click', '.ax-chat-member-rm', function () {
@@ -887,13 +934,18 @@ $(function () {
       location.hash = '';
       return;
     }
-    // note:<id> → open the channel's shared notes in the main pane.
+    // note:<id> → the conversation's shared notes in the main pane; a trailing
+    // ":preview" suffix renders markdown instead of the editor.
     const nm = h.match(/^note:(.+)$/);
     if (nm) {
-      let key = nm[1];
-      if (key === GENERAL_ID) { location.hash = noteRoute(GENERAL_ID); return; }
+      let key = nm[1], preview = false;
+      const pm = key.match(/^(.+):preview$/);
+      if (pm) { key = pm[1]; preview = true; }
+      if (key === GENERAL_ID) { location.hash = noteRoute(GENERAL_ID) + (preview ? ':preview' : ''); return; }
       if (key === 'general') key = GENERAL_ID;
-      openNote(key);
+      // Same note already open → just switch mode (keep unsaved edits, no refetch).
+      if (noteConv === key && !$('#tab-note').hasClass('hidden')) { notePreview = preview; renderNote(); return; }
+      openNote(key, preview);
       return;
     }
     // A conversation: channel:<key>, optionally with a thread suffix
@@ -920,7 +972,7 @@ $(function () {
       $('.tab-panel').addClass('hidden');
       $('#tab-chat').removeClass('hidden');
       setChatTitle();
-      $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
+      $('#chat-call, #chat-clear, #chat-notes').show(); // call + clear + notes: both DMs and channels
       $('#chat-members').toggle(kind === 'channel'); // members button: channels only
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
@@ -1296,7 +1348,7 @@ $(function () {
     return ips;
   }
   function updateTorrentChips() {
-    $('#chat-messages .ax-msg-torrent').each(function () {
+    $('.ax-chat-messages .ax-msg-torrent').each(function () {
       const $c = $(this);
       const mine = $c.closest('.ax-msg').hasClass('is-mine');
       const st = torrentStatus[$c.attr('data-infohash')];
@@ -1319,7 +1371,7 @@ $(function () {
     });
   }
   function pollTorrents() {
-    if (!$('#chat-messages .ax-msg-torrent').length) return;
+    if (!$('.ax-chat-messages .ax-msg-torrent').length) return;
     $.getJSON('/api/files/downloads', function (list) {
       const m = {};
       (Array.isArray(list) ? list : []).forEach((d) => { m[d.info_hash] = d; });
@@ -1327,7 +1379,7 @@ $(function () {
       updateTorrentChips();
     });
   }
-  $('#chat-messages').on('click', '.ax-msg-torrent-dl', function () {
+  $('#tab-chat').on('click', '.ax-msg-torrent-dl', function () {
     const $c = $(this).closest('.ax-msg-torrent');
     const magnet = $c.attr('data-magnet');
     if (!magnet) return;
@@ -1337,7 +1389,7 @@ $(function () {
       data: JSON.stringify({ magnet: magnet, peers: torrentPeers($c) }),
     }).done(pollTorrents).fail((xhr) => alert('download: ' + errorOf(xhr)));
   });
-  $('#chat-messages').on('click', '.ax-msg-torrent-open', function () {
+  $('#tab-chat').on('click', '.ax-msg-torrent-open', function () {
     const st = torrentStatus[$(this).closest('.ax-msg-torrent').attr('data-infohash')];
     if (st && st.path) {
       $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });

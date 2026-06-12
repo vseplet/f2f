@@ -240,6 +240,23 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	return nil, nil
 }
 
+// ClearConversation wipes a conversation's messages from memory and the local
+// store. It's local only — peers keep their copies; nothing is sent. kind is
+// "dm" (key = peer pub) or "channel" (key = channel id).
+func (s *Service) ClearConversation(kind, key string) error {
+	if key == "" {
+		return fmt.Errorf("chat: key required")
+	}
+	selfPub := s.self()
+	s.mu.Lock()
+	delete(s.convs, key)
+	s.mu.Unlock()
+	if s.store != nil {
+		return s.store.ClearConversation(s.camp(), kind, key, selfPub)
+	}
+	return nil
+}
+
 // dropChannel removes a channel and its conversation from memory and the
 // store. Used by delete (owner) and leave (self).
 func (s *Service) dropChannel(id string) {

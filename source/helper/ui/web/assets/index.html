@@ -1084,6 +1084,22 @@
                         <span id="chat-title">— chat</span>
                         <button
                             type="button"
+                            id="chat-clear"
+                            class="ax-engine-btn ax-chat-call"
+                            title="clear messages (local only)"
+                            aria-label="clear messages"
+                            style="display: none"
+                        ><i class="bi bi-eraser-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-notes"
+                            class="ax-engine-btn ax-chat-call"
+                            title="notes"
+                            aria-label="notes"
+                            style="display: none"
+                        ><i class="bi bi-journal-text"></i></button>
+                        <button
+                            type="button"
                             id="chat-members"
                             class="ax-engine-btn ax-chat-call"
                             title="members"
@@ -1158,13 +1174,28 @@
                     <div class="ax-section-title ax-note-header">
                         <span id="note-title">— notes</span>
                         <span class="ax-meta" id="note-status"></span>
+                        <button
+                            type="button"
+                            id="note-mode"
+                            class="ax-engine-btn ax-chat-call"
+                            title="preview"
+                            aria-label="toggle preview"
+                        ><i class="bi bi-eye-fill"></i></button>
+                        <button
+                            type="button"
+                            id="note-back"
+                            class="ax-engine-btn ax-chat-call"
+                            title="back to conversation"
+                            aria-label="back to conversation"
+                        ><i class="bi bi-box-arrow-left"></i></button>
                     </div>
                     <textarea
                         id="note-text"
                         class="ax-note-text"
                         spellcheck="false"
-                        placeholder="shared notes — editable by any member…"
+                        placeholder="shared notes — markdown, editable by any member…"
                     ></textarea>
+                    <div id="note-preview" class="ax-note-preview ax-md hidden"></div>
                 </div>
             </div>
             <!-- /#tab-note -->

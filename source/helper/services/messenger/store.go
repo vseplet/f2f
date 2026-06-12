@@ -265,6 +265,28 @@ func (s *Store) DeleteChannel(campID, id string) error {
 	return err
 }
 
+// ClearConversation deletes a conversation's messages from campID's database
+// (local only — peers keep their copies). A channel is keyed by its id; a DM
+// is keyed by the peer pub, so we match both directions (sender↔recipient)
+// since inbound and outbound rows carry different peer columns.
+func (s *Store) ClearConversation(campID, kind, key, self string) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	if kind == "channel" {
+		_, err = db.Exec(`DELETE FROM messages WHERE kind='channel' AND peer=?`, key)
+	} else {
+		_, err = db.Exec(
+			`DELETE FROM messages WHERE kind='dm' AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))`,
+			key, self, self, key)
+	}
+	if err != nil {
+		return fmt.Errorf("messenger: clear conversation: %w", err)
+	}
+	return nil
+}
+
 // UpsertChannel creates or updates a channel in campID's database.
 func (s *Store) UpsertChannel(campID string, c Channel) error {
 	db, err := s.dbFor(campID)
