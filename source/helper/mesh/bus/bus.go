@@ -32,6 +32,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -95,6 +96,7 @@ type Service struct {
 
 	mu             sync.Mutex
 	ln             *quic.Listener
+	lnConn         net.PacketConn // the UDP socket we own under ln (closed hard on Stop)
 	ctx            context.Context // service lifetime; accept loops on dialed conns ride it
 	cancel         context.CancelFunc
 	running        bool
@@ -180,18 +182,31 @@ func (s *Service) Start(overlayIP string) error {
 }
 
 // listenLoop binds the QUIC listener, retrying every few seconds until it
-// sticks, then serves it until the service stops.
+// sticks, then serves it until the service stops. We create the UDP socket
+// ourselves with SO_REUSEADDR (see reuseAddrControl): an engine restart tears
+// the utun (and our old socket) down and rebinds the SAME overlay IP, and
+// without REUSEADDR the briefly-lingering old socket blocks the new bind and
+// this loop spins forever. Because we own the conn, Stop closes it directly —
+// hard-releasing the port instead of waiting on QUIC's graceful drain.
 func (s *Service) listenLoop(ctx context.Context, addr string) {
+	lc := net.ListenConfig{Control: reuseAddrControl}
 	for {
-		ln, err := quic.ListenAddr(addr, s.tlsServer, s.quicConf)
+		pc, err := lc.ListenPacket(ctx, "udp", addr)
+		var ln *quic.Listener
+		if err == nil {
+			if ln, err = quic.Listen(pc, s.tlsServer, s.quicConf); err != nil {
+				_ = pc.Close()
+			}
+		}
 		if err == nil {
 			s.mu.Lock()
 			if !s.running {
 				s.mu.Unlock()
 				_ = ln.Close()
+				_ = pc.Close()
 				return
 			}
-			s.ln = ln
+			s.ln, s.lnConn = ln, pc
 			s.mu.Unlock()
 			clog.Info("bus", "QUIC listening on %s", addr)
 			s.acceptLoop(ctx, ln)
@@ -204,6 +219,20 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+// reuseAddrControl sets SO_REUSEADDR on the bus listener socket so it can
+// rebind overlayIP:Port immediately after a restart drops the old socket.
+// Only REUSEADDR (not REUSEPORT) — two real instances should still conflict,
+// which is a useful "already running" signal rather than silent port-sharing.
+func reuseAddrControl(network, address string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+	}); err != nil {
+		return err
+	}
+	return serr
 }
 
 // pingLoop dials + probes every known peer over QUIC, so the mesh forms
@@ -311,8 +340,8 @@ func (s *Service) Stop() error {
 		return nil
 	}
 	s.running = false
-	cancel, ln, conns := s.cancel, s.ln, s.conns
-	s.cancel, s.ln, s.conns = nil, nil, make(map[string]*quic.Conn)
+	cancel, ln, lnConn, conns := s.cancel, s.ln, s.lnConn, s.conns
+	s.cancel, s.ln, s.lnConn, s.conns = nil, nil, nil, make(map[string]*quic.Conn)
 	s.mu.Unlock()
 
 	if cancel != nil {
@@ -322,7 +351,12 @@ func (s *Service) Stop() error {
 		_ = c.CloseWithError(0, "stop")
 	}
 	if ln != nil {
-		return ln.Close()
+		_ = ln.Close()
+	}
+	// Close the socket we own AFTER the listener — frees overlayIP:Port now,
+	// not after QUIC's graceful drain, so a follow-up Start can rebind it.
+	if lnConn != nil {
+		return lnConn.Close()
 	}
 	return nil
 }
