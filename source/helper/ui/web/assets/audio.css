@@ -2662,10 +2662,10 @@ a.ax-domain-link:hover {
     object-fit: contain;
 }
 .ax-msg-video { background: #000; }
-/* The caption rides under the media inside the same bubble. */
+/* The caption rides under the media/file inside the same bubble. */
 .ax-msg-caption {
     color: var(--text);
-    white-space: pre-wrap;
+    white-space: normal; /* the renderer emits <br>; pre-wrap would add gaps */
     word-break: break-word;
     padding: 5px 10px;
 }
@@ -2677,36 +2677,60 @@ a.ax-domain-link:hover {
     text-decoration: none;
 }
 .ax-msg-video-dl:hover { color: var(--text); }
-/* Non-previewable files: a compact download chip (its own bubble). */
-.ax-msg-file {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    max-width: 72%;
-    padding: 8px 11px;
+/* Non-previewable files (inline doc or torrent) share the media bubble: a doc
+   card above the caption, so a file message reads as one unit (Telegram-like)
+   rather than a chip that looks like a reply. */
+.ax-msg-filecard {
+    max-width: min(72%, 360px);
     border-radius: 10px;
+    overflow: hidden;
     background: var(--panel-2);
+}
+.ax-msg.is-mine .ax-msg-filecard {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+}
+.ax-msg-filecard .ax-msg-caption { padding-top: 1px; }
+/* The doc card: a round icon, then the (accent-coloured) name + a size·action
+   subtitle. The name colour sets it apart from the user's own text. */
+.ax-msg-doc {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 11px;
     color: var(--text);
     text-decoration: none;
-    font-size: 13px;
 }
-.ax-msg-file:hover { background: var(--panel); }
-.ax-msg.is-mine .ax-msg-file {
-    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+.ax-msg-doc-ic {
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--panel-2); /* glyph matches the bubble bg — a cut-out look */
+    font-size: 16px;
 }
-.ax-msg-file-size { color: var(--muted); font-size: 11px; margin-left: auto; }
+.ax-msg.is-mine .ax-msg-doc-ic {
+    color: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+}
+.ax-msg-doc-meta { display: flex; flex-direction: column; min-width: 0; }
+.ax-msg-doc-name {
+    color: var(--accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ax-msg-doc:hover .ax-msg-doc-name { text-decoration: underline; }
+.ax-msg-doc-sub { color: var(--muted); font-size: 11px; }
 
-/* Torrent file: a chip carrying a magnet, with a download button + live
-   transfer status (filled by updateTorrentChips). */
+/* Torrent file: carries a magnet, with a download button + live transfer
+   status (filled by updateTorrentChips). Lives inside the filecard bubble, so
+   it's transparent and the wrapper provides the bubble. */
 .ax-msg-torrent {
-    max-width: 72%;
     padding: 8px 11px;
-    border-radius: 10px;
-    background: var(--panel-2);
     font-size: 13px;
-}
-.ax-msg.is-mine .ax-msg-torrent {
-    background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
 }
 .ax-msg-torrent-main {
     display: flex;
@@ -2714,7 +2738,8 @@ a.ax-domain-link:hover {
     gap: 8px;
     color: var(--text);
 }
-.ax-msg-torrent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ax-msg-torrent-main > .bi { color: var(--accent); flex-shrink: 0; }
+.ax-msg-torrent-name { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ax-msg-torrent-size { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
 .ax-msg-torrent-status { margin-top: 5px; font-size: 12px; }
 .ax-msg-torrent-status:empty { display: none; }

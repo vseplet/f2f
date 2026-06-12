@@ -429,10 +429,9 @@ $(function () {
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
         + edited
       + `</div>`;
-    // A previewable attachment (image/video) and its caption share one bubble
-    // so they read as a single message. A non-previewable file is its own
-    // download chip with the caption as a separate text bubble. Plain text is
-    // just the text bubble.
+    // An attachment and its caption share ONE bubble so they read as a single
+    // message: a photo/clip previews above the caption; a file/torrent shows a
+    // doc card above the caption. Plain text is just the text bubble.
     const mime = (m.file && m.file.mime) || '';
     const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
     const caption = m.body ? `<div class="ax-msg-caption">${richBody(m.body)}</div>` : '';
@@ -440,7 +439,7 @@ $(function () {
     if (m.file && previewable) {
       body = `<div class="ax-msg-media">${attachHtml(m.file)}${caption}</div>`;
     } else if (m.file) {
-      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${richBody(m.body)}</div>` : '');
+      body = `<div class="ax-msg-filecard">${attachHtml(m.file)}${caption}</div>`;
     } else {
       body = `<div class="ax-msg-text">${richBody(m.body)}</div>`;
     }
@@ -515,9 +514,12 @@ $(function () {
       return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`
         + `<a class="ax-msg-video-dl" href="${url}" download="${name}">⤓ ${name}</a>`;
     }
-    return `<a class="ax-msg-file" href="${url}" download="${name}">`
-      + `<i class="bi bi-paperclip"></i> <span>${name}</span>`
-      + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
+    return `<a class="ax-msg-doc" href="${url}" download="${name}" title="${name}">`
+      + `<span class="ax-msg-doc-ic"><i class="bi bi-file-earmark-fill"></i></span>`
+      + `<span class="ax-msg-doc-meta">`
+        + `<span class="ax-msg-doc-name">${name}</span>`
+        + `<span class="ax-msg-doc-sub">${esc(fmtBytes(f.size || 0))} · download</span>`
+      + `</span></a>`;
   }
 
   // editsByRoot maps an original message id → its latest edit (newest ts) made
@@ -1124,7 +1126,10 @@ $(function () {
     for (const r of replies) html += msgRow(applyEdit(r, edits), false, 0, true);
     $tm.html(html);
     if (window.f2fRich) f2fRich.renderDiagrams($tm[0]);
-    $tm.scrollTop($tm[0].scrollHeight);
+    // Scroll to the latest reply. Deferred to the next frame: the panel may
+    // have just been shown (display flipped), so its flex layout — and thus
+    // scrollHeight — isn't final until layout settles.
+    requestAnimationFrame(() => { const el = $tm[0]; if (el) el.scrollTop = el.scrollHeight; });
     $('#thread-title').text('Thread · ' + replies.length);
   }
   // Thread composer: posts into the open thread (thread=<rootId>).
