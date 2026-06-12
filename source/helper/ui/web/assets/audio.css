@@ -1706,6 +1706,30 @@ a.ax-domain-link:hover {
 .ax-frame .ax-chat-input input:disabled {
     cursor: not-allowed;
 }
+/* The main chat composer is a multi-line textarea (Enter sends, Shift+Enter
+   newlines) that auto-grows up to a cap. Buttons stay bottom-aligned as it
+   grows. id selector outranks the shared .ax-chat-input input rules. */
+#chat-form {
+    align-items: flex-end;
+}
+#chat-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    outline: none;
+    padding: 4px 0;
+    resize: none;
+    overflow-y: auto;
+    max-height: 160px;
+}
+#chat-input::placeholder {
+    color: var(--muted);
+}
 
 /* Footer */
 .ax-frame .ax-footer {
@@ -2407,13 +2431,27 @@ a.ax-domain-link:hover {
     font-family: var(--mono, ui-monospace, monospace);
     font-size: 0.92em;
 }
-/* ```md block: rendered markdown — keep block spacing tight in a bubble. */
-.ax-msg-text p { margin: 0 0 6px; }
-.ax-msg-text p:last-child { margin-bottom: 0; }
-.ax-msg-text ul, .ax-msg-text ol { margin: 4px 0; padding-left: 20px; }
-.ax-msg-text h1, .ax-msg-text h2, .ax-msg-text h3, .ax-msg-text h4 { margin: 6px 0 4px; font-size: 1.05em; }
-.ax-msg-text blockquote { margin: 4px 0; padding-left: 8px; border-left: 2px solid var(--border); color: var(--muted); }
-.ax-msg-text table { border-collapse: collapse; }
+/* ```md block: rendered markdown. Headings get a real (if modest) scale so
+   they read as headings; block spacing stays tight inside a chat bubble. */
+.ax-msg-text > :first-child { margin-top: 0; }
+.ax-msg-text > :last-child { margin-bottom: 0; }
+.ax-msg-text p { margin: 0.3em 0; }
+.ax-msg-text ul, .ax-msg-text ol { margin: 0.3em 0; padding-left: 1.4em; }
+.ax-msg-text li { margin: 0.1em 0; }
+.ax-msg-text h1, .ax-msg-text h2, .ax-msg-text h3,
+.ax-msg-text h4, .ax-msg-text h5, .ax-msg-text h6 {
+    margin: 0.5em 0 0.25em;
+    font-weight: 700;
+    line-height: 1.25;
+}
+.ax-msg-text h1 { font-size: 1.5em; }
+.ax-msg-text h2 { font-size: 1.3em; }
+.ax-msg-text h3 { font-size: 1.15em; }
+.ax-msg-text h4, .ax-msg-text h5, .ax-msg-text h6 { font-size: 1em; }
+.ax-msg-text h1, .ax-msg-text h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.15em; }
+.ax-msg-text hr { border: none; border-top: 1px solid var(--border); margin: 0.5em 0; }
+.ax-msg-text blockquote { margin: 0.3em 0; padding-left: 8px; border-left: 2px solid var(--border); color: var(--muted); }
+.ax-msg-text table { border-collapse: collapse; margin: 0.3em 0; }
 .ax-msg-text th, .ax-msg-text td { border: 1px solid var(--border); padding: 2px 6px; }
 
 /* ```lang code block. The github-dark theme colours .hljs; we add the frame
@@ -2479,24 +2517,31 @@ a.ax-domain-link:hover {
 .ax-quote-author { color: var(--accent); flex: 0 0 auto; }
 .ax-quote-text { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.ax-msg-replybtn {
-    position: absolute;
-    top: 6px;
+/* Per-message action row, directly under the bubble and aligned to its side
+   (the parent .ax-msg flex sets start/end). Hidden until the message is
+   hovered so the timeline stays clean. */
+.ax-msg-acts {
+    display: flex;
+    gap: 4px;
+    margin: 2px 4px 0;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+.ax-msg:hover .ax-msg-acts { opacity: 1; }
+.ax-msg-act {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: none;
-    background: var(--panel);
+    background: none;
     color: var(--muted);
-    border-radius: 6px;
-    padding: 2px 7px;
+    font: inherit;
     font-size: 11px;
     line-height: 1;
+    padding: 2px 4px;
     cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.1s, color 0.1s;
 }
-.ax-msg:not(.is-mine) .ax-msg-replybtn { right: 2px; }
-.ax-msg.is-mine .ax-msg-replybtn { left: 2px; }
-.ax-msg:hover .ax-msg-replybtn { opacity: 0.75; }
-.ax-msg-replybtn:hover { opacity: 1; color: var(--accent); }
+.ax-msg-act:hover { color: var(--accent); }
 
 .ax-chat-replybar { flex-shrink: 0; }
 .ax-replybar-in {

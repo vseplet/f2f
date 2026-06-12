@@ -437,14 +437,18 @@ $(function () {
     } else {
       body = `<div class="ax-msg-text">${richBody(m.body)}</div>`;
     }
-    // A small reply affordance revealed on hover; the quote preview sits above
-    // the body when this message itself answers another.
-    const replyBtn = `<button class="ax-msg-replybtn" title="reply" aria-label="reply"><i class="bi bi-reply-fill"></i></button>`;
+    // Action row under the bubble, revealed on hover (aligned to the message's
+    // side by the parent flex). "reply" always; "thread" only on a message that
+    // isn't itself in a thread yet (an empty thread id → a potential root).
+    const acts = `<div class="ax-msg-acts">`
+      + `<button class="ax-msg-act" data-act="reply" title="reply"><i class="bi bi-reply-fill"></i> reply</button>`
+      + (!m.thread ? `<button class="ax-msg-act" data-act="thread" title="reply in thread"><i class="bi bi-chat-square-text-fill"></i> thread</button>` : '')
+      + `</div>`;
     return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-id="${esc(m.id)}" data-author="${esc(m.from)}">`
       + head
       + quoteHtml(m.reply_to)
       + body
-      + replyBtn
+      + acts
       + `</div>`;
   }
 
@@ -890,32 +894,39 @@ $(function () {
   highlightActiveRoute();
 
   // --- replies ---
-  // replyTarget (declared up top) is the message the next send will quote, or
-  // null. Set from a message's hover "reply" button, shown in the compose bar,
-  // cleared on send or cancel. replyId() is the helper the send paths read.
+  // replyTarget (declared up top) is what the next send will reference, or
+  // null: { id, author, snippet, thread }. thread is "" for a plain quoted
+  // reply, or the root message id for a threaded reply. Set from a message's
+  // action buttons, shown in the compose bar, cleared on send or cancel.
   function replyId() { return replyTarget ? replyTarget.id : ''; }
+  function threadId() { return (replyTarget && replyTarget.thread) || ''; }
   function setReplyTarget(t) {
     replyTarget = t;
+    const inThread = !!t.thread;
     $('#chat-reply-bar').html(
       `<div class="ax-replybar-in">`
-        + `<i class="bi bi-reply-fill"></i>`
-        + `<span class="ax-replybar-author">${esc(t.author)}</span>`
+        + `<i class="bi ${inThread ? 'bi-chat-square-text-fill' : 'bi-reply-fill'}"></i>`
+        + `<span class="ax-replybar-author">${esc(inThread ? 'in thread · ' : '')}${esc(t.author)}</span>`
         + `<span class="ax-replybar-snip">${esc(t.snippet)}</span>`
-        + `<button type="button" class="ax-replybar-x" title="cancel reply" aria-label="cancel">×</button>`
+        + `<button type="button" class="ax-replybar-x" title="cancel" aria-label="cancel">×</button>`
       + `</div>`
     ).removeClass('hidden');
     $('#chat-input').focus();
   }
   function clearReplyTarget() { replyTarget = null; $('#chat-reply-bar').addClass('hidden').empty(); }
   $('#chat-reply-bar').on('click', '.ax-replybar-x', clearReplyTarget);
-  // Start a reply from a message's hover button.
-  $('#chat-messages').on('click', '.ax-msg-replybtn', function (e) {
+  // Reply / reply-in-thread from a message's action buttons. "thread" carries
+  // the root id so the sent message is tagged into that thread (the threaded
+  // view is a later pass; the quote still shows it answers the root).
+  $('#chat-messages').on('click', '.ax-msg-act', function (e) {
     e.stopPropagation();
     const $msg = $(this).closest('.ax-msg');
     const id = $msg.attr('data-id');
-    const ref = chatMsgs.find((x) => x.id === id);
     if (!id) return;
-    setReplyTarget({ id, author: ref ? authorOf(ref) : nameForPub($msg.attr('data-author')), snippet: msgSnippet(ref) });
+    const ref = chatMsgs.find((x) => x.id === id);
+    const author = ref ? authorOf(ref) : nameForPub($msg.attr('data-author'));
+    const thread = $(this).attr('data-act') === 'thread' ? id : '';
+    setReplyTarget({ id, author, snippet: msgSnippet(ref), thread });
   });
   // Click a quote to jump to (and briefly flash) the message it answers.
   $('#chat-messages').on('click', '.ax-msg-quote', function () {
@@ -937,13 +948,33 @@ $(function () {
     const text = $in.val().trim();
     if (!text) return;
     $in.val('');
-    const reply_to = replyId();
+    autoGrowInput();
+    const reply_to = replyId(), thread = threadId();
     clearReplyTarget();
     $.ajax({
       url: '/api/chat/send', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to }),
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
+
+  // Composer is a textarea: Enter sends, Shift+Enter inserts a newline (so a
+  // multi-line message — e.g. a whole ```js fenced block — fits in ONE send).
+  // isComposing guards IME input (Russian/CJK) mid-composition.
+  $('#chat-input').on('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $('#chat-form').trigger('submit');
+    }
+  });
+  // Auto-grow the composer with its content, up to the CSS max-height (then it
+  // scrolls). Reset after a send.
+  function autoGrowInput() {
+    const el = $('#chat-input')[0];
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  }
+  $('#chat-input').on('input', autoGrowInput);
 
   // Attachments: the + button opens a file picker. Small files ride inline
   // (base64) on the message; larger ones are seeded and shared over torrent
@@ -965,12 +996,12 @@ $(function () {
       const $in = $('#chat-input');
       const caption = $in.val().trim();
       $in.val('');
-      const reply_to = replyId();
+      const reply_to = replyId(), thread = threadId();
       clearReplyTarget();
       $.ajax({
         url: '/api/chat/send', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({
-          kind: chatConv.kind, key: chatConv.key, body: caption, reply_to,
+          kind: chatConv.kind, key: chatConv.key, body: caption, reply_to, thread,
           file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
         }),
       }).fail((xhr) => alert('send: ' + errorOf(xhr)));
@@ -992,6 +1023,7 @@ $(function () {
     fd.append('key', chatConv.key);
     fd.append('body', caption);
     fd.append('reply_to', replyId());
+    fd.append('thread', threadId());
     fd.append('file', file);
     clearReplyTarget();
     $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })

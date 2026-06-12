@@ -15,14 +15,30 @@
 
   if (window.marked && marked.setOptions) {
     marked.setOptions({ gfm: true, breaks: true });
+    // Route fenced code blocks INSIDE markdown (```md …) through our own
+    // highlighter/diagram dispatch, so code in markdown is highlighted and a
+    // mermaid fence in markdown still renders. marked's renderer.code receives
+    // either a token object (v5+) or positional args (older) — handle both.
+    if (marked.use) {
+      marked.use({
+        renderer: {
+          code: function (codeOrTok, lang) {
+            var code = typeof codeOrTok === 'string' ? codeOrTok : (codeOrTok && codeOrTok.text) || '';
+            var language = typeof codeOrTok === 'string' ? lang : (codeOrTok && codeOrTok.lang) || '';
+            return blockFor(language, code);
+          },
+        },
+      });
+    }
   }
   if (window.mermaid) {
     // startOnLoad off — we drive rendering ourselves after inserting nodes.
     mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' });
   }
 
-  // A fenced block: ```<lang>\n<body>``` (lang optional, no backticks in it).
-  const FENCE = /```([^\n`]*)\r?\n([\s\S]*?)```/g;
+  // A fence line is 3+ backticks at the start of a line, optionally followed
+  // by an info string (the language). A bare run of backticks closes a block.
+  const OPEN_FENCE = /^(`{3,})([^`]*)$/;
 
   // escape covers BOTH text and double-quoted-attribute contexts (we stash the
   // mermaid source in a data- attribute), so quotes are escaped too.
@@ -69,28 +85,47 @@
     return '<pre class="ax-mermaid" data-src="' + escape(src) + '"></pre>';
   }
 
-  // plain emits an inter-fence text chunk, dropping the single newline that
-  // hugged an adjacent fence so blocks don't get a blank line around them.
-  function plain(s, trimStart, trimEnd) {
-    if (trimStart) s = s.replace(/^\r?\n/, '');
-    if (trimEnd) s = s.replace(/\r?\n$/, '');
-    return inline(s);
+  // blockFor dispatches a fenced block to its renderer by language tag. Shared
+  // by the top-level fence parser AND marked's code renderer (so code inside a
+  // ```md block is highlighted / a mermaid fence inside it still draws).
+  function blockFor(lang, code) {
+    lang = (lang || '').trim().toLowerCase().split(/\s+/)[0];
+    if (lang === 'mermaid') return mermaidBlock(code);
+    if (lang === 'md' || lang === 'markdown') return mdBlock(code);
+    return codeBlock(lang, code);
   }
 
+  // render parses the message line by line into HTML. Fenced blocks:
+  //   - a code/mermaid fence closes at the FIRST bare fence of the same length
+  //     (standard, non-greedy);
+  //   - a markdown fence (```md / ```markdown) closes at the LAST such fence,
+  //     so it can wrap same-length code fences inside it (marked then renders
+  //     and highlights them). That's what makes ```md … ```js … ``` … ``` work
+  //     without forcing a longer outer fence.
+  // Plain runs between blocks get inline markdown; everything is sanitised.
   function render(text) {
-    text = text || '';
-    var out = '', last = 0, m;
-    FENCE.lastIndex = 0;
-    while ((m = FENCE.exec(text)) !== null) {
-      if (m.index > last) out += plain(text.slice(last, m.index), last > 0, true);
-      var lang = (m[1] || '').trim().toLowerCase();
-      var code = m[2];
-      if (lang === 'mermaid') out += mermaidBlock(code);
-      else if (lang === 'md' || lang === 'markdown') out += mdBlock(code);
-      else out += codeBlock(lang, code);
-      last = m.index + m[0].length;
+    var lines = String(text || '').split('\n');
+    var out = '', buf = [];
+    function flush() { if (buf.length) { out += inline(buf.join('\n')); buf = []; } }
+    for (var i = 0; i < lines.length; ) {
+      var mm = lines[i].match(OPEN_FENCE);
+      if (!mm) { buf.push(lines[i]); i++; continue; }
+      var fence = mm[1];
+      var lang = (mm[2] || '').trim().toLowerCase().split(/\s+/)[0];
+      var greedy = lang === 'md' || lang === 'markdown';
+      var bare = new RegExp('^`{' + fence.length + ',}\\s*$'); // a closing fence
+      var close = -1;
+      if (greedy) {
+        for (var j = lines.length - 1; j > i; j--) { if (bare.test(lines[j])) { close = j; break; } }
+      } else {
+        for (var k = i + 1; k < lines.length; k++) { if (bare.test(lines[k])) { close = k; break; } }
+      }
+      if (close === -1) { buf.push(lines[i]); i++; continue; } // unterminated → plain
+      flush();
+      out += blockFor(lang, lines.slice(i + 1, close).join('\n'));
+      i = close + 1;
     }
-    if (last < text.length) out += plain(text.slice(last), last > 0, false);
+    flush();
     if (window.DOMPurify) {
       // Allow the structural bits we emit; mermaid placeholders keep data-src.
       return DOMPurify.sanitize(out, { ADD_ATTR: ['data-src', 'target'] });
