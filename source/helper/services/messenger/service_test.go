@@ -36,6 +36,7 @@ func newTestService() *Service {
 		self:     func() string { return "self" },
 		channels: map[string]*Channel{},
 		convs:    map[string][]Message{},
+		notes:    map[string]NoteDoc{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
 	}
@@ -168,5 +169,59 @@ func TestChannelMembershipAuthority(t *testing.T) {
 	s.onMsg("alice", mustJSON(Message{ID: "3", Kind: "channel", Peer: id, Type: TypeRemove, Members: []string{"alice"}, TS: 3}))
 	if chs := userChannels(s); len(chs) != 0 {
 		t.Fatalf("owner removal didn't drop channel: %+v", chs)
+	}
+}
+
+func TestNotesLWW(t *testing.T) {
+	s := newTestService()
+	const id = "alice/dev"
+	s.onMsg("alice", mustJSON(Message{ID: "1", Kind: "channel", Peer: id, Type: TypeCreate, Members: []string{"alice", "self"}, TS: 1}))
+	// A notes edit (from any member) is folded into the channel's doc.
+	s.onMsg("alice", mustJSON(Message{ID: "n1", Kind: "channel", Peer: id, Type: TypeNotes, Body: "first", TS: 10}))
+	if got := s.Notes(id).Body; got != "first" {
+		t.Fatalf("notes not applied: %q", got)
+	}
+	// A newer edit wins.
+	s.onMsg("self", mustJSON(Message{ID: "n2", Kind: "channel", Peer: id, Type: TypeNotes, Body: "second", TS: 20}))
+	if got := s.Notes(id).Body; got != "second" {
+		t.Fatalf("newer notes lost: %q", got)
+	}
+	// A stale edit (older TS) is ignored.
+	s.onMsg("alice", mustJSON(Message{ID: "n3", Kind: "channel", Peer: id, Type: TypeNotes, Body: "stale", TS: 5}))
+	if got := s.Notes(id).Body; got != "second" {
+		t.Fatalf("stale notes overwrote winner: %q", got)
+	}
+	// Notes edits don't leak into the conversation feed.
+	if msgs := s.Messages("channel", id, 100); len(msgs) != 1 || msgs[0].Type != TypeCreate {
+		t.Fatalf("notes polluted the feed: %+v", msgs)
+	}
+}
+
+// A DM is a channel too — it carries notes, keyed by the peer's pub. An
+// inbound DM notes edit from "bob" is stored under scope "bob" (the conv key),
+// not leaked into the feed.
+func TestNotesDM(t *testing.T) {
+	s := newTestService() // self() == "self"
+	s.onMsg("bob", mustJSON(Message{ID: "d1", Kind: "dm", Peer: "self", To: "self", From: "bob", Type: TypeNotes, Body: "hello", TS: 10}))
+	if got := s.Notes("bob").Body; got != "hello" {
+		t.Fatalf("dm notes not applied under peer scope: %q", got)
+	}
+	if msgs := s.Messages("dm", "bob", 100); len(msgs) != 0 {
+		t.Fatalf("dm notes polluted the feed: %+v", msgs)
+	}
+}
+
+func TestValidChannelName(t *testing.T) {
+	ok := []string{"dev", "dev/backend", "a/b/c", "team-1/sub_2"}
+	bad := []string{"", "/dev", "dev/", "a//b", "has space", "a/ b", "a/"}
+	for _, n := range ok {
+		if !validChannelName(n) {
+			t.Errorf("want valid: %q", n)
+		}
+	}
+	for _, n := range bad {
+		if validChannelName(n) {
+			t.Errorf("want invalid: %q", n)
+		}
 	}
 }

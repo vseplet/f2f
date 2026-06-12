@@ -38,8 +38,18 @@ type Message struct {
 	// File is an optional inline attachment (a small photo, clip or document)
 	// riding alongside the text. nil for a plain message.
 	File *Attachment `json:"file,omitempty"`
-	TS   int64       `json:"ts"` // unix ms
-	Mine bool        `json:"mine"`
+	// ReplyTo is the id of the message this one replies to (a quoted reply);
+	// Thread is the id of the thread root a message belongs to (threaded
+	// replies under a message). Both empty for a normal message. Carried on
+	// the wire and persisted; older peers ignore the unknown fields.
+	ReplyTo string `json:"reply_to,omitempty"`
+	Thread  string `json:"thread,omitempty"`
+	// EditID is the id of the message this one replaces (an edit). The log is
+	// append-only, so an edit is just a new message superseding the original by
+	// id — applied only when its author matches the original's (display side).
+	EditID string `json:"edit_id,omitempty"`
+	TS     int64  `json:"ts"` // unix ms
+	Mine   bool   `json:"mine"`
 }
 
 // MaxAttachment caps an inline attachment's raw size. The bus frame limit is
@@ -63,10 +73,24 @@ type Attachment struct {
 
 // Channel is a named room. ID is "<owner_pub>/<name>"; Owner and Name are
 // also derivable from it (see SplitChannelID) but kept explicit for clarity.
+// A "/" inside Name denotes hierarchy ("dev/backend" nests under "dev") — a
+// pure display convention the UI folds into a tree; the wire model is flat.
 type Channel struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Owner     string   `json:"owner"`
 	Members   []string `json:"members"`
 	CreatedAt int64    `json:"created_at"` // unix ms
+}
+
+// NoteDoc is a conversation's shared text document. It hangs off the
+// conversation SCOPE (a channel id, or — for a DM — the other peer's pub),
+// not the Channel, so every conversation can carry notes including DMs. Any
+// participant may edit it; edits converge last-writer-wins by (TS, By) and
+// ride the bus as a "notes" message, separate from the chat feed.
+type NoteDoc struct {
+	Scope string `json:"scope"`
+	Body  string `json:"body"`
+	TS    int64  `json:"ts"` // unix ms of the winning edit
+	By    string `json:"by"` // pub of the winning edit's author
 }

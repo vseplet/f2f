@@ -204,7 +204,7 @@ func run(bind string, console bool, autostart bool) error {
 			Kind:  "peer",
 			Title: peerName(peerPub) + " " + state,
 			From:  peerPub,
-			Route: "chat:dm:" + peerPub,
+			Route: "channel:" + peerPub, // a DM is the degenerate channel
 		})
 	}
 
@@ -239,7 +239,7 @@ func run(bind string, console bool, autostart bool) error {
 						Title: "#" + name,
 						Body:  peerName(m.From) + ": " + preview,
 						From:  m.From,
-						Route: "chat:channel:" + m.Peer,
+						Route: "channel:" + m.Peer,
 					})
 				} else {
 					notifySvc.Push(notify.Notification{
@@ -247,7 +247,7 @@ func run(bind string, console bool, autostart bool) error {
 						Title: peerName(m.From),
 						Body:  preview,
 						From:  m.From,
-						Route: "chat:dm:" + m.From,
+						Route: "channel:" + m.From, // a DM is the degenerate channel
 					})
 				}
 			case messenger.TypeCallStart:

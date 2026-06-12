@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS messages (
   body      TEXT    NOT NULL DEFAULT '',
   members   TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
   file      TEXT    NOT NULL DEFAULT '', -- JSON Attachment (base64 data), '' if none
+  reply_to  TEXT    NOT NULL DEFAULT '', -- id of the quoted message, '' if none
+  thread    TEXT    NOT NULL DEFAULT '', -- id of the thread root, '' if none
+  edit_id   TEXT    NOT NULL DEFAULT '', -- id of the message this edits, '' if none
   ts        INTEGER NOT NULL,            -- unix ms
   mine      INTEGER NOT NULL DEFAULT 0
 );
@@ -95,7 +98,10 @@ CREATE TABLE IF NOT EXISTS channels (
   name       TEXT    NOT NULL DEFAULT '',
   owner      TEXT    NOT NULL DEFAULT '',
   members    TEXT    NOT NULL DEFAULT '', -- JSON array of member pubs
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  notes      TEXT    NOT NULL DEFAULT '', -- shared doc body
+  notes_ts   INTEGER NOT NULL DEFAULT 0,  -- unix ms of the winning edit
+  notes_by   TEXT    NOT NULL DEFAULT ''  -- author pub of the winning edit
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
@@ -104,6 +110,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   payload   TEXT    NOT NULL,            -- full wire JSON, resent verbatim
   ts        INTEGER NOT NULL,            -- unix ms enqueued, for pruning
   PRIMARY KEY (msg_id, recipient)
+);
+
+CREATE TABLE IF NOT EXISTS conv_notes (
+  scope  TEXT    NOT NULL PRIMARY KEY,   -- channel id, or peer pub for a DM
+  body   TEXT    NOT NULL DEFAULT '',    -- shared doc body
+  ts     INTEGER NOT NULL DEFAULT 0,     -- unix ms of the winning edit
+  author TEXT    NOT NULL DEFAULT ''     -- pub of the winning edit's author
 );`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("messenger: migrate: %w", err)
@@ -113,6 +126,35 @@ CREATE TABLE IF NOT EXISTS outbox (
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN file TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("messenger: migrate file column: %w", err)
+	}
+	// Reply/thread/edit columns, added to message tables created before them.
+	for _, col := range []string{
+		`ALTER TABLE messages ADD COLUMN reply_to TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE messages ADD COLUMN thread TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE messages ADD COLUMN edit_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("messenger: migrate reply/thread/edit columns: %w", err)
+		}
+	}
+	// Notes once hung off the channels table; they now live in conv_notes
+	// (so DMs can carry notes too). Ensure the old columns exist, then seed
+	// conv_notes from any channel notes written before the move. The seed is
+	// idempotent (ON CONFLICT DO NOTHING) — it never clobbers a newer edit.
+	for _, col := range []string{
+		`ALTER TABLE channels ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN notes_ts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN notes_by TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("messenger: migrate notes columns: %w", err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO conv_notes(scope, body, ts, author)
+		 SELECT id, notes, notes_ts, notes_by FROM channels WHERE notes != ''
+		 ON CONFLICT(scope) DO NOTHING`); err != nil {
+		return fmt.Errorf("messenger: seed conv_notes: %w", err)
 	}
 	return nil
 }
@@ -128,10 +170,10 @@ func (s *Store) AddMessage(campID string, m Message) error {
 		m.TS = time.Now().UnixMilli()
 	}
 	_, err = db.Exec(
-		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO messages(id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, edit_id, ts, mine)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), encodeFile(m.File), m.TS, b2i(m.Mine))
+		m.ID, m.Kind, m.Peer, m.Type, m.From, m.To, m.Body, jsonArr(m.Members), encodeFile(m.File), m.ReplyTo, m.Thread, m.EditID, m.TS, b2i(m.Mine))
 	if err != nil {
 		return fmt.Errorf("messenger: add message: %w", err)
 	}
@@ -149,7 +191,7 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 		limit = 200
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, edit_id, ts, mine
 		   FROM messages
 		  WHERE kind=? AND peer=?
 		  ORDER BY ts DESC, id DESC
@@ -165,7 +207,7 @@ func (s *Store) Messages(campID, kind, peer string, limit int) ([]Message, error
 		var m Message
 		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.ReplyTo, &m.Thread, &m.EditID, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
@@ -188,7 +230,7 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, ts, mine
+		`SELECT id, kind, peer, mtype, sender, recipient, body, members, file, reply_to, thread, edit_id, ts, mine
 		   FROM messages ORDER BY ts ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("messenger: all messages: %w", err)
@@ -199,7 +241,7 @@ func (s *Store) AllMessages(campID string) ([]Message, error) {
 		var m Message
 		var members, file string
 		var mine int
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.TS, &mine); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Peer, &m.Type, &m.From, &m.To, &m.Body, &members, &file, &m.ReplyTo, &m.Thread, &m.EditID, &m.TS, &mine); err != nil {
 			return nil, err
 		}
 		m.Members = parseArr(members)
@@ -266,6 +308,48 @@ func (s *Store) Channels(campID string) ([]Channel, error) {
 		}
 		c.Members = parseArr(members)
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UpsertNote writes a conversation's shared notes doc (best-effort; the caller
+// has already applied last-writer-wins in memory).
+func (s *Store) UpsertNote(campID string, d NoteDoc) error {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return err
+	}
+	if d.Scope == "" {
+		return errors.New("messenger: note scope required")
+	}
+	_, err = db.Exec(
+		`INSERT INTO conv_notes(scope, body, ts, author) VALUES(?,?,?,?)
+		 ON CONFLICT(scope) DO UPDATE SET body=excluded.body, ts=excluded.ts, author=excluded.author`,
+		d.Scope, d.Body, d.TS, d.By)
+	if err != nil {
+		return fmt.Errorf("messenger: upsert note: %w", err)
+	}
+	return nil
+}
+
+// Notes loads every conversation's shared notes doc for campID.
+func (s *Store) Notes(campID string) ([]NoteDoc, error) {
+	db, err := s.dbFor(campID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT scope, body, ts, author FROM conv_notes`)
+	if err != nil {
+		return nil, fmt.Errorf("messenger: notes: %w", err)
+	}
+	defer rows.Close()
+	var out []NoteDoc
+	for rows.Next() {
+		var d NoteDoc
+		if err := rows.Scan(&d.Scope, &d.Body, &d.TS, &d.By); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

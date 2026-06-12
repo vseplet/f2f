@@ -396,7 +396,7 @@ $(function () {
     async endLocal(silent) {
       const a = this.active;
       const chatRoute = a
-        ? (a.kind === 'group' ? 'chat:channel:' + encHash(a.id) : 'chat:dm:' + (a.pub || a.id))
+        ? (a.kind === 'group' ? 'channel:' + encHash(a.id) : 'channel:' + (a.pub || a.id))
         : '';
       if (a && a.kind === 'group') await Group.leave(true);
       else teardown();
@@ -818,8 +818,8 @@ $(function () {
     const a = Call.active;
     if (!a) return;
     location.hash = a.kind === 'group'
-      ? 'chat:channel:' + encHash(a.id)
-      : 'chat:dm:' + (a.pub || a.id);
+      ? 'channel:' + encHash(a.id)
+      : 'channel:' + (a.pub || a.id);
   }
   function openCall() {
     const a = Call.active;
@@ -1001,8 +1001,8 @@ $(function () {
     const a = Call.active;
     if (!a) return;
     location.hash = a.kind === 'group'
-      ? 'chat:channel:' + encHash(a.id)
-      : 'chat:dm:' + encodeURIComponent(a.pub || a.id);
+      ? 'channel:' + encHash(a.id)
+      : 'channel:' + encodeURIComponent(a.pub || a.id);
   });
 
   // --- hang up ---
@@ -1013,11 +1013,14 @@ $(function () {
   // name from the chat header instead.
   $('#chat-call').on('click', function () {
     const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
-    const m = h.match(/^chat:(dm|channel):(.+)$/);
+    const m = h.match(/^channel:(.+)$/);
     if (!m) return;
+    let key = m[1];
+    if (key === 'general') key = '*/general'; // de-alias to the real channel id
     const title = $('#chat-title').text().replace(/^# /, '');
-    if (m[1] === 'channel') Call.start('group', m[2], title || m[2]);
-    else Call.start('dm', m[2]);
+    // A "/"-bearing key is a room → group call; a bare peer pub is a DM.
+    if (key.includes('/')) Call.start('group', key, title || key);
+    else Call.start('dm', key);
   });
 
   // ---- router: #call:<kind>:<id> shows the call window ----

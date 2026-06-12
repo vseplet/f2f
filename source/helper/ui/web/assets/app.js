@@ -287,6 +287,18 @@ $(function () {
     $(this).toggleClass('collapsed');
   });
 
+  // Channel sub-tree collapse — the caret is a separate control: it toggles
+  // the node's children and does NOT open the channel (stopPropagation keeps
+  // the row's data-route handler from firing).
+  $('#ax-tree').on('click', '.ax-chan-caret', function (e) {
+    e.stopPropagation();
+    toggleChanPath($(this).attr('data-chan-path'));
+  });
+  // A virtual folder routes nowhere, so clicking its body toggles it too.
+  $('#ax-tree').on('click', '.ax-tree-row.ax-tree-folder', function () {
+    toggleChanPath($(this).attr('data-chan-path'));
+  });
+
   // Rows carrying data-url (e.g. domains) open their target in a new tab.
   $('#ax-tree').on('click', '.ax-tree-row[data-url]', function () {
     const url = $(this).attr('data-url');
@@ -315,8 +327,21 @@ $(function () {
 
   // --- messaging (services/messenger over the bus) ---
   const GENERAL_ID = '*/general'; // camp-wide channel everyone is in (no leave)
+  // URL routes: a conversation is "channel:<key>" — there's no separate "dm:"
+  // because a DM is just the degenerate channel. The key's SHAPE tells them
+  // apart: a bare peer pub is a DM, while "general" or an "<owner>/<name>" id
+  // is a room. Notes are "note:<id>". general's ownerless "*/general" id is
+  // shown in the URL as the clean "general" alias ("*/" is plumbing).
+  function convKey(id) { return id === GENERAL_ID ? 'general' : id; }
+  function convRoute(id) { return 'channel:' + convKey(id); }
+  function noteRoute(id) { return 'note:' + convKey(id); }
+  // convKind infers a conversation's kind from a (de-aliased) key.
+  function convKind(key) { return (key === GENERAL_ID || key.includes('/')) ? 'channel' : 'dm'; }
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
+  let replyTarget = null;     // message the next send will quote, or null
+  let editTarget = null;      // { id } of the message the next send will edit, or null
+  let threadRoot = null;      // id of the message whose thread panel is open, or null
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
@@ -336,10 +361,49 @@ $(function () {
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
   }
 
+  // richBody renders a message body through the rich-text pipeline (inline
+  // markdown + fenced code/markdown/mermaid, all sanitised). Falls back to
+  // plain escaped text if richtext.js didn't load.
+  function richBody(text) {
+    return window.f2fRich ? f2fRich.render(text || '') : esc(text);
+  }
+
+  // msgSnippet is a one-line plain-text gist of a message — for reply quotes
+  // and the reply compose bar. Attachments collapse to an emoji + name.
+  function msgSnippet(m) {
+    if (!m) return 'message';
+    if (m.body) return m.body.replace(/\s+/g, ' ').trim().slice(0, 90);
+    if (m.file) {
+      const mime = m.file.mime || '';
+      if (mime.indexOf('image/') === 0) return '📷 photo';
+      if (mime.indexOf('video/') === 0) return '🎬 video';
+      return '📎 ' + (m.file.name || 'file');
+    }
+    return 'message';
+  }
+  function authorOf(m) {
+    return (m && (m.mine || (lastStatus && m.from === lastStatus.identity_pub))) ? 'you' : nameForPub(m && m.from);
+  }
+  // quoteHtml renders the "replying to" preview shown above a message that
+  // quotes another. Resolves the target from the loaded history; click scrolls
+  // to it (handled below). Falls back gracefully if the target isn't loaded.
+  function quoteHtml(replyToId) {
+    if (!replyToId) return '';
+    const ref = chatMsgs.find((x) => x.id === replyToId);
+    const who = ref ? authorOf(ref) : '';
+    const snip = ref ? msgSnippet(ref) : 'message';
+    return `<div class="ax-msg-quote" data-target="${esc(replyToId)}">`
+      + (who ? `<span class="ax-quote-author">${esc(who)}</span>` : '')
+      + `<span class="ax-quote-text">${esc(snip)}</span></div>`;
+  }
+
   // msgRow renders one message. A type other than "text" is a channel
   // lifecycle event (create/add/remove) → a muted system line. grouped=true
   // omits the author/time header for a consecutive line from the same author.
-  function msgRow(m, grouped) {
+  // replies>0 adds a "N replies" thread affordance under the bubble (main
+  // timeline only); inThread=true renders inside the thread panel (no footer,
+  // no thread action).
+  function msgRow(m, grouped, replies, inThread) {
     if (m.type && m.type !== 'text') {
       const who = nameForPub(m.from);
       const names = (m.targets || []).map(nameForPub).join(', ');
@@ -358,29 +422,46 @@ $(function () {
     // Own messages bubble on the right, everyone else's on the left.
     const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
     const author = mine ? 'you' : nameForPub(m.from);
-    const head = grouped ? '' :
+    const edited = m.edited ? `<span class="ax-msg-edited">edited</span>` : '';
+    const head = (grouped && !m.edited) ? '' :
       `<div class="ax-msg-head">`
         + `<span class="ax-msg-author">${esc(author)}</span>`
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
+        + edited
       + `</div>`;
-    // A previewable attachment (image/video) and its caption share one bubble
-    // so they read as a single message. A non-previewable file is its own
-    // download chip with the caption as a separate text bubble. Plain text is
-    // just the text bubble.
+    // An attachment and its caption share ONE bubble so they read as a single
+    // message: a photo/clip previews above the caption; a file/torrent shows a
+    // doc card above the caption. Plain text is just the text bubble.
     const mime = (m.file && m.file.mime) || '';
     const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
-    const caption = m.body ? `<div class="ax-msg-caption">${esc(m.body)}</div>` : '';
+    const caption = m.body ? `<div class="ax-msg-caption">${richBody(m.body)}</div>` : '';
     let body;
     if (m.file && previewable) {
       body = `<div class="ax-msg-media">${attachHtml(m.file)}${caption}</div>`;
     } else if (m.file) {
-      body = attachHtml(m.file) + (m.body ? `<div class="ax-msg-text">${esc(m.body)}</div>` : '');
+      body = `<div class="ax-msg-filecard">${attachHtml(m.file)}${caption}</div>`;
     } else {
-      body = `<div class="ax-msg-text">${esc(m.body)}</div>`;
+      body = `<div class="ax-msg-text">${richBody(m.body)}</div>`;
     }
-    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-author="${esc(m.from)}">`
+    // Action row under the bubble, revealed on hover (aligned to the message's
+    // side by the parent flex). "reply" = inline quote; "thread" opens the
+    // thread panel (only on a root — a message not itself in a thread, and not
+    // already shown inside the panel). "edit" only on my own text messages.
+    const acts = `<div class="ax-msg-acts">`
+      + `<button class="ax-msg-act" data-act="reply" title="reply"><i class="bi bi-reply-fill"></i> reply</button>`
+      + ((!m.thread && !inThread) ? `<button class="ax-msg-act" data-act="thread" title="reply in thread"><i class="bi bi-chat-square-text-fill"></i> thread</button>` : '')
+      + ((mine && m.body) ? `<button class="ax-msg-act" data-act="edit" title="edit"><i class="bi bi-pencil-fill"></i> edit</button>` : '')
+      + `</div>`;
+    // "N replies" affordance under a root message in the main timeline.
+    const threadFooter = (replies > 0 && !inThread)
+      ? `<button class="ax-msg-thread-open" data-root="${esc(m.id)}"><i class="bi bi-chat-square-text-fill"></i> ${replies} ${replies === 1 ? 'reply' : 'replies'}</button>`
+      : '';
+    return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-id="${esc(m.id)}" data-author="${esc(m.from)}">`
       + head
+      + quoteHtml(m.reply_to)
       + body
+      + threadFooter
+      + acts
       + `</div>`;
   }
 
@@ -433,29 +514,65 @@ $(function () {
       return `<video class="ax-msg-video" src="${url}" controls preload="metadata"></video>`
         + `<a class="ax-msg-video-dl" href="${url}" download="${name}">⤓ ${name}</a>`;
     }
-    return `<a class="ax-msg-file" href="${url}" download="${name}">`
-      + `<i class="bi bi-paperclip"></i> <span>${name}</span>`
-      + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
+    return `<a class="ax-msg-doc" href="${url}" download="${name}" title="${name}">`
+      + `<span class="ax-msg-doc-ic"><i class="bi bi-file-earmark-fill"></i></span>`
+      + `<span class="ax-msg-doc-meta">`
+        + `<span class="ax-msg-doc-name">${name}</span>`
+        + `<span class="ax-msg-doc-sub">${esc(fmtBytes(f.size || 0))} · download</span>`
+      + `</span></a>`;
+  }
+
+  // editsByRoot maps an original message id → its latest edit (newest ts) made
+  // by the SAME author. An edit from anyone else is ignored (you can't edit
+  // someone else's message). Built per render from the conversation history.
+  function editsByRoot(msgs) {
+    const byId = {};
+    for (const m of msgs) if (!m.edit_id) byId[m.id] = m;
+    const edits = {};
+    for (const m of msgs) {
+      if (!m.edit_id) continue;
+      const orig = byId[m.edit_id];
+      if (!orig || orig.from !== m.from) continue; // only the author may edit
+      const cur = edits[m.edit_id];
+      if (!cur || m.ts >= cur.ts) edits[m.edit_id] = m;
+    }
+    return edits;
+  }
+  // applyEdit returns the message to display: the original patched with its
+  // latest edit's body/file (keeping the original's position, author, ts).
+  function applyEdit(m, edits) {
+    const e = edits[m.id];
+    if (!e) return m;
+    return Object.assign({}, m, { body: e.body, file: e.file || m.file, edited: true });
   }
 
   function renderChat(msgs) {
     // A full redraw replaces the DOM wholesale, orphaning the previous blobs.
     chatBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
     chatBlobUrls = [];
-    let html = '', prevFrom = null, prevTs = 0;
-    const GROUP_MS = 5 * 60 * 1000; // collapse the header only within 5 minutes
-    for (const m of (msgs || [])) {
-      const isText = !m.type || m.type === 'text';
-      // Group consecutive lines from the same author ONLY when close in time,
-      // so messages sent far apart keep their own timestamped header.
-      const grouped = isText && m.from === prevFrom && (m.ts - prevTs) < GROUP_MS;
-      html += msgRow(m, grouped);
-      prevFrom = isText ? m.from : null;
-      prevTs = isText ? m.ts : 0;
+    const all = msgs || [];
+    const edits = editsByRoot(all);
+    // Known message ids (roots/normal); thread replies pointing at a known root
+    // live in the thread panel, not the main timeline. Count replies per root.
+    const ids = new Set(); for (const x of all) if (!x.edit_id) ids.add(x.id);
+    const replyCount = {};
+    for (const x of all) {
+      if (x.edit_id) continue;
+      if (x.thread && ids.has(x.thread)) replyCount[x.thread] = (replyCount[x.thread] || 0) + 1;
+    }
+    let html = '';
+    for (const raw of all) {
+      if (raw.edit_id) continue;                       // edits patch their original
+      if (raw.thread && ids.has(raw.thread)) continue; // a thread reply → panel only
+      const m = applyEdit(raw, edits);
+      // Header grouping (collapsing consecutive same-author lines) is disabled
+      // for now — every message shows its own author/time header.
+      html += msgRow(m, false, replyCount[m.id] || 0, false);
     }
     const $m = $('#chat-messages');
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
+    if (window.f2fRich) f2fRich.renderDiagrams($m[0]); // turn ```mermaid into SVG
     updateTorrentChips(); // paint cached status, then refresh from the backend
     pollTorrents();
   }
@@ -480,6 +597,9 @@ $(function () {
       chatMsgs = msgs || [];
       renderChat(chatMsgs);
       setChatTitle();
+      // Fill the thread panel once history lands (e.g. a deep-link opened it
+      // before messages arrived).
+      if (threadRoot && !$('#chat-thread').hasClass('hidden')) renderThread();
     });
   }
 
@@ -490,6 +610,10 @@ $(function () {
       chatChannels = Array.isArray(list) ? list : [];
       if (lastStatus && typeof renderSidebarTree === 'function') renderSidebarTree(lastStatus);
       if (!$('#chat-members-panel').hasClass('hidden')) renderMembersPanel();
+      // Refresh the open notes editor — renderNote keeps unsaved edits (so
+      // this fills the editor on first paint after a reload, once the list
+      // arrives, and reflects remote edits otherwise).
+      if (noteConv && !$('#tab-note').hasClass('hidden')) renderNote();
     });
   }
 
@@ -549,6 +673,92 @@ $(function () {
   $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/chat/channels/delete', 'delete'));
   $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/chat/channels/leave', 'leave'));
 
+  // --- channel notes (the shared doc, opened in the main pane) ---
+  //
+  // A conversation's notes open as their own main-window view (note:<scope>),
+  // not a dropdown — a clean full-pane editor (whitepaper-style). A DM is a
+  // channel too, so DMs carry notes as well; the doc is fetched/saved by scope
+  // (channel id or peer pub). Edits debounce-save (last-writer-wins).
+  let noteConv = null;       // scope of the open note, or null
+  let noteSaveTimer = null;
+  let noteDirty = false;     // unsaved local edits — guards against clobbering
+  let noteDoc = null;        // last doc from the server: {scope, body, ts, by}
+
+  // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
+  // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
+  function noteTitle(scope) {
+    if (scope === GENERAL_ID || scope.includes('/')) {
+      const ch = chatChannels.find((c) => c.id === scope);
+      return '# ' + ((ch && ch.name) || scope.split('/').pop()) + ' · notes';
+    }
+    return nameForPub(scope) + ' · notes';
+  }
+
+  function openNote(scope) {
+    noteConv = scope;
+    noteDirty = false;
+    noteDoc = null;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-note').removeClass('hidden');
+    $('#note-title').text(noteTitle(scope));
+    $('#note-status').text('loading…');
+    $('#note-text').val('');
+    fetchNote(scope);
+    setTimeout(() => $('#note-text').focus(), 0);
+  }
+
+  // fetchNote loads the doc for a scope from the backend, then paints it.
+  function fetchNote(scope) {
+    $.getJSON('/api/chat/notes?key=' + encodeURIComponent(scope), (doc) => {
+      if (noteConv !== scope) return; // navigated away mid-flight
+      noteDoc = doc || {};
+      renderNote();
+    }).fail(() => { if (noteConv === scope) $('#note-status').text('load failed'); });
+  }
+
+  // renderNote paints the editor from the fetched doc. It mirrors the server
+  // copy UNLESS there are unsaved local edits — so it reflects remote edits
+  // without ever eating what you're typing.
+  function renderNote() {
+    if (!noteConv) return;
+    $('#note-title').text(noteTitle(noteConv));
+    $('#note-status').text(noteDoc && noteDoc.by ? 'last edit · ' + nameForPub(noteDoc.by) : '');
+    if (!noteDirty) $('#note-text').val((noteDoc && noteDoc.body) || '');
+  }
+
+  function saveNote(scope, body) {
+    $('#note-status').text('saving…');
+    $.ajax({
+      url: '/api/chat/notes', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ key: scope, body }),
+    }).done((doc) => {
+      if (noteConv !== scope) return;
+      noteDoc = doc || noteDoc;
+      // Clear dirty only if no edit happened during the request (the textarea
+      // still holds exactly what we sent) — otherwise a newer edit is pending.
+      if ($('#note-text').val() === body) noteDirty = false;
+      $('#note-status').text('saved');
+    }).fail((xhr) => { if (noteConv === scope) $('#note-status').text('save failed: ' + errorOf(xhr)); });
+  }
+
+  // Debounced auto-save on every edit (whitepaper-style — no save button).
+  $('#note-text').on('input', function () {
+    if (!noteConv) return;
+    noteDirty = true;
+    const body = $(this).val();
+    $('#note-status').text('editing…');
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = setTimeout(() => saveNote(noteConv, body), 600);
+  });
+
+  // Open a channel's notes from the hover icon on its sidebar row.
+  $('#ax-tree').on('click', '.ax-tree-note', function (e) {
+    e.stopPropagation();
+    const id = $(this).attr('data-note');
+    if (id) location.hash = noteRoute(id);
+  });
+
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
     const $p = $('#chat-members-panel');
@@ -583,6 +793,13 @@ $(function () {
       // A channel lifecycle event may have created/changed/removed a channel
       // — refresh the list so it (dis)appears.
       if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
+      // A notes edit mutates the conversation's shared doc, not the feed:
+      // re-fetch if its scope is the one we're viewing, and never render it as
+      // a chat line. (key, computed above, is the conversation scope.)
+      if (m.type === 'notes') {
+        if (noteConv && noteConv === key && !$('#tab-note').hasClass('hidden')) fetchNote(noteConv);
+        return;
+      }
       // The open channel was deleted (or we left) → close the view.
       if ((m.type === 'delete' || m.type === 'leave')
           && chatConv && chatConv.kind === 'channel' && chatConv.key === m.peer) {
@@ -594,11 +811,20 @@ $(function () {
       // view; render them too, not just text.
       if (chatConv && chatConv.kind === m.kind && chatConv.key === key) {
         chatMsgs.push(m);
-        $('#chat-messages').append(msgRow(m, false));
-        const $m = $('#chat-messages');
-        $m.scrollTop($m[0].scrollHeight);
-        if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
-      } else if (!m.mine) {
+        // An edit patches a bubble in place, and a thread reply belongs to the
+        // panel (hidden from the timeline) → full redraw. A normal message just
+        // appends (cheaper, keeps scroll).
+        if (m.edit_id || m.thread) {
+          renderChat(chatMsgs);
+          if (threadRoot && !$('#chat-thread').hasClass('hidden')) renderThread();
+        } else {
+          $('#chat-messages').append(msgRow(m, false, 0, false));
+          const $m = $('#chat-messages');
+          if (window.f2fRich) f2fRich.renderDiagrams($m[0]);
+          $m.scrollTop($m[0].scrollHeight);
+          if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
+        }
+      } else if (!m.mine && !m.edit_id) {
         chatUnread[key] = (chatUnread[key] || 0) + 1;
       }
     };
@@ -607,9 +833,9 @@ $(function () {
   openChatStream();
   fetchChannels();
 
-  // Hash router. Currently handles chat routes (chat:channel:<id> /
-  // chat:dm:<peer>); unknown hashes are ignored so normal tab switching
-  // keeps working.
+  // Hash router. Handles conversation routes (channel:<key>, where a bare pub
+  // key is a DM), notes (note:<id>), and resource tabs (peer:/tunnel:/…);
+  // unknown hashes are ignored so normal tab switching keeps working.
   function activateTab(tab) {
     $('.ax-tab').removeClass('ax-tab-active');
     $('.ax-tab[data-tab="' + tab + '"]').addClass('ax-tab-active');
@@ -641,11 +867,11 @@ $(function () {
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
-    // "+ channel" → prompt for a name, create EMPTY (just us), open it and
+    // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
-    if (h === 'chat:new') {
-      const name = (prompt('channel name') || '').trim();
+    if (h === 'channel:new') {
+      const name = (prompt('channel name (use / for hierarchy, e.g. dev/backend)') || '').trim();
       if (name) {
         $.ajax({
           url: '/api/chat/channels', method: 'POST', contentType: 'application/json',
@@ -653,7 +879,7 @@ $(function () {
         }).done((ch) => {
           fetchChannels();
           if (ch && ch.id) {
-            location.hash = 'chat:channel:' + ch.id;
+            location.hash = convRoute(ch.id);
             setTimeout(renderMembersPanel, 0); // open the panel to add members
           }
         }).fail((xhr) => alert('create channel: ' + errorOf(xhr)));
@@ -661,26 +887,59 @@ $(function () {
       location.hash = '';
       return;
     }
-    const m = h.match(/^chat:(channel|dm):(.+)$/);
+    // note:<id> → open the channel's shared notes in the main pane.
+    const nm = h.match(/^note:(.+)$/);
+    if (nm) {
+      let key = nm[1];
+      if (key === GENERAL_ID) { location.hash = noteRoute(GENERAL_ID); return; }
+      if (key === 'general') key = GENERAL_ID;
+      openNote(key);
+      return;
+    }
+    // A conversation: channel:<key>, optionally with a thread suffix
+    // ":thread:<rootId>" (deep-linkable). Everything is a channel — a DM is the
+    // degenerate one, keyed by the peer's pub; convKind() tells them apart by
+    // the key's shape. general's clean "general" alias ↔ its internal
+    // "*/general" id; a raw "*/general" in the hash (e.g. a notification deep-
+    // link) is rewritten to the alias so URL + sidebar highlight stay in sync.
+    const m = h.match(/^channel:(.+)$/);
     if (!m) return;
-    const [, kind, key] = m;
-    chatConv = { kind, key };
-    chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
-    $('.ax-tab').removeClass('ax-tab-active');
-    $('.tab-panel').addClass('hidden');
-    $('#tab-chat').removeClass('hidden');
-    setChatTitle();
-    $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
-    // Members button only for channels; collapse the panel on switch.
-    $('#chat-members').toggle(kind === 'channel');
-    $('#chat-members-panel').addClass('hidden').empty();
-    loadConversation();
+    let key = m[1], thread = '';
+    const tt = key.match(/^(.+):thread:([0-9a-zA-Z]+)$/);
+    if (tt) { key = tt[1]; thread = tt[2]; }
+    if (key === GENERAL_ID) { location.hash = convRoute(GENERAL_ID) + (thread ? ':thread:' + thread : ''); return; }
+    if (key === 'general') key = GENERAL_ID;
+    const kind = convKind(key);
+    // Only reload the conversation when it actually changed — toggling the
+    // thread panel (same key) must not re-fetch/flicker the timeline.
+    const sameConv = chatConv && chatConv.kind === kind && chatConv.key === key;
+    if (!sameConv) {
+      chatConv = { kind, key };
+      chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
+      $('.ax-tab').removeClass('ax-tab-active');
+      $('.tab-panel').addClass('hidden');
+      $('#tab-chat').removeClass('hidden');
+      setChatTitle();
+      $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
+      $('#chat-members').toggle(kind === 'channel'); // members button: channels only
+      $('#chat-members-panel').addClass('hidden').empty();
+      clearReplyTarget(); // a pending reply doesn't carry across conversations
+      loadConversation();
+    }
+    // Reconcile the thread panel with the URL.
+    if (thread) showThread(thread); else closeThreadPanel();
   }
   // highlightActiveRoute marks the sidebar row matching the current hash
   // so the user can see where they are. Re-run after every tree rebuild
   // (the sidebar is regenerated from status each tick).
   function highlightActiveRoute() {
-    const route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    let route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // An open thread keeps its conversation row highlighted — drop the suffix.
+    route = route.replace(/:thread:[0-9a-zA-Z]+$/, '');
+    // A note view keeps its channel's row highlighted — map note:<id> to the
+    // channel's own route so the row matches.
+    const noteM = route.match(/^note:(.+)$/);
+    if (noteM) route = 'channel:' + noteM[1];
     // An ongoing call stays flagged in the sidebar even when we navigate
     // away to a chat. Mark both its meet row and the peer's DM row.
     const a = window.f2fCall && window.f2fCall.active;
@@ -689,7 +948,7 @@ $(function () {
       // dm routes are keyed by pub (display name lives in a.id/a.title).
       const key = a.kind === 'dm' ? (a.pub || a.id) : a.id;
       callRoutes.push('call:' + (a.kind === 'dm' ? 'dm' : a.kind) + ':' + key);
-      callRoutes.push(a.kind === 'dm' ? 'chat:dm:' + key : 'chat:channel:' + a.id);
+      callRoutes.push(convRoute(a.kind === 'dm' ? key : a.id));
     }
     $('#ax-tree .ax-tree-row').each(function () {
       const r = $(this).attr('data-route');
@@ -704,6 +963,204 @@ $(function () {
   applyRoute();
   highlightActiveRoute();
 
+  // --- replies ---
+  // replyTarget (declared up top) is what the next send will reference, or
+  // null: { id, author, snippet, thread }. thread is "" for a plain quoted
+  // reply, or the root message id for a threaded reply. Set from a message's
+  // action buttons, shown in the compose bar, cleared on send or cancel.
+  function replyId() { return replyTarget ? replyTarget.id : ''; }
+  function threadId() { return (replyTarget && replyTarget.thread) || ''; }
+  function editId() { return editTarget ? editTarget.id : ''; }
+  function setReplyTarget(t) {
+    editTarget = null; // reply and edit are mutually exclusive
+    replyTarget = t;
+    const inThread = !!t.thread;
+    $('#chat-reply-bar').html(
+      `<div class="ax-replybar-in">`
+        + `<i class="bi ${inThread ? 'bi-chat-square-text-fill' : 'bi-reply-fill'}"></i>`
+        + `<span class="ax-replybar-author">${esc(inThread ? 'in thread · ' : '')}${esc(t.author)}</span>`
+        + `<span class="ax-replybar-snip">${esc(t.snippet)}</span>`
+        + `<button type="button" class="ax-replybar-x" title="cancel" aria-label="cancel">×</button>`
+      + `</div>`
+    ).removeClass('hidden');
+    $('#chat-input').focus();
+  }
+  // startEdit recalls a message into the composer to edit it: the next send
+  // becomes an edit (edit_id) that supersedes it. text is the current content.
+  function startEdit(t) {
+    replyTarget = null;
+    editTarget = { id: t.id };
+    $('#chat-reply-bar').html(
+      `<div class="ax-replybar-in ax-replybar-edit">`
+        + `<i class="bi bi-pencil-fill"></i>`
+        + `<span class="ax-replybar-author">editing</span>`
+        + `<span class="ax-replybar-snip">your message · Esc to cancel</span>`
+        + `<button type="button" class="ax-replybar-x" title="cancel edit" aria-label="cancel">×</button>`
+      + `</div>`
+    ).removeClass('hidden');
+    const $in = $('#chat-input');
+    $in.val(t.text);
+    autoGrowInput();
+    $in.focus();
+    const el = $in[0]; if (el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length);
+  }
+  // clearCompose drops any reply/thread/edit context and the composer text if
+  // we were editing (so Esc fully backs out of an edit).
+  function clearReplyTarget() {
+    const wasEditing = !!editTarget;
+    replyTarget = null;
+    editTarget = null;
+    $('#chat-reply-bar').addClass('hidden').empty();
+    if (wasEditing) { $('#chat-input').val(''); autoGrowInput(); }
+  }
+  $('#chat-reply-bar').on('click', '.ax-replybar-x', clearReplyTarget);
+  // lastMineText finds my most recent text message in the open conversation and
+  // its CURRENT content (after edits) — the up-arrow recalls it for editing.
+  function lastMineText() {
+    const me = lastStatus && lastStatus.identity_pub;
+    const edits = editsByRoot(chatMsgs);
+    for (let i = chatMsgs.length - 1; i >= 0; i--) {
+      const m = chatMsgs[i];
+      if (m.edit_id) continue;
+      if (m.type && m.type !== 'text') continue;
+      if (!(m.mine || (me && m.from === me))) continue;
+      const cur = edits[m.id] || m;
+      if (!cur.body) continue; // nothing editable (attachment-only)
+      return { id: m.id, text: cur.body };
+    }
+    return null;
+  }
+  // currentText resolves a message id to its latest content (original patched
+  // with the newest edit) — what the edit button recalls into the composer.
+  function currentText(id) {
+    const orig = chatMsgs.find((x) => x.id === id && !x.edit_id);
+    if (!orig) return '';
+    return (editsByRoot(chatMsgs)[id] || orig).body || '';
+  }
+  // Message actions: edit (recall to composer), thread (open the thread panel),
+  // reply (inline quote in the main composer).
+  $('#chat-messages').on('click', '.ax-msg-act', function (e) {
+    e.stopPropagation();
+    const $msg = $(this).closest('.ax-msg');
+    const id = $msg.attr('data-id');
+    if (!id) return;
+    const act = $(this).attr('data-act');
+    if (act === 'edit') { startEdit({ id, text: currentText(id) }); return; }
+    if (act === 'thread') { openThread(id); return; }
+    const ref = chatMsgs.find((x) => x.id === id);
+    const author = ref ? authorOf(ref) : nameForPub($msg.attr('data-author'));
+    setReplyTarget({ id, author, snippet: msgSnippet(ref) });
+  });
+  // "N replies" footer opens the thread too.
+  $('#chat-messages').on('click', '.ax-msg-thread-open', function (e) {
+    e.stopPropagation();
+    openThread($(this).attr('data-root'));
+  });
+
+  // --- threads (Slack-style side panel) ---
+  // The open thread lives in the URL (channel:<key>:thread:<rootId>) so it's
+  // deep-linkable and survives reload. openThread/closeThread just drive the
+  // hash; applyRoute reacts and calls showThread/closeThreadPanel.
+  function threadHash(rootId) {
+    return chatConv ? convRoute(chatConv.key) + ':thread:' + rootId : '';
+  }
+  function openThread(rootId) {
+    if (rootId && chatConv) location.hash = threadHash(rootId);
+  }
+  function closeThread() {
+    if (chatConv) location.hash = convRoute(chatConv.key); // drop the thread suffix
+    else closeThreadPanel();
+  }
+  $('#thread-close').on('click', closeThread);
+
+  // showThread/closeThreadPanel do the actual panel work (no hash change) —
+  // called by the router so open state always matches the URL.
+  function showThread(rootId) {
+    threadRoot = rootId;
+    $('#chat-thread, #thread-resize').removeClass('hidden');
+    renderThread();
+    setTimeout(() => $('#thread-input').focus(), 0);
+  }
+  function closeThreadPanel() {
+    threadRoot = null;
+    $('#chat-thread, #thread-resize').addClass('hidden');
+    $('#thread-messages').empty();
+  }
+
+  // The thread panel's width is drag-resizable (handle on its left edge) and
+  // persisted, mirroring the sidebar. Dragging left widens it.
+  const THREAD_W_KEY = 'f2f:thread-width';
+  const THREAD_MIN = 280, THREAD_MAX = 900;
+  function applyThreadWidth(px) {
+    $('#chat-thread').css('width', Math.max(THREAD_MIN, Math.min(THREAD_MAX, px)) + 'px');
+  }
+  try { const s = parseInt(localStorage.getItem(THREAD_W_KEY) || '', 10); if (Number.isFinite(s)) applyThreadWidth(s); } catch (_) {}
+  $('#thread-resize').on('mousedown', function (e) {
+    e.preventDefault();
+    $(this).addClass('dragging');
+    const startX = e.clientX, startW = $('#chat-thread').outerWidth();
+    function onMove(ev) { applyThreadWidth(startW - (ev.clientX - startX)); }
+    function onUp() {
+      $('#thread-resize').removeClass('dragging');
+      $(document).off('mousemove.thres mouseup.thres');
+      try { localStorage.setItem(THREAD_W_KEY, String($('#chat-thread').outerWidth())); } catch (_) {}
+    }
+    $(document).on('mousemove.thres', onMove).on('mouseup.thres', onUp);
+  });
+
+  // renderThread paints the open thread: the root message, an "N replies"
+  // divider, then the replies (oldest-first), all with edits applied. If the
+  // root isn't loaded yet (deep-link before history lands) it shows a stub and
+  // is re-rendered once loadConversation completes.
+  function renderThread() {
+    if (!threadRoot) return;
+    const $tm = $('#thread-messages');
+    const edits = editsByRoot(chatMsgs);
+    const rootRaw = chatMsgs.find((x) => x.id === threadRoot && !x.edit_id);
+    if (!rootRaw) { $tm.html('<div class="ax-msg-system">loading thread…</div>'); $('#thread-title').text('Thread'); return; }
+    const replies = chatMsgs
+      .filter((x) => !x.edit_id && x.thread === threadRoot)
+      .sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+    let html = msgRow(applyEdit(rootRaw, edits), false, 0, true);
+    html += `<div class="ax-thread-divider">${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}</div>`;
+    for (const r of replies) html += msgRow(applyEdit(r, edits), false, 0, true);
+    $tm.html(html);
+    if (window.f2fRich) f2fRich.renderDiagrams($tm[0]);
+    // Scroll to the latest reply. Deferred to the next frame: the panel may
+    // have just been shown (display flipped), so its flex layout — and thus
+    // scrollHeight — isn't final until layout settles.
+    requestAnimationFrame(() => { const el = $tm[0]; if (el) el.scrollTop = el.scrollHeight; });
+    $('#thread-title').text('Thread · ' + replies.length);
+  }
+  // Thread composer: posts into the open thread (thread=<rootId>).
+  $('#thread-form').on('submit', function (e) {
+    e.preventDefault();
+    if (!chatConv || !threadRoot) return;
+    const $in = $('#thread-input');
+    const text = $in.val().trim();
+    if (!text) return;
+    $in.val(''); $in.css('height', 'auto');
+    $.ajax({
+      url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, thread: threadRoot }),
+    }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+  });
+  $('#thread-input').on('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#thread-form').trigger('submit'); }
+  });
+  $('#thread-input').on('input', function () {
+    this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 160) + 'px';
+  });
+  // Click a quote to jump to (and briefly flash) the message it answers.
+  $('#chat-messages').on('click', '.ax-msg-quote', function () {
+    const id = $(this).attr('data-target') || '';
+    const $t = $('#chat-messages .ax-msg').filter(function () { return $(this).attr('data-id') === id; });
+    if (!$t.length) return;
+    $t[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $t.addClass('ax-msg-flash');
+    setTimeout(() => $t.removeClass('ax-msg-flash'), 1200);
+  });
+
   // Send: POST to the messenger service; the message comes back on the SSE
   // stream (the backend echoes our own copy), which appends it — so we don't
   // append here, avoiding a duplicate.
@@ -714,60 +1171,108 @@ $(function () {
     const text = $in.val().trim();
     if (!text) return;
     $in.val('');
+    autoGrowInput();
+    const reply_to = replyId(), thread = threadId(), edit_id = editId();
+    clearReplyTarget();
     $.ajax({
       url: '/api/chat/send', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text }),
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread, edit_id }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
 
-  // Attachments: the + button opens a file picker. Small files ride inline
-  // (base64) on the message; larger ones are seeded and shared over torrent
-  // (the message carries the magnet, the recipient downloads from the chat).
-  const MAX_ATTACH = 8 * 1024 * 1024; // matches the backend's inline cap
-  $('#chat-attach').on('click', function () {
-    if (chatConv) $('#chat-file').trigger('click');
+  // Composer is a textarea: Enter sends, Shift+Enter inserts a newline (so a
+  // multi-line message — e.g. a whole ```js fenced block — fits in ONE send).
+  // isComposing guards IME input (Russian/CJK) mid-composition. Up-arrow on an
+  // empty composer recalls my last message to edit it; Esc cancels.
+  $('#chat-input').on('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $('#chat-form').trigger('submit');
+      return;
+    }
+    if (e.key === 'ArrowUp' && !e.shiftKey && !editTarget && !replyTarget && $(this).val() === '') {
+      const last = lastMineText();
+      if (last) { e.preventDefault(); startEdit(last); }
+      return;
+    }
+    if (e.key === 'Escape' && (editTarget || replyTarget)) {
+      e.preventDefault();
+      clearReplyTarget();
+    }
   });
-  $('#chat-file').on('change', function () {
-    const file = this.files && this.files[0];
-    this.value = ''; // allow re-picking the same file later
-    if (!file || !chatConv) return;
-    if (file.size > MAX_ATTACH) { shareViaTorrent(file); return; } // large → torrent
+  // Auto-grow the composer with its content, up to the CSS max-height (then it
+  // scrolls). Reset after a send.
+  function autoGrowInput() {
+    const el = $('#chat-input')[0];
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  }
+  $('#chat-input').on('input', autoGrowInput);
+
+  // Attachments: the + button opens a file picker. Small files ride inline
+  // (base64) on the message; larger ones are seeded and shared over torrent.
+  // sendInline/sendShare/attachFrom take a context {reply_to,thread,edit_id} so
+  // the main composer and the thread composer share ONE code path.
+  const MAX_ATTACH = 8 * 1024 * 1024; // matches the backend's inline cap
+  function sendInline(file, caption, ctx) {
     const reader = new FileReader();
     reader.onload = function () {
       // readAsDataURL gives "data:<mime>;base64,<payload>" — keep the payload;
       // Go decodes the []byte field straight from that base64 string.
       const b64 = String(reader.result).split(',', 2)[1] || '';
-      const $in = $('#chat-input');
-      const caption = $in.val().trim();
-      $in.val('');
       $.ajax({
         url: '/api/chat/send', method: 'POST', contentType: 'application/json',
-        data: JSON.stringify({
+        data: JSON.stringify(Object.assign({
           kind: chatConv.kind, key: chatConv.key, body: caption,
           file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
-        }),
+        }, ctx)),
       }).fail((xhr) => alert('send: ' + errorOf(xhr)));
     };
     reader.onerror = function () { alert('could not read file'); };
     reader.readAsDataURL(file);
-  });
-
-  // Seed a large file and post it as a torrent message (multipart upload).
-  // The backend pins the seed to this conversation (private to it) and echoes
-  // the message back over the chat stream, where it renders with a download
-  // affordance + live transfer status.
-  function shareViaTorrent(file) {
-    const $in = $('#chat-input');
-    const caption = $in.val().trim();
-    $in.val('');
+  }
+  // Seed a large file and post it as a torrent message (multipart upload). The
+  // backend pins the seed to this conversation (private to it) and echoes the
+  // message back, where it renders with a download affordance + live status.
+  function sendShare(file, caption, ctx) {
     const fd = new FormData();
     fd.append('kind', chatConv.kind);
     fd.append('key', chatConv.key);
     fd.append('body', caption);
     fd.append('file', file);
+    if (ctx.reply_to) fd.append('reply_to', ctx.reply_to);
+    if (ctx.thread) fd.append('thread', ctx.thread);
+    if (ctx.edit_id) fd.append('edit_id', ctx.edit_id);
     $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })
       .fail((xhr) => alert('share: ' + errorOf(xhr)));
   }
+  function attachFrom(file, caption, ctx) {
+    if (file.size > MAX_ATTACH) sendShare(file, caption, ctx);
+    else sendInline(file, caption, ctx);
+  }
+  // Main composer attach.
+  $('#chat-attach').on('click', function () { if (chatConv) $('#chat-file').trigger('click'); });
+  $('#chat-file').on('change', function () {
+    const file = this.files && this.files[0];
+    this.value = '';
+    if (!file || !chatConv) return;
+    const caption = $('#chat-input').val().trim();
+    $('#chat-input').val(''); autoGrowInput();
+    const ctx = { reply_to: replyId(), thread: threadId(), edit_id: editId() };
+    clearReplyTarget();
+    attachFrom(file, caption, ctx);
+  });
+  // Thread composer attach — same flow, scoped to the open thread.
+  $('#thread-attach').on('click', function () { if (chatConv && threadRoot) $('#thread-file').trigger('click'); });
+  $('#thread-file').on('change', function () {
+    const file = this.files && this.files[0];
+    this.value = '';
+    if (!file || !chatConv || !threadRoot) return;
+    const caption = $('#thread-input').val().trim();
+    $('#thread-input').val('');
+    attachFrom(file, caption, { thread: threadRoot });
+  });
 
   // --- torrent transfers surfaced in chat ---
   let torrentStatus = {}; // info_hash → /api/files/downloads row
@@ -1097,6 +1602,22 @@ $(function () {
   }
   let collapsedCats = loadCollapsed();
 
+  // Channel sub-tree collapse — independent of category collapse, keyed by the
+  // channel's name path ("dev", "dev/backend") so it survives re-renders.
+  const CHAN_COLLAPSED_KEY = 'f2f:channels-collapsed';
+  function loadCollapsedChans() {
+    try { return new Set(JSON.parse(localStorage.getItem(CHAN_COLLAPSED_KEY) || '[]')); }
+    catch (_) { return new Set(); }
+  }
+  let collapsedChans = loadCollapsedChans();
+  function toggleChanPath(path) {
+    if (!path) return;
+    if (collapsedChans.has(path)) collapsedChans.delete(path);
+    else collapsedChans.add(path);
+    try { localStorage.setItem(CHAN_COLLAPSED_KEY, JSON.stringify([...collapsedChans])); } catch (_) {}
+    if (lastStatus) renderSidebarTree(lastStatus);
+  }
+
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1115,6 +1636,8 @@ $(function () {
     drop:     'bi-folder-fill',
     domains:  'bi-globe2',
     tunnel:   'bi-hdd-network-fill',
+    oidc:     'bi-person-badge-fill',
+    secrets:  'bi-key-fill',
     policies: 'bi-shield-lock-fill',
     apps:     'bi-grid-3x3-gap-fill',
   };
@@ -1320,27 +1843,102 @@ $(function () {
           const tags = [];
           if (inCall) tags.push('● in call');
           if (chatUnread[p.pub]) tags.push(`${chatUnread[p.pub]} new`);
-          return row(null, name, tags.join(' · '), null, 'chat:dm:' + p.pub);
+          // A DM is a channel too → same hover notes affordance as a channel.
+          const note = `<button class="ax-tree-note" data-note="${esc(p.pub)}" title="open notes" aria-label="notes"><i class="bi bi-journal-text"></i></button>`;
+          const meta = tags.join(' · ');
+          return `<div class="ax-tree-row" data-route="${esc(convRoute(p.pub))}" title="${esc(name)}">`
+            + `<span class="ax-tree-label">${esc(name)}</span>`
+            + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
+            + note
+            + `</div>`;
         }).join('')
       : empty('no peers');
 
-    // CHANNELS = the rooms we belong to (from /api/chat/channels). Member
-    // count and unread ride in the meta column.
-    const groupsBody = (chatChannels.length
-      ? chatChannels.slice().sort((a, b) => {
-          // general is the camp-wide channel — pin it to the top.
-          if (a.id === GENERAL_ID) return -1;
-          if (b.id === GENERAL_ID) return 1;
-          return a.name.localeCompare(b.name);
-        }).map(ch => {
-          const tags = [`${(ch.members || []).length} members`];
-          if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
-          // Our group call is bound to a channel id — surface it on the row.
-          if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
-          return row(null, '# ' + ch.name, tags.join(' · '), null, 'chat:channel:' + ch.id);
-        }).join('')
-      : empty('no groups'))
-      + addRow('+ channel', 'chat:new');
+    // CHANNELS = the rooms we belong to (from /api/chat/channels). A name may
+    // carry a "/" path ("dev/backend") which folds into a tree: each segment
+    // nests under the channel — or a virtual folder — named by the prefix
+    // above it. general (the camp-wide room) is pinned to the top, outside
+    // the tree. Only unread / live-call markers ride in the meta column —
+    // the member count was noise.
+    function channelMeta(ch) {
+      const tags = [];
+      if (chatUnread[ch.id]) tags.push(`${chatUnread[ch.id]} new`);
+      // Our group call is bound to a channel id — surface it on the row.
+      if (activeCall && activeCall.kind === 'group' && activeCall.id === ch.id) tags.push('● live');
+      return tags.join(' · ');
+    }
+    function treeIndent(depth) {
+      return depth > 0 ? ` style="padding-left:${5 + depth * 13}px"` : '';
+    }
+    // A node with children opens with a caret that toggles its sub-tree; a
+    // leaf gets a same-width spacer so labels line up. The caret is a SEPARATE
+    // control from the row body — clicking the channel name still opens it,
+    // only the caret collapses. path identifies the node for persisted state.
+    function nodeCaret(path, hasKids) {
+      if (!hasKids) return `<span class="ax-chan-spacer"></span>`;
+      return `<span class="ax-tree-caret ax-chan-caret" data-chan-path="${esc(path)}">▾</span>`;
+    }
+    function channelRow(ch, depth, path, hasKids, collapsed) {
+      const leaf = ((ch.name || ch.id).split('/').pop()) || ch.id;
+      const meta = channelMeta(ch);
+      // A notes affordance revealed on row hover (Zed-style) — opens the
+      // channel's shared doc in the main pane without opening the chat.
+      const note = `<button class="ax-tree-note" data-note="${esc(ch.id)}" title="open notes" aria-label="notes"><i class="bi bi-journal-text"></i></button>`;
+      return `<div class="ax-tree-row${collapsed ? ' collapsed' : ''}" data-route="${esc(convRoute(ch.id))}"${treeIndent(depth)} title="${esc(ch.name || ch.id)}">`
+        + nodeCaret(path, hasKids)
+        + `<span class="ax-tree-label"># ${esc(leaf)}</span>`
+        + (meta ? `<span class="ax-tree-badge">${esc(meta)}</span>` : '')
+        + note
+        + `</div>`;
+    }
+    function folderRow(seg, depth, path, collapsed) {
+      // A path prefix with no channel of its own — clicking it (or its caret)
+      // just toggles the sub-tree; it routes nowhere.
+      return `<div class="ax-tree-row ax-tree-folder${collapsed ? ' collapsed' : ''}" data-chan-path="${esc(path)}"${treeIndent(depth)} title="${esc(seg)}">`
+        + nodeCaret(path, true)
+        + `<span class="ax-tree-label">${esc(seg)}/</span></div>`;
+    }
+    function buildChannelTree(chans) {
+      const root = { kids: {}, order: [] };
+      for (const ch of chans) {
+        const parts = ((ch.name || ch.id.split('/').pop()) || '').split('/').filter(Boolean);
+        let node = root;
+        parts.forEach((seg, i) => {
+          if (!node.kids[seg]) { node.kids[seg] = { kids: {}, order: [], ch: null }; node.order.push(seg); }
+          node = node.kids[seg];
+          if (i === parts.length - 1) node.ch = ch;
+        });
+      }
+      return root;
+    }
+    function renderChannelTree() {
+      const tree = buildChannelTree(chatChannels.filter(c => c.id !== GENERAL_ID));
+      let html = '';
+      const gen = chatChannels.find(c => c.id === GENERAL_ID);
+      if (gen) html += channelRow(gen, 0, '', false, false); // general pinned to the top
+      // Each node renders its row, then its children wrapped in a collapsible
+      // block (.ax-chan-children, hidden when the row carries .collapsed).
+      (function walk(node, depth, prefix) {
+        node.order.sort((a, b) => a.localeCompare(b));
+        for (const seg of node.order) {
+          const kid = node.kids[seg];
+          const path = prefix ? prefix + '/' + seg : seg;
+          const hasKids = kid.order.length > 0;
+          const collapsed = hasKids && collapsedChans.has(path);
+          html += kid.ch
+            ? channelRow(kid.ch, depth, path, hasKids, collapsed)
+            : folderRow(seg, depth, path, collapsed);
+          if (hasKids) {
+            html += `<div class="ax-chan-children">`;
+            walk(kid, depth + 1, path);
+            html += `</div>`;
+          }
+        }
+      })(tree, 0, '');
+      return html;
+    }
+    const groupsBody = (chatChannels.length ? renderChannelTree() : empty('no groups'))
+      + addRow('+ channel', 'channel:new');
 
     // intercepts — :port -> peer.
     const intercepts = (s && s.intercepts) || [];
@@ -1412,6 +2010,8 @@ $(function () {
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
+      + category('oidc',      'OIDC',      null, empty('coming soon'))
+      + category('secrets',   'secrets',   null, empty('coming soon'))
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
@@ -1438,12 +2038,12 @@ $(function () {
     const q = sidebarQuery.trim().toLowerCase();
     const $tree = $('#ax-tree');
     if (!q) {
-      $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+      $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-chan-children, .ax-tree-section, .ax-tree-empty')
         .css('display', '');
       return;
     }
     // Hide everything first.
-    $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-tree-section, .ax-tree-empty')
+    $tree.find('.ax-tree-row, .ax-tree-category, .ax-tree-children, .ax-chan-children, .ax-tree-section, .ax-tree-empty')
       .css('display', 'none');
     // Leaf rows that match show themselves.
     $tree.find('.ax-tree-row').each(function () {
@@ -1451,6 +2051,21 @@ $(function () {
         $(this).css('display', '');
       }
     });
+    // Reveal channel sub-trees that contain a match: deepest-first so the
+    // chain of parents up to the top cascades visible. Expand any collapsed
+    // node for the search duration (not persisted — the next render restores
+    // it from collapsedChans).
+    const allChanChildren = $tree.find('.ax-chan-children').toArray().reverse();
+    for (const cc of allChanChildren) {
+      const $cc = $(cc);
+      const hasVisible = $cc.children().filter(function () {
+        return $(this).css('display') !== 'none';
+      }).length > 0;
+      if (hasVisible) {
+        $cc.css('display', '');
+        $cc.prev('.ax-tree-row').css('display', '').removeClass('collapsed');
+      }
+    }
     // Walk each .ax-tree-children: if any descendant is visible OR the
     // owning category's label matches, the children block + its
     // category header become visible. Iterate deepest-first so parent

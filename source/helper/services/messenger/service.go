@@ -42,6 +42,7 @@ const (
 	TypeLeave     = "leave"  // a member left — the owner ratifies with a remove
 	TypeCallStart = "call_start"
 	TypeCallEnd   = "call_end"
+	TypeNotes     = "notes" // shared-doc edit — mutates channel state, not feed
 )
 
 // busAPI is the slice of bus.Service the messenger uses — an interface so
@@ -64,6 +65,7 @@ type Service struct {
 	mu       sync.Mutex
 	channels map[string]*Channel  // id → materialised channel (fold of its messages)
 	convs    map[string][]Message // conversation key → ring buffer
+	notes    map[string]NoteDoc   // conversation scope → shared notes doc
 	seen     map[string]struct{}  // message IDs already accepted, for dedup
 
 	subMu sync.Mutex
@@ -83,6 +85,7 @@ func NewService(b *bus.Service, selfFn func() string, store *Store, campFn func(
 		peers:    peersFn,
 		channels: map[string]*Channel{},
 		convs:    map[string][]Message{},
+		notes:    map[string]NoteDoc{},
 		seen:     map[string]struct{}{},
 		subs:     map[chan Message]struct{}{},
 	}
@@ -112,10 +115,15 @@ func (s *Service) LoadCamp() {
 	camp := s.camp()
 	chans, _ := s.store.Channels(camp)
 	msgs, _ := s.store.AllMessages(camp)
+	docs, _ := s.store.Notes(camp)
 	selfPub := s.self()
 	s.mu.Lock()
 	s.channels = map[string]*Channel{}
 	s.convs = map[string][]Message{}
+	s.notes = map[string]NoteDoc{}
+	for _, d := range docs {
+		s.notes[d.Scope] = d
+	}
 	s.seen = map[string]struct{}{}
 	for i := range chans {
 		c := chans[i]
@@ -161,12 +169,28 @@ func (s *Service) IsMember(scope, pub string) bool {
 }
 
 // SplitChannelID splits a channel ID ("<owner_pub>/<name>") into its owner
-// pub and name. Returns ("","") if it isn't a channel ID.
+// pub and name. The owner pub never contains "/", so the split is on the
+// FIRST slash — anything after it is the name, slashes included (hierarchy).
 func SplitChannelID(id string) (owner, name string) {
 	if i := strings.IndexByte(id, '/'); i > 0 {
 		return id[:i], id[i+1:]
 	}
 	return "", ""
+}
+
+// validChannelName accepts a slash-separated path of non-empty, space-free
+// segments ("dev", "dev/backend") — the "/" is the hierarchy separator. No
+// leading/trailing slash, no empty or whitespace segments.
+func validChannelName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || strings.ContainsAny(seg, " \t") {
+			return false
+		}
+	}
+	return true
 }
 
 // --- inbound ---
@@ -184,6 +208,13 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	go s.flush(fromPub)
 	if m.ID == "" || !s.markSeen(m.ID) {
 		return nil, nil // duplicate (retransmit / future relay) or id-less — drop
+	}
+	// A notes edit (channel OR dm) mutates the conversation's shared doc, not
+	// its feed — fold it in last-writer-wins and let UIs refresh.
+	if m.Type == TypeNotes {
+		s.applyNotes(m, selfPub)
+		s.publish(m)
+		return nil, nil
 	}
 	// Control events aren't conversation content — they mutate channel state
 	// and are not stored as messages.
@@ -295,6 +326,85 @@ func (s *Service) reconcileChannel(m Message, selfPub string) {
 	s.persistChannel(&cp)
 }
 
+// applyNotes folds a notes edit into the conversation's shared doc, keyed by
+// the LOCAL scope (channel id, or the other peer's pub for a DM — exactly how
+// convKey keys messages). Edits converge last-writer-wins, ordered by (TS, By)
+// so every node picks the same winner.
+func (s *Service) applyNotes(m Message, selfPub string) {
+	scope := convKey(m, selfPub)
+	if scope == "" {
+		return
+	}
+	s.mu.Lock()
+	cur := s.notes[scope]
+	if m.TS < cur.TS || (m.TS == cur.TS && m.From <= cur.By) {
+		s.mu.Unlock() // a stale (or already-applied) edit — ignore
+		return
+	}
+	doc := NoteDoc{Scope: scope, Body: m.Body, TS: m.TS, By: m.From}
+	s.notes[scope] = doc
+	s.mu.Unlock()
+	if s.store != nil {
+		if err := s.store.UpsertNote(s.camp(), doc); err != nil {
+			clog.Debug("chat", "persist note: %v", err)
+		}
+	}
+}
+
+// Notes returns the shared doc for a conversation scope (channel id or, for a
+// DM, the peer's pub). Zero value (empty body) if none yet.
+func (s *Service) Notes(scope string) NoteDoc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.notes[scope]
+	d.Scope = scope
+	return d
+}
+
+// SetNotes replaces a conversation's shared doc with body and fans the edit to
+// the other participants: a channel's members, or — for a DM — the peer. Any
+// participant may call it (notes are collaborative); the write converges last-
+// writer-wins (see applyNotes). scope is a channel id or a peer pub.
+func (s *Service) SetNotes(scope, body string) (NoteDoc, error) {
+	selfPub := s.self()
+	if selfPub == "" {
+		return NoteDoc{}, fmt.Errorf("chat: no identity")
+	}
+	var (
+		m      Message
+		roster []string
+	)
+	switch {
+	case isGeneral(scope):
+		roster = s.generalRoster()
+		m = Message{Kind: "channel", Peer: scope, Members: roster}
+	case strings.Contains(scope, "/"): // channel id
+		s.mu.Lock()
+		ch := s.channels[scope]
+		s.mu.Unlock()
+		if ch == nil {
+			return NoteDoc{}, fmt.Errorf("chat: unknown channel %q", scope)
+		}
+		roster = append([]string(nil), ch.Members...)
+		m = Message{Kind: "channel", Peer: scope, Members: roster}
+	default: // a DM — scope is the peer's pub
+		roster = []string{scope}
+		m = Message{Kind: "dm", Peer: scope, To: scope}
+	}
+	m.ID, m.Type, m.From, m.Body, m.TS = newID(), TypeNotes, selfPub, body, nowMs()
+	s.markSeen(m.ID) // our own copy is authoritative; ignore any echo
+	s.applyNotes(m, selfPub)
+	s.publish(m) // refresh our own UI (carries the new notes)
+	wire := mustJSON(m)
+	for _, pub := range roster {
+		if pub == selfPub || pub == "" {
+			continue
+		}
+		go s.deliver(m.ID, pub, wire)
+	}
+	return s.Notes(scope), nil
+}
+
 // --- delivery ---
 //
 // Delivery is at-least-once with sender-side retry: every send is a bus
@@ -376,15 +486,17 @@ func (s *Service) flush(onlyPub string) {
 // --- outbound ---
 
 // SendDM delivers a direct message to peerPub and records our own copy. file
-// may be nil; when set it rides inline as an attachment.
-func (s *Service) SendDM(peerPub, body string, file *Attachment) (Message, error) {
+// may be nil; when set it rides inline as an attachment. replyTo is the id of
+// a message this one quotes ("" for none); thread is the id of the thread root
+// it belongs to ("" for the main timeline).
+func (s *Service) SendDM(peerPub, body string, file *Attachment, replyTo, thread, editID string) (Message, error) {
 	selfPub := s.self()
 	if selfPub == "" {
 		return Message{}, fmt.Errorf("chat: no identity")
 	}
 	m := Message{
 		ID: newID(), Kind: "dm", Peer: peerPub, Type: TypeText,
-		From: selfPub, To: peerPub, Body: body, File: file, TS: nowMs(),
+		From: selfPub, To: peerPub, Body: body, File: file, ReplyTo: replyTo, Thread: thread, EditID: editID, TS: nowMs(),
 	}
 	local := m
 	local.Mine = true
@@ -396,9 +508,11 @@ func (s *Service) SendDM(peerPub, body string, file *Attachment) (Message, error
 
 // Post sends a text message to a channel we belong to: stored locally and
 // fanned out to every member, carrying the current roster snapshot. file may
-// be nil; when set it rides inline as an attachment.
-func (s *Service) Post(chanID, body string, file *Attachment) (Message, error) {
-	return s.emit(chanID, TypeText, body, nil, file)
+// be nil; when set it rides inline as an attachment. replyTo is the id of a
+// message this one quotes ("" for none); thread is the thread root it belongs
+// to ("" for the main timeline).
+func (s *Service) Post(chanID, body string, file *Attachment, replyTo, thread, editID string) (Message, error) {
+	return s.emit(chanID, TypeText, body, nil, file, replyTo, thread, editID)
 }
 
 // SendEvent posts a contentful-less system event (call started/ended, …)
@@ -406,7 +520,7 @@ func (s *Service) Post(chanID, body string, file *Attachment) (Message, error) {
 // message — events ARE messages — and renders as a system line.
 func (s *Service) SendEvent(kind, key, typ string) (Message, error) {
 	if kind == "channel" {
-		return s.emit(key, typ, "", nil, nil)
+		return s.emit(key, typ, "", nil, nil, "", "", "")
 	}
 	selfPub := s.self()
 	if selfPub == "" {
@@ -431,7 +545,7 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 	if selfPub == "" {
 		return Channel{}, fmt.Errorf("chat: no identity")
 	}
-	if name == "" || strings.ContainsAny(name, "/ ") {
+	if !validChannelName(name) {
 		return Channel{}, fmt.Errorf("chat: bad channel name %q", name)
 	}
 	id := selfPub + "/" + name
@@ -441,7 +555,7 @@ func (s *Service) CreateChannel(name string, members []string) (Channel, error) 
 	s.channels[id] = ch
 	s.mu.Unlock()
 	s.persistChannel(ch)
-	if _, err := s.emit(id, TypeCreate, "", roster, nil); err != nil {
+	if _, err := s.emit(id, TypeCreate, "", roster, nil, "", "", ""); err != nil {
 		return Channel{}, err
 	}
 	return *s.channelCopy(id), nil
@@ -562,7 +676,7 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 	// Fan the event to the union of old and new members so removed peers
 	// hear it too (they're no longer in the post-change roster). affected
 	// names who was added/removed, for the human-readable system line.
-	if _, err := s.emitTo(chanID, typ, "", roster, affected, union(old, roster), nil); err != nil {
+	if _, err := s.emitTo(chanID, typ, "", roster, affected, union(old, roster), nil, "", "", ""); err != nil {
 		return Channel{}, err
 	}
 	return *s.channelCopy(chanID), nil
@@ -572,11 +686,11 @@ func (s *Service) changeMembers(chanID string, add, remove []string) (Channel, e
 // current members. roster overrides the carried snapshot when non-nil
 // (used by create/add/remove); otherwise the channel's current roster is
 // used.
-func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachment) (Message, error) {
+func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachment, replyTo, thread, editID string) (Message, error) {
 	// general has no stored channel/roster — fan out to the whole camp.
 	if isGeneral(chanID) {
 		peers := s.generalRoster()
-		return s.emitTo(chanID, typ, body, peers, nil, peers, file)
+		return s.emitTo(chanID, typ, body, peers, nil, peers, file, replyTo, thread, editID)
 	}
 	s.mu.Lock()
 	ch := s.channels[chanID]
@@ -587,7 +701,7 @@ func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachme
 	if roster == nil {
 		roster = ch.Members
 	}
-	return s.emitTo(chanID, typ, body, roster, nil, roster, file)
+	return s.emitTo(chanID, typ, body, roster, nil, roster, file, replyTo, thread, editID)
 }
 
 // emitTo stores a channel message and fans it out. roster is the carried
@@ -595,11 +709,11 @@ func (s *Service) emit(chanID, typ, body string, roster []string, file *Attachme
 // a text post); fanout is the explicit recipient set (may differ from the
 // roster, e.g. a removal that must also reach removed peers); file is an
 // optional inline attachment (nil for control events).
-func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []string, file *Attachment) (Message, error) {
+func (s *Service) emitTo(chanID, typ, body string, roster, affected, fanout []string, file *Attachment, replyTo, thread, editID string) (Message, error) {
 	selfPub := s.self()
 	m := Message{
 		ID: newID(), Kind: "channel", Peer: chanID, Type: typ,
-		From: selfPub, Body: body, File: file,
+		From: selfPub, Body: body, File: file, ReplyTo: replyTo, Thread: thread, EditID: editID,
 		Members: append([]string(nil), roster...),
 		Targets: append([]string(nil), affected...),
 		TS:      nowMs(),
