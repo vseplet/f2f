@@ -153,5 +153,16 @@
     });
   }
 
-  window.f2fRich = { render: render, renderDiagrams: renderDiagrams };
+  // markdown renders text as FULL markdown (headings, lists, tables, …), not
+  // the inline+fenced subset render() uses. Code/mermaid fences still route
+  // through our highlighter/diagram dispatch (via marked's code renderer), so
+  // call renderDiagrams on the container afterwards. Used for the notes preview.
+  function markdown(text) {
+    if (!window.marked) return inline(text);
+    var html;
+    try { html = marked.parse(String(text || '')); } catch (_) { return inline(text); }
+    return window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-src', 'target'] }) : html;
+  }
+
+  window.f2fRich = { render: render, renderDiagrams: renderDiagrams, markdown: markdown };
 })();

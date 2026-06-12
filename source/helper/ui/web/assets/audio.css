@@ -2859,6 +2859,13 @@ a.ax-domain-link:hover {
     display: flex;
     flex-direction: column;
 }
+/* Same header layout as the chat frame — flex row with a gap so the action
+   buttons don't touch. */
+.ax-note-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 .ax-note-header #note-title {
     flex: 1;
 }
@@ -2885,6 +2892,47 @@ a.ax-domain-link:hover {
     overflow: hidden auto;
     -webkit-font-smoothing: antialiased;
 }
+/* Rendered-markdown preview of a note (full markdown, not the chat subset).
+   Code blocks (.ax-code) and diagrams (.ax-mermaid) are styled globally. */
+.ax-note-preview {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 22px;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.7;
+    word-break: break-word;
+}
+.ax-note-preview > :first-child { margin-top: 0; }
+.ax-note-preview a { color: var(--accent); text-decoration: underline; }
+.ax-note-preview strong { font-weight: 700; }
+.ax-note-preview em { font-style: italic; }
+.ax-note-preview code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--mono, ui-monospace, monospace);
+    font-size: 0.9em;
+}
+.ax-note-preview p { margin: 0.5em 0; }
+.ax-note-preview ul, .ax-note-preview ol { margin: 0.5em 0; padding-left: 1.6em; }
+.ax-note-preview li { margin: 0.2em 0; }
+.ax-note-preview h1, .ax-note-preview h2, .ax-note-preview h3,
+.ax-note-preview h4, .ax-note-preview h5, .ax-note-preview h6 {
+    margin: 0.8em 0 0.35em;
+    font-weight: 700;
+    line-height: 1.25;
+}
+.ax-note-preview h1 { font-size: 1.7em; }
+.ax-note-preview h2 { font-size: 1.4em; }
+.ax-note-preview h3 { font-size: 1.2em; }
+.ax-note-preview h1, .ax-note-preview h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+.ax-note-preview blockquote { margin: 0.5em 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
+.ax-note-preview hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.ax-note-preview table { border-collapse: collapse; margin: 0.5em 0; }
+.ax-note-preview th, .ax-note-preview td { border: 1px solid var(--border); padding: 4px 8px; }
+.ax-note-preview img { max-width: 100%; border-radius: 6px; }
+.ax-note-preview .ax-code { margin: 0.6em 0; }
 .ax-note-text::placeholder {
     color: var(--muted);
 }
