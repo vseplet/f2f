@@ -44,8 +44,12 @@ type Message struct {
 	// the wire and persisted; older peers ignore the unknown fields.
 	ReplyTo string `json:"reply_to,omitempty"`
 	Thread  string `json:"thread,omitempty"`
-	TS      int64  `json:"ts"` // unix ms
-	Mine    bool   `json:"mine"`
+	// EditID is the id of the message this one replaces (an edit). The log is
+	// append-only, so an edit is just a new message superseding the original by
+	// id — applied only when its author matches the original's (display side).
+	EditID string `json:"edit_id,omitempty"`
+	TS     int64  `json:"ts"` // unix ms
+	Mine   bool   `json:"mine"`
 }
 
 // MaxAttachment caps an inline attachment's raw size. The bus frame limit is

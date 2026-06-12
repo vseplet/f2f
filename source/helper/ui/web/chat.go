@@ -162,6 +162,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		Type    string                `json:"type"`
 		ReplyTo string                `json:"reply_to"`
 		Thread  string                `json:"thread"`
+		EditID  string                `json:"edit_id"`
 		File    *messenger.Attachment `json:"file"`
 	}
 	// Cap the body generously above MaxAttachment (base64 + JSON overhead) so
@@ -198,9 +199,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.Kind == "dm" {
-			_, err = s.msg.SendDM(req.Key, req.Body, req.File, req.ReplyTo, req.Thread)
+			_, err = s.msg.SendDM(req.Key, req.Body, req.File, req.ReplyTo, req.Thread, req.EditID)
 		} else {
-			_, err = s.msg.Post(req.Key, req.Body, req.File, req.ReplyTo, req.Thread)
+			_, err = s.msg.Post(req.Key, req.Body, req.File, req.ReplyTo, req.Thread, req.EditID)
 		}
 	case messenger.TypeCallStart, messenger.TypeCallEnd:
 		_, err = s.msg.SendEvent(req.Kind, req.Key, req.Type)
@@ -275,10 +276,11 @@ func (s *Server) handleChatShare(w http.ResponseWriter, r *http.Request) {
 	body := r.FormValue("body")
 	replyTo := r.FormValue("reply_to")
 	thread := r.FormValue("thread")
+	editID := r.FormValue("edit_id")
 	if kind == "dm" {
-		_, err = s.msg.SendDM(key, body, att, replyTo, thread)
+		_, err = s.msg.SendDM(key, body, att, replyTo, thread, editID)
 	} else {
-		_, err = s.msg.Post(key, body, att, replyTo, thread)
+		_, err = s.msg.Post(key, body, att, replyTo, thread, editID)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

@@ -340,6 +340,7 @@ $(function () {
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
   let replyTarget = null;     // message the next send will quote, or null
+  let editTarget = null;      // { id } of the message the next send will edit, or null
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
@@ -417,10 +418,12 @@ $(function () {
     // Own messages bubble on the right, everyone else's on the left.
     const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
     const author = mine ? 'you' : nameForPub(m.from);
-    const head = grouped ? '' :
+    const edited = m.edited ? `<span class="ax-msg-edited">edited</span>` : '';
+    const head = (grouped && !m.edited) ? '' :
       `<div class="ax-msg-head">`
         + `<span class="ax-msg-author">${esc(author)}</span>`
         + `<span class="ax-msg-time">${esc(hhmm(m.ts))}</span>`
+        + edited
       + `</div>`;
     // A previewable attachment (image/video) and its caption share one bubble
     // so they read as a single message. A non-previewable file is its own
@@ -443,6 +446,8 @@ $(function () {
     const acts = `<div class="ax-msg-acts">`
       + `<button class="ax-msg-act" data-act="reply" title="reply"><i class="bi bi-reply-fill"></i> reply</button>`
       + (!m.thread ? `<button class="ax-msg-act" data-act="thread" title="reply in thread"><i class="bi bi-chat-square-text-fill"></i> thread</button>` : '')
+      // Edit only on my own text messages (you can't edit someone else's).
+      + ((mine && m.body) ? `<button class="ax-msg-act" data-act="edit" title="edit"><i class="bi bi-pencil-fill"></i> edit</button>` : '')
       + `</div>`;
     return `<div class="ax-msg${mine ? ' is-mine' : ''}" data-id="${esc(m.id)}" data-author="${esc(m.from)}">`
       + head
@@ -506,20 +511,42 @@ $(function () {
       + `<span class="ax-msg-file-size">${esc(fmtBytes(f.size || 0))}</span></a>`;
   }
 
+  // editsByRoot maps an original message id → its latest edit (newest ts) made
+  // by the SAME author. An edit from anyone else is ignored (you can't edit
+  // someone else's message). Built per render from the conversation history.
+  function editsByRoot(msgs) {
+    const byId = {};
+    for (const m of msgs) if (!m.edit_id) byId[m.id] = m;
+    const edits = {};
+    for (const m of msgs) {
+      if (!m.edit_id) continue;
+      const orig = byId[m.edit_id];
+      if (!orig || orig.from !== m.from) continue; // only the author may edit
+      const cur = edits[m.edit_id];
+      if (!cur || m.ts >= cur.ts) edits[m.edit_id] = m;
+    }
+    return edits;
+  }
+  // applyEdit returns the message to display: the original patched with its
+  // latest edit's body/file (keeping the original's position, author, ts).
+  function applyEdit(m, edits) {
+    const e = edits[m.id];
+    if (!e) return m;
+    return Object.assign({}, m, { body: e.body, file: e.file || m.file, edited: true });
+  }
+
   function renderChat(msgs) {
     // A full redraw replaces the DOM wholesale, orphaning the previous blobs.
     chatBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
     chatBlobUrls = [];
-    let html = '', prevFrom = null, prevTs = 0;
-    const GROUP_MS = 5 * 60 * 1000; // collapse the header only within 5 minutes
-    for (const m of (msgs || [])) {
-      const isText = !m.type || m.type === 'text';
-      // Group consecutive lines from the same author ONLY when close in time,
-      // so messages sent far apart keep their own timestamped header.
-      const grouped = isText && m.from === prevFrom && (m.ts - prevTs) < GROUP_MS;
-      html += msgRow(m, grouped);
-      prevFrom = isText ? m.from : null;
-      prevTs = isText ? m.ts : 0;
+    const edits = editsByRoot(msgs || []);
+    let html = '';
+    for (const raw of (msgs || [])) {
+      if (raw.edit_id) continue; // an edit patches its original; not its own bubble
+      const m = applyEdit(raw, edits);
+      // Header grouping (collapsing consecutive same-author lines) is disabled
+      // for now — every message shows its own author/time header.
+      html += msgRow(m, false);
     }
     const $m = $('#chat-messages');
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
@@ -760,12 +787,18 @@ $(function () {
       // view; render them too, not just text.
       if (chatConv && chatConv.kind === m.kind && chatConv.key === key) {
         chatMsgs.push(m);
-        $('#chat-messages').append(msgRow(m, false));
-        const $m = $('#chat-messages');
-        if (window.f2fRich) f2fRich.renderDiagrams($m[0]);
-        $m.scrollTop($m[0].scrollHeight);
-        if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
-      } else if (!m.mine) {
+        // An edit patches an existing bubble in place → full redraw. A normal
+        // message just appends (cheaper, keeps scroll).
+        if (m.edit_id) {
+          renderChat(chatMsgs);
+        } else {
+          $('#chat-messages').append(msgRow(m, false));
+          const $m = $('#chat-messages');
+          if (window.f2fRich) f2fRich.renderDiagrams($m[0]);
+          $m.scrollTop($m[0].scrollHeight);
+          if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
+        }
+      } else if (!m.mine && !m.edit_id) {
         chatUnread[key] = (chatUnread[key] || 0) + 1;
       }
     };
@@ -900,7 +933,9 @@ $(function () {
   // action buttons, shown in the compose bar, cleared on send or cancel.
   function replyId() { return replyTarget ? replyTarget.id : ''; }
   function threadId() { return (replyTarget && replyTarget.thread) || ''; }
+  function editId() { return editTarget ? editTarget.id : ''; }
   function setReplyTarget(t) {
+    editTarget = null; // reply and edit are mutually exclusive
     replyTarget = t;
     const inThread = !!t.thread;
     $('#chat-reply-bar').html(
@@ -913,19 +948,71 @@ $(function () {
     ).removeClass('hidden');
     $('#chat-input').focus();
   }
-  function clearReplyTarget() { replyTarget = null; $('#chat-reply-bar').addClass('hidden').empty(); }
+  // startEdit recalls a message into the composer to edit it: the next send
+  // becomes an edit (edit_id) that supersedes it. text is the current content.
+  function startEdit(t) {
+    replyTarget = null;
+    editTarget = { id: t.id };
+    $('#chat-reply-bar').html(
+      `<div class="ax-replybar-in ax-replybar-edit">`
+        + `<i class="bi bi-pencil-fill"></i>`
+        + `<span class="ax-replybar-author">editing</span>`
+        + `<span class="ax-replybar-snip">your message · Esc to cancel</span>`
+        + `<button type="button" class="ax-replybar-x" title="cancel edit" aria-label="cancel">×</button>`
+      + `</div>`
+    ).removeClass('hidden');
+    const $in = $('#chat-input');
+    $in.val(t.text);
+    autoGrowInput();
+    $in.focus();
+    const el = $in[0]; if (el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length);
+  }
+  // clearCompose drops any reply/thread/edit context and the composer text if
+  // we were editing (so Esc fully backs out of an edit).
+  function clearReplyTarget() {
+    const wasEditing = !!editTarget;
+    replyTarget = null;
+    editTarget = null;
+    $('#chat-reply-bar').addClass('hidden').empty();
+    if (wasEditing) { $('#chat-input').val(''); autoGrowInput(); }
+  }
   $('#chat-reply-bar').on('click', '.ax-replybar-x', clearReplyTarget);
+  // lastMineText finds my most recent text message in the open conversation and
+  // its CURRENT content (after edits) — the up-arrow recalls it for editing.
+  function lastMineText() {
+    const me = lastStatus && lastStatus.identity_pub;
+    const edits = editsByRoot(chatMsgs);
+    for (let i = chatMsgs.length - 1; i >= 0; i--) {
+      const m = chatMsgs[i];
+      if (m.edit_id) continue;
+      if (m.type && m.type !== 'text') continue;
+      if (!(m.mine || (me && m.from === me))) continue;
+      const cur = edits[m.id] || m;
+      if (!cur.body) continue; // nothing editable (attachment-only)
+      return { id: m.id, text: cur.body };
+    }
+    return null;
+  }
   // Reply / reply-in-thread from a message's action buttons. "thread" carries
   // the root id so the sent message is tagged into that thread (the threaded
   // view is a later pass; the quote still shows it answers the root).
+  // currentText resolves a message id to its latest content (original patched
+  // with the newest edit) — what the edit button recalls into the composer.
+  function currentText(id) {
+    const orig = chatMsgs.find((x) => x.id === id && !x.edit_id);
+    if (!orig) return '';
+    return (editsByRoot(chatMsgs)[id] || orig).body || '';
+  }
   $('#chat-messages').on('click', '.ax-msg-act', function (e) {
     e.stopPropagation();
     const $msg = $(this).closest('.ax-msg');
     const id = $msg.attr('data-id');
     if (!id) return;
+    const act = $(this).attr('data-act');
+    if (act === 'edit') { startEdit({ id, text: currentText(id) }); return; }
     const ref = chatMsgs.find((x) => x.id === id);
     const author = ref ? authorOf(ref) : nameForPub($msg.attr('data-author'));
-    const thread = $(this).attr('data-act') === 'thread' ? id : '';
+    const thread = act === 'thread' ? id : '';
     setReplyTarget({ id, author, snippet: msgSnippet(ref), thread });
   });
   // Click a quote to jump to (and briefly flash) the message it answers.
@@ -949,21 +1036,32 @@ $(function () {
     if (!text) return;
     $in.val('');
     autoGrowInput();
-    const reply_to = replyId(), thread = threadId();
+    const reply_to = replyId(), thread = threadId(), edit_id = editId();
     clearReplyTarget();
     $.ajax({
       url: '/api/chat/send', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread }),
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread, edit_id }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
 
   // Composer is a textarea: Enter sends, Shift+Enter inserts a newline (so a
   // multi-line message — e.g. a whole ```js fenced block — fits in ONE send).
-  // isComposing guards IME input (Russian/CJK) mid-composition.
+  // isComposing guards IME input (Russian/CJK) mid-composition. Up-arrow on an
+  // empty composer recalls my last message to edit it; Esc cancels.
   $('#chat-input').on('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       $('#chat-form').trigger('submit');
+      return;
+    }
+    if (e.key === 'ArrowUp' && !e.shiftKey && !editTarget && !replyTarget && $(this).val() === '') {
+      const last = lastMineText();
+      if (last) { e.preventDefault(); startEdit(last); }
+      return;
+    }
+    if (e.key === 'Escape' && (editTarget || replyTarget)) {
+      e.preventDefault();
+      clearReplyTarget();
     }
   });
   // Auto-grow the composer with its content, up to the CSS max-height (then it
@@ -996,12 +1094,12 @@ $(function () {
       const $in = $('#chat-input');
       const caption = $in.val().trim();
       $in.val('');
-      const reply_to = replyId(), thread = threadId();
+      const reply_to = replyId(), thread = threadId(), edit_id = editId();
       clearReplyTarget();
       $.ajax({
         url: '/api/chat/send', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({
-          kind: chatConv.kind, key: chatConv.key, body: caption, reply_to, thread,
+          kind: chatConv.kind, key: chatConv.key, body: caption, reply_to, thread, edit_id,
           file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
         }),
       }).fail((xhr) => alert('send: ' + errorOf(xhr)));
@@ -1024,6 +1122,7 @@ $(function () {
     fd.append('body', caption);
     fd.append('reply_to', replyId());
     fd.append('thread', threadId());
+    fd.append('edit_id', editId());
     fd.append('file', file);
     clearReplyTarget();
     $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })

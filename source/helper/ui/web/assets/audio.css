@@ -2404,6 +2404,12 @@ a.ax-domain-link:hover {
     color: var(--muted);
     font-size: 11px;
 }
+.ax-msg-edited {
+    color: var(--muted);
+    font-size: 10px;
+    font-style: italic;
+    opacity: 0.8;
+}
 .ax-msg-text {
     color: var(--text);
     /* the rich-text renderer emits <br> for newlines, so normal wrapping is
@@ -2557,6 +2563,10 @@ a.ax-domain-link:hover {
 }
 .ax-replybar-in .bi { color: var(--accent); }
 .ax-replybar-author { color: var(--accent); flex: 0 0 auto; }
+/* Edit mode: a warm accent to distinguish it from a reply. */
+.ax-replybar-edit { border-left-color: var(--warn, #e0a04c); }
+.ax-replybar-edit .bi,
+.ax-replybar-edit .ax-replybar-author { color: var(--warn, #e0a04c); }
 .ax-replybar-snip { color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ax-replybar-x {
     border: none;
