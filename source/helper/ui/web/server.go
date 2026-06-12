@@ -41,10 +41,13 @@ import (
 //go:embed assets
 var assetsFS embed.FS
 
-// busTypeSignal is the bus message type for WebRTC meet signalling —
-// the QUIC counterpart of POST /api/signal/inbox on the tunnel
-// listener (kept for peers on pre-bus builds).
-const busTypeSignal = "signal"
+// busTypeSignal is the bus message type for p2p (1:1) WebRTC call signalling.
+// busTypeSignalNext is the namespaced name we're migrating to: accept both
+// during the wire rollout, keep requesting the old one, flip later.
+const (
+	busTypeSignal     = "signal"
+	busTypeSignalNext = "call.p2p"
+)
 
 // Server wraps an Engine with an HTTP handler on the user-facing
 // loopback bind (the full UI + all API endpoints). Peer↔peer traffic
@@ -107,7 +110,7 @@ func (s *Server) Addr() string { return s.addr }
 // call proxying prefer the bus over HTTP. Call once from main.
 func (s *Server) RegisterBus(b *bus.Service) {
 	s.bus = b
-	b.Handle(busTypeSignal, func(fromPub string, payload []byte) ([]byte, error) {
+	signalHandler := func(fromPub string, payload []byte) ([]byte, error) {
 		// Auto-select the sender as active peer — same convenience as
 		// handleSignalInbox, but keyed by the bus-attested pub instead
 		// of the RemoteAddr overlay IP.
@@ -139,7 +142,9 @@ func (s *Server) RegisterBus(b *bus.Service) {
 		}
 		s.signals.broadcast(payload)
 		return nil, nil
-	})
+	}
+	b.Handle(busTypeSignal, signalHandler)
+	b.Handle(busTypeSignalNext, signalHandler) // accept the new name during rollout
 }
 
 // peerName resolves a peer pub to its display name from the engine roster,

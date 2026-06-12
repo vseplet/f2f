@@ -44,9 +44,13 @@ import (
 	"github.com/vseplet/f2f/source/helper/platform"
 )
 
-// busTypeCACert is the bus message type serving our CA cert (PEM) to
-// peers.
-const busTypeCACert = "ca-cert"
+// busTypeCACert is the bus message type serving our CA cert (PEM) to peers.
+// busTypeCACertNext is the namespaced name we're migrating to: accept both
+// during the wire rollout, keep requesting the old one, flip later.
+const (
+	busTypeCACert     = "ca-cert"
+	busTypeCACertNext = "pki.cert"
+)
 
 // myCADir is where the local CA's ca.crt/ca.key live. Persisted
 // across runs so leaf certs issued in one session remain valid in
@@ -100,13 +104,15 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeCACert, func(string, []byte) ([]byte, error) {
+	caHandler := func(string, []byte) ([]byte, error) {
 		ca := s.MyCA()
 		if ca == nil {
 			return nil, fmt.Errorf("ca not initialized")
 		}
 		return ca.CertPEM, nil
-	})
+	}
+	s.bus.Handle(busTypeCACert, caHandler)
+	s.bus.Handle(busTypeCACertNext, caHandler) // accept the new name during rollout
 }
 
 // Start ensures the local CA is loaded (or freshly generated for
