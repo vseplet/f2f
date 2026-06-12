@@ -226,6 +226,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
 	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("POST /api/chat/clear", s.handleChatClear)
+	mux.HandleFunc("POST /api/chat/query", s.handleChatQuery)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)

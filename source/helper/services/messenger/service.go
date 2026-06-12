@@ -249,6 +249,15 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	return nil, nil
 }
 
+// Query runs a read-only SQL query against the active camp's messenger.db (for
+// the in-app SQL console). Read-only is enforced at the SQLite engine level.
+func (s *Service) Query(query string) (*QueryResult, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("chat: no store")
+	}
+	return s.store.Query(s.camp(), query)
+}
+
 // ClearConversation wipes a conversation's messages from memory and the local
 // store. It's local only — peers keep their copies; nothing is sent. kind is
 // "dm" (key = peer pub) or "channel" (key = channel id).

@@ -1200,6 +1200,27 @@
             </div>
             <!-- /#tab-note -->
 
+            <!-- Read-only SQL console over the camp's messenger.db. Opened from
+                 the "query history" row under the messages group. -->
+            <div id="tab-query" class="tab-panel hidden">
+                <div class="ax-frame ax-query">
+                    <div class="ax-section-title ax-query-header">
+                        <span id="query-title">query · messenger.db</span>
+                        <span class="ax-meta">read-only</span>
+                        <button type="button" id="query-run" class="ax-engine-btn">run ⌘↵</button>
+                    </div>
+                    <div class="ax-query-body">
+                        <div id="query-schema" class="ax-query-schema"></div>
+                        <div class="ax-query-main">
+                            <textarea id="query-sql" class="ax-query-sql" spellcheck="false"></textarea>
+                            <div id="query-status" class="ax-query-status"></div>
+                            <div id="query-results" class="ax-query-results"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-query -->
+
             <!-- Remote terminal (services/shell over the bus), rendered in the
                  main column like the other tabs. Opened from the sidebar
                  "machines" rows (term.js). -->

@@ -79,10 +79,12 @@
     try { return marked.parse(src); } catch (_) { return inline(src); }
   }
 
-  // A mermaid block is emitted as a placeholder carrying its (escaped) source;
-  // renderDiagrams turns it into an SVG once it's in the DOM.
+  // A mermaid block is emitted as a placeholder carrying its source as TEXT
+  // content (the standard <pre class="mermaid"> form) — NOT a data- attribute,
+  // which DOMPurify strips. renderDiagrams reads textContent and turns it into
+  // an SVG once it's in the DOM.
   function mermaidBlock(src) {
-    return '<pre class="ax-mermaid" data-src="' + escape(src) + '"></pre>';
+    return '<pre class="ax-mermaid">' + escape(src) + '</pre>';
   }
 
   // blockFor dispatches a fenced block to its renderer by language tag. Shared
@@ -127,8 +129,9 @@
     }
     flush();
     if (window.DOMPurify) {
-      // Allow the structural bits we emit; mermaid placeholders keep data-src.
-      return DOMPurify.sanitize(out, { ADD_ATTR: ['data-src', 'target'] });
+      // Keep link targets; mermaid source rides as the <pre>'s text content
+      // (DOMPurify preserves text), so no data-attr to allowlist.
+      return DOMPurify.sanitize(out, { ADD_ATTR: ['target'] });
     }
     return out;
   }
@@ -139,15 +142,16 @@
   // falls back to showing the source so nothing silently vanishes.
   function renderDiagrams(container) {
     if (!window.mermaid || !container) return;
-    var nodes = container.querySelectorAll('.ax-mermaid[data-src]:not([data-done])');
+    var nodes = container.querySelectorAll('.ax-mermaid:not([data-done])');
     nodes.forEach(function (el) {
       el.setAttribute('data-done', '1');
-      var src = el.getAttribute('data-src') || '';
+      var src = el.textContent || '';
+      if (!src.trim()) return;
       mermaid.render('ax-mmd-' + (++mid), src).then(function (res) {
         el.innerHTML = res.svg;
         el.classList.add('ax-mermaid-ok');
       }).catch(function () {
-        el.textContent = src;
+        el.textContent = src; // fall back to the source on a parse error
         el.classList.add('ax-mermaid-err');
       });
     });

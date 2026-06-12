@@ -342,6 +342,9 @@ $(function () {
   let replyTarget = null;     // message the next send will quote, or null
   let editTarget = null;      // { id } of the message the next send will edit, or null
   let threadRoot = null;      // id of the message whose thread panel is open, or null
+  let querySchemaLoaded = false;  // SQL console: schema fetched on first open
+  const DEFAULT_QUERY =
+    "SELECT mtype, sender, body, ts\n  FROM messages\n ORDER BY ts DESC\n LIMIT 50;";
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
@@ -914,6 +917,8 @@ $(function () {
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
+    // query → the read-only SQL console over messenger.db.
+    if (h === 'query') { activateTab('query'); openQuery(); return; }
     // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
@@ -989,9 +994,9 @@ $(function () {
     let route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
     // An open thread keeps its conversation row highlighted — drop the suffix.
     route = route.replace(/:thread:[0-9a-zA-Z]+$/, '');
-    // A note view keeps its channel's row highlighted — map note:<id> to the
-    // channel's own route so the row matches.
-    const noteM = route.match(/^note:(.+)$/);
+    // A note view keeps its channel's row highlighted — drop the ":preview"
+    // mode suffix and map note:<id> to the channel's own route so the row matches.
+    const noteM = route.replace(/:preview$/, '').match(/^note:(.+)$/);
     if (noteM) route = 'channel:' + noteM[1];
     // An ongoing call stays flagged in the sidebar even when we navigate
     // away to a chat. Mark both its meet row and the peer's DM row.
@@ -1160,6 +1165,93 @@ $(function () {
     }
     $(document).on('mousemove.thres', onMove).on('mouseup.thres', onUp);
   });
+
+  // --- SQL console (read-only over messenger.db) ---
+  // openQuery shows the console; on first open it seeds a default query and
+  // loads the schema (which is just another read-only query).
+  function openQuery() {
+    if (!$('#query-sql').val().trim()) $('#query-sql').val(DEFAULT_QUERY);
+    if (!querySchemaLoaded) loadQuerySchema();
+    setTimeout(() => $('#query-sql').focus(), 0);
+  }
+  // runQuery POSTs the editor's SQL and renders columns + rows as a table.
+  function runQuery() {
+    const sql = $('#query-sql').val().trim();
+    if (!sql) return;
+    $('#query-status').text('running…');
+    $.ajax({
+      url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ sql }),
+    }).done((res) => {
+      renderQueryTable($('#query-results'), res);
+      const n = (res.rows || []).length;
+      $('#query-status').text(n + ' row' + (n === 1 ? '' : 's') + (res.truncated ? ' (capped)' : ''));
+    }).fail((xhr) => {
+      $('#query-results').empty();
+      $('#query-status').html('<span class="ax-query-err">' + esc(errorOf(xhr)) + '</span>');
+    });
+  }
+  $('#query-run').on('click', runQuery);
+  // Cmd/Ctrl+Enter runs; the editor otherwise behaves as a plain textarea.
+  $('#query-sql').on('keydown', function (e) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runQuery(); }
+  });
+  // Clicking a schema table name drops a SELECT for it into the editor.
+  $('#query-schema').on('click', '.ax-query-tbl', function () {
+    $('#query-sql').val('SELECT * FROM ' + $(this).attr('data-tbl') + ' LIMIT 50;').focus();
+  });
+
+  // loadQuerySchema lists tables + columns via PRAGMA (read-only) and renders a
+  // reference panel.
+  function loadQuerySchema() {
+    querySchemaLoaded = true;
+    $.ajax({
+      url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name" }),
+    }).done((res) => {
+      const tables = (res.rows || []).map((r) => r[0]);
+      // Pull columns per table (PRAGMA table_info) sequentially-ish.
+      let html = '<div class="ax-query-schema-title">schema</div>';
+      let pending = tables.length;
+      if (!pending) { $('#query-schema').html(html + '<div class="ax-query-empty">no tables</div>'); return; }
+      const cols = {};
+      tables.forEach((t) => {
+        $.ajax({
+          url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+          data: JSON.stringify({ sql: 'PRAGMA table_info(' + t + ')' }),
+        }).always((res2) => {
+          cols[t] = (res2 && res2.rows) ? res2.rows.map((r) => r[1]) : [];
+          if (--pending === 0) {
+            for (const t2 of tables) {
+              html += '<div class="ax-query-tbl" data-tbl="' + esc(t2) + '"># ' + esc(t2) + '</div>';
+              html += '<div class="ax-query-cols">' + (cols[t2] || []).map(esc).join(', ') + '</div>';
+            }
+            $('#query-schema').html(html);
+          }
+        });
+      });
+    }).fail(() => { $('#query-schema').html('<div class="ax-query-empty">schema unavailable</div>'); });
+  }
+
+  // renderQueryTable paints a QueryResult as a scrollable HTML table.
+  function renderQueryTable($el, res) {
+    const cols = (res && res.columns) || [];
+    const rows = (res && res.rows) || [];
+    if (!cols.length) { $el.html('<div class="ax-query-empty">no columns</div>'); return; }
+    let html = '<table class="ax-query-table"><thead><tr>';
+    for (const c of cols) html += '<th>' + esc(c) + '</th>';
+    html += '</tr></thead><tbody>';
+    for (const row of rows) {
+      html += '<tr>';
+      for (const v of row) {
+        const s = v == null ? '' : String(v);
+        html += '<td title="' + esc(s) + '">' + esc(s.length > 200 ? s.slice(0, 200) + '…' : s) + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    $el.html(html);
+  }
 
   // renderThread paints the open thread: the root message, an "N replies"
   // divider, then the replies (oldest-first), all with edits applied. If the
@@ -2028,7 +2120,8 @@ $(function () {
     const messagingBody =
       section('calls')   + meetsBody
       + section('groups')  + groupsBody
-      + section('direct')  + directsBody;
+      + section('direct')  + directsBody
+      + addRow('query history →', 'query'); // read-only SQL console over messenger.db
 
     // tunnel — outbound intercepts + inbound open ports under one group
     // with section dividers (mirrors the app's "tunnel" tab).
