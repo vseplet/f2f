@@ -135,6 +135,28 @@ func (s *Server) handleChatNotes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
+// handleChatClear wipes a conversation's messages locally (memory + SQLite).
+// Body: {kind, key}. Peers keep their copies — nothing is sent.
+func (s *Server) handleChatClear(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kind string `json:"kind"`
+		Key  string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
+		return
+	}
+	if err := s.msg.ClearConversation(req.Kind, req.Key); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleChatMessages returns recent messages for a conversation.
 // Query: kind=dm|channel, key=<peer pub | channel id>, limit=<n>.
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {

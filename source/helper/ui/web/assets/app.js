@@ -490,13 +490,14 @@ $(function () {
     // chip with a download button + live status (updated by updateTorrentChips).
     if (f.info_hash) {
       const tn = esc(f.name || 'file');
-      return `<div class="ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
-        + `<div class="ax-msg-torrent-main">`
-          + `<i class="bi bi-file-earmark-arrow-down"></i>`
-          + `<span class="ax-msg-torrent-name">${tn}</span>`
-          + `<span class="ax-msg-torrent-size">${esc(fmtBytes(f.size || 0))}</span>`
-        + `</div>`
-        + `<div class="ax-msg-torrent-status"></div>`
+      // Same doc card as an inline file, only a transfer icon — the size and
+      // the live status/download action ride in the subtitle.
+      return `<div class="ax-msg-doc ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
+        + `<span class="ax-msg-doc-ic"><i class="bi bi-cloud-arrow-down-fill"></i></span>`
+        + `<span class="ax-msg-doc-meta">`
+          + `<span class="ax-msg-doc-name">${tn}</span>`
+          + `<span class="ax-msg-doc-sub"><span class="ax-msg-doc-size">${esc(fmtBytes(f.size || 0))}</span><span class="ax-msg-torrent-status"></span></span>`
+        + `</span>`
       + `</div>`;
     }
     if (!f.data) return '';
@@ -765,6 +766,20 @@ $(function () {
     if ($p.hasClass('hidden')) renderMembersPanel();
     else $p.addClass('hidden');
   });
+  // Clear the open conversation's messages — LOCAL only (memory + SQLite);
+  // peers keep their copies.
+  $('#chat-clear').on('click', function () {
+    if (!chatConv) return;
+    if (!confirm('Clear all messages here? This removes only your local copy — others keep theirs.')) return;
+    $.ajax({
+      url: '/api/chat/clear', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key }),
+    }).done(() => {
+      chatMsgs = [];
+      renderChat(chatMsgs);
+      closeThread(); // its messages are gone too
+    }).fail((xhr) => alert('clear: ' + errorOf(xhr)));
+  });
   // Remove a member (owner only).
   $('#chat-members-panel').on('click', '.ax-chat-member-rm', function () {
     const pub = $(this).attr('data-rm');
@@ -920,7 +935,7 @@ $(function () {
       $('.tab-panel').addClass('hidden');
       $('#tab-chat').removeClass('hidden');
       setChatTitle();
-      $('#chat-call').show(); // call available in both DMs (1:1) and channels (group)
+      $('#chat-call, #chat-clear').show(); // call + clear: both DMs and channels
       $('#chat-members').toggle(kind === 'channel'); // members button: channels only
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
@@ -1296,7 +1311,7 @@ $(function () {
     return ips;
   }
   function updateTorrentChips() {
-    $('#chat-messages .ax-msg-torrent').each(function () {
+    $('.ax-chat-messages .ax-msg-torrent').each(function () {
       const $c = $(this);
       const mine = $c.closest('.ax-msg').hasClass('is-mine');
       const st = torrentStatus[$c.attr('data-infohash')];
@@ -1319,7 +1334,7 @@ $(function () {
     });
   }
   function pollTorrents() {
-    if (!$('#chat-messages .ax-msg-torrent').length) return;
+    if (!$('.ax-chat-messages .ax-msg-torrent').length) return;
     $.getJSON('/api/files/downloads', function (list) {
       const m = {};
       (Array.isArray(list) ? list : []).forEach((d) => { m[d.info_hash] = d; });
@@ -1327,7 +1342,7 @@ $(function () {
       updateTorrentChips();
     });
   }
-  $('#chat-messages').on('click', '.ax-msg-torrent-dl', function () {
+  $('#tab-chat').on('click', '.ax-msg-torrent-dl', function () {
     const $c = $(this).closest('.ax-msg-torrent');
     const magnet = $c.attr('data-magnet');
     if (!magnet) return;
@@ -1337,7 +1352,7 @@ $(function () {
       data: JSON.stringify({ magnet: magnet, peers: torrentPeers($c) }),
     }).done(pollTorrents).fail((xhr) => alert('download: ' + errorOf(xhr)));
   });
-  $('#chat-messages').on('click', '.ax-msg-torrent-open', function () {
+  $('#tab-chat').on('click', '.ax-msg-torrent-open', function () {
     const st = torrentStatus[$(this).closest('.ax-msg-torrent').attr('data-infohash')];
     if (st && st.path) {
       $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });

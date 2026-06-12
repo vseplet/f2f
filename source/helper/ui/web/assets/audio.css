@@ -2406,6 +2406,14 @@ a.ax-domain-link:hover {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* Clear-messages is destructive — muted by default, danger on hover, not the
+   green of the call/members buttons. */
+.ax-frame #chat-clear { color: var(--muted); }
+.ax-frame #chat-clear:hover {
+    color: var(--danger, #e0686e);
+    border-color: var(--danger, #e0686e);
+    background: color-mix(in srgb, var(--danger, #e0686e) 16%, transparent);
+}
 .ax-frame .ax-chat-call {
     flex-shrink: 0;
     width: 30px;
@@ -2725,32 +2733,23 @@ a.ax-domain-link:hover {
 .ax-msg-doc:hover .ax-msg-doc-name { text-decoration: underline; }
 .ax-msg-doc-sub { color: var(--muted); font-size: 11px; }
 
-/* Torrent file: carries a magnet, with a download button + live transfer
-   status (filled by updateTorrentChips). Lives inside the filecard bubble, so
-   it's transparent and the wrapper provides the bubble. */
-.ax-msg-torrent {
-    padding: 8px 11px;
-    font-size: 13px;
+/* Torrent file: the same doc card as an inline file (only a transfer icon),
+   with the live download/seed status riding in the subtitle after the size,
+   filled by updateTorrentChips. */
+.ax-msg-torrent-status:not(:empty)::before {
+    content: "·";
+    margin: 0 5px;
+    color: var(--muted);
 }
-.ax-msg-torrent-main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-}
-.ax-msg-torrent-main > .bi { color: var(--accent); flex-shrink: 0; }
-.ax-msg-torrent-name { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ax-msg-torrent-size { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
-.ax-msg-torrent-status { margin-top: 5px; font-size: 12px; }
-.ax-msg-torrent-status:empty { display: none; }
 .ax-msg-torrent-dl {
     border: 1px solid var(--border);
     background: transparent;
     color: var(--accent);
-    border-radius: 7px;
-    padding: 3px 10px;
+    border-radius: 6px;
+    padding: 1px 8px;
     cursor: pointer;
     font: inherit;
+    font-size: 11px;
 }
 .ax-msg-torrent-dl:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .ax-msg-torrent-status .t-prog,
