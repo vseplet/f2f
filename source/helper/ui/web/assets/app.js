@@ -962,15 +962,16 @@ $(function () {
     if (key === GENERAL_ID) { location.hash = convRoute(GENERAL_ID) + (thread ? ':thread:' + thread : ''); return; }
     if (key === 'general') key = GENERAL_ID;
     const kind = convKind(key);
-    // Only reload the conversation when it actually changed — toggling the
-    // thread panel (same key) must not re-fetch/flicker the timeline.
+    // Always switch to the chat tab (we may be coming back from the notes
+    // view). Only RELOAD the conversation when it actually changed — toggling
+    // the thread panel (same key) must not re-fetch/flicker the timeline.
     const sameConv = chatConv && chatConv.kind === kind && chatConv.key === key;
+    $('.ax-tab').removeClass('ax-tab-active');
+    $('.tab-panel').addClass('hidden');
+    $('#tab-chat').removeClass('hidden');
     if (!sameConv) {
       chatConv = { kind, key };
       chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
-      $('.ax-tab').removeClass('ax-tab-active');
-      $('.tab-panel').addClass('hidden');
-      $('#tab-chat').removeClass('hidden');
       setChatTitle();
       $('#chat-call, #chat-clear, #chat-notes').show(); // call + clear + notes: both DMs and channels
       $('#chat-members').toggle(kind === 'channel'); // members button: channels only
