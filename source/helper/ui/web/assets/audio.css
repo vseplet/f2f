@@ -1709,10 +1709,10 @@ a.ax-domain-link:hover {
 /* The main chat composer is a multi-line textarea (Enter sends, Shift+Enter
    newlines) that auto-grows up to a cap. Buttons stay bottom-aligned as it
    grows. id selector outranks the shared .ax-chat-input input rules. */
-#chat-form {
+#chat-form, #thread-form {
     align-items: flex-end;
 }
-#chat-input {
+#chat-input, #thread-input {
     flex: 1;
     min-width: 0;
     background: transparent;
@@ -1727,7 +1727,7 @@ a.ax-domain-link:hover {
     overflow-y: auto;
     max-height: 160px;
 }
-#chat-input::placeholder {
+#chat-input::placeholder, #thread-input::placeholder {
     color: var(--muted);
 }
 
@@ -2329,17 +2329,67 @@ a.ax-domain-link:hover {
 #tab-chat {
     overflow: hidden;
 }
+/* The chat tab is a row: timeline on the left, the (optional) thread panel on
+   the right. Each column scrolls independently. */
 #tab-chat:not(.hidden) {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
 }
 .ax-chat {
     display: flex;
     flex-direction: column;
     flex: 1;
+    min-width: 0;
     min-height: 0;
     box-sizing: border-box;
 }
+/* Slack-style thread panel beside the timeline — a 1:1 copy of the chat frame
+   (it reuses .ax-frame + .ax-chat for chrome and column layout). Only its flex
+   sizing differs: a fixed, drag-resizable width instead of flex:1. */
+.ax-chat-thread:not(.hidden) {
+    flex: 0 0 auto;
+    width: 380px; /* overridden inline by the resize drag (persisted) */
+}
+.ax-thread-header #thread-title { flex: 1; font-weight: 600; }
+#thread-close { color: var(--muted); }
+/* The drag handle between the timeline and the thread panel (mirrors the
+   sidebar handle). Hidden with the panel. */
+.ax-thread-resize {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+}
+.ax-thread-resize:hover,
+.ax-thread-resize.dragging {
+    background: var(--border);
+    border-right-color: var(--border-2);
+}
+/* A divider between the root message and its replies in the panel. */
+.ax-thread-divider {
+    color: var(--muted);
+    font-size: 11px;
+    margin: 8px 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px dotted var(--border);
+}
+/* "N replies" affordance under a root message in the main timeline. */
+.ax-msg-thread-open {
+    align-self: flex-start;
+    margin: 2px 4px 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.ax-msg.is-mine .ax-msg-thread-open { align-self: flex-end; }
+.ax-msg-thread-open:hover { text-decoration: underline; }
 .ax-chat-header {
     flex-shrink: 0;
     margin-bottom: 8px;

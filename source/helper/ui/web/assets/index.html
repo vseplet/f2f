@@ -1120,6 +1120,35 @@
                         <button type="submit" class="ax-engine-btn ax-chat-send" title="send" aria-label="send"><i class="bi bi-arrow-up-short"></i></button>
                     </form>
                 </div>
+                <!-- Slack-style thread panel: a 1:1 copy of the chat frame
+                     (same header, message area, composer) opened beside the
+                     timeline. Thread replies live here, not in the timeline.
+                     The handle to its left drags to resize it. -->
+                <div id="thread-resize" class="ax-thread-resize hidden"></div>
+                <div id="chat-thread" class="ax-frame ax-chat ax-chat-thread hidden">
+                    <div class="ax-section-title ax-chat-header ax-thread-header">
+                        <span id="thread-title">Thread</span>
+                        <button type="button" id="thread-close" class="ax-engine-btn" title="close thread" aria-label="close"><i class="bi bi-x-lg"></i></button>
+                    </div>
+                    <div id="thread-messages" class="ax-chat-messages"></div>
+                    <form id="thread-form" class="ax-chat-input">
+                        <button
+                            type="button"
+                            id="thread-attach"
+                            class="ax-engine-btn ax-chat-attach"
+                            title="attach a file (max 8 MiB)"
+                            aria-label="attach"
+                        ><i class="bi bi-plus-lg"></i></button>
+                        <input id="thread-file" type="file" style="display: none" />
+                        <textarea
+                            id="thread-input"
+                            rows="1"
+                            autocomplete="off"
+                            placeholder="reply in thread…  (Shift+Enter for a new line)"
+                        ></textarea>
+                        <button type="submit" class="ax-engine-btn ax-chat-send" title="send" aria-label="send"><i class="bi bi-arrow-up-short"></i></button>
+                    </form>
+                </div>
             </div>
             <!-- /#tab-chat -->
 
