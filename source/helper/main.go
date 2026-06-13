@@ -9,11 +9,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
+	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/shell"
@@ -142,7 +145,22 @@ func run(bind string, console bool, autostart bool) error {
 	// subdomain by hand.
 	dnsSvc.OnPinnedMiss = tunnelSvc.ResolveSubdomain
 	campSvc := camp.New(eng, store)
-	proxySvc := proxy.New(dnsSvc, pkiSvc)
+	// Built-in OIDC provider: turns overlay identity into standard tokens
+	// for co-located apps. Served on a loopback port; the proxy exposes it
+	// at id.<zone>.f2f and injects the attested caller pub.
+	const oidcPort = 2203
+	oidcDir := func() string {
+		id := eng.Status().CampID
+		if id == "" {
+			return ""
+		}
+		return store.CampDir(id)
+	}
+	oidcCreds := oidc.NewCredStore(oidcDir)
+	oidcClients := oidc.NewClientStore(oidcDir)
+	oidcKeys := oidc.NewSignKeys(oidcDir)
+	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcCreds, oidcClients, oidcKeys)
+	proxySvc := proxy.New(dnsSvc, pkiSvc, oidcPort, busResolver{eng: eng}.PubForIP)
 
 	// Messaging — direct messages and channels over the bus, backed by a
 	// per-camp SQLite store for durable history. Identity (our pub) and the
@@ -306,7 +324,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
@@ -468,6 +486,19 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}()
 
+	// OIDC provider listener (loopback). The handler reads live engine
+	// state, so it's bound once and survives camp switches.
+	go func() {
+		oidcSrv := &http.Server{
+			Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(oidcPort)),
+			Handler:           oidcSvc.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		if err := oidcSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			clog.Warn("main", "oidc listener: %v", err)
+		}
+	}()
+
 	// Bring up the chosen camp (eng.Start → OnStarted → services start).
 	if selErr != nil {
 		clog.Console("camp select: %v", selErr)
@@ -506,6 +537,22 @@ func run(bind string, console bool, autostart bool) error {
 
 // busResolver adapts the engine's peer roster to bus.Resolver. Identity is
 // the overlay IP (WireGuard-attested), so the bus needs no auth of its own.
+// oidcBackend adapts the engine to services/oidc.Backend: the active
+// camp's signing identity and a pub→name lookup for the attested visitor.
+// (The issuer is derived per-request from the app host, not here.)
+type oidcBackend struct{ eng *engine.Engine }
+
+func (b oidcBackend) Identity() *identity.Identity { return b.eng.Identity() }
+
+func (b oidcBackend) PeerName(pub string) string {
+	for _, p := range b.eng.Status().Peers {
+		if p.Pub == pub {
+			return p.Name
+		}
+	}
+	return ""
+}
+
 type busResolver struct{ eng *engine.Engine }
 
 func (r busResolver) AddrForPub(pub string) string {

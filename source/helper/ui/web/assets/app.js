@@ -919,6 +919,7 @@ $(function () {
     if (tm) { activateTab(tm[1]); return; }
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
+    if (h === 'oidc') { activateTab('oidc'); openOIDC(); return; }
     // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
@@ -1253,6 +1254,129 @@ $(function () {
     $el.html(html);
   }
 
+  // --- OIDC provider admin ---
+  // openOIDC loads this peer's issuer + client list into the tab.
+  function openOIDC() {
+    $('#oidc-err').text('');
+    $('#oidc-new').addClass('hidden').empty();
+    $.getJSON('/api/oidc').done(function (d) {
+      $('#oidc-issuer').text(d.issuer || '(not in a camp)');
+      $('#oidc-discovery').text(d.discovery || '—');
+      $('#oidc-endsession').text(d.issuer ? d.issuer + '/end_session' : '—');
+      oidcUsers = (d && d.users) || [];
+      renderOIDCClients(d.clients || []);
+      renderOIDCUsers(oidcUsers);
+    }).fail(function (x) {
+      $('#oidc-err').text('load failed: ' + (x.responseText || x.status));
+    });
+  }
+
+  function renderOIDCClients(clients) {
+    const $c = $('#oidc-clients');
+    if (!clients.length) { $c.html('<div class="ax-oidc-empty">no applications yet</div>'); return; }
+    $c.empty();
+    for (const cl of clients) {
+      const kind = cl.confidential ? 'confidential' : 'public';
+      const pkceTag = cl.pkce ? '<span class="ax-oidc-ckind">PKCE</span>' : '';
+      const $row = $(
+        '<div class="ax-oidc-client">' +
+          '<div class="ax-oidc-cmeta">' +
+            '<span class="ax-oidc-cname"></span>' +
+            '<span class="ax-oidc-ckind">' + kind + '</span>' + pkceTag +
+            '<button class="ax-oidc-del" title="delete">✕</button>' +
+          '</div>' +
+          '<div class="ax-oidc-cid">client_id: <code></code></div>' +
+          '<div class="ax-oidc-csecret">client_secret: <code></code></div>' +
+          '<div class="ax-oidc-clabel">callback URLs</div>' +
+          '<div class="ax-oidc-cred"></div>' +
+          '<div class="ax-oidc-clabel ax-oidc-llabel">logout URLs</div>' +
+          '<div class="ax-oidc-cred ax-oidc-lred"></div>' +
+        '</div>');
+      $row.find('.ax-oidc-cname').text(cl.client_name || '(unnamed)');
+      $row.find('.ax-oidc-cid code').text(cl.client_id);
+      if (cl.client_secret) {
+        $row.find('.ax-oidc-csecret code').text(cl.client_secret);
+      } else {
+        $row.find('.ax-oidc-csecret').remove();
+      }
+      $row.find('.ax-oidc-cred').not('.ax-oidc-lred').text((cl.redirect_uris || []).join('\n'));
+      const logouts = cl.logout_uris || [];
+      if (logouts.length) {
+        $row.find('.ax-oidc-lred').text(logouts.join('\n'));
+      } else {
+        $row.find('.ax-oidc-llabel, .ax-oidc-lred').remove();
+      }
+      $row.find('.ax-oidc-del').on('click', function () {
+        if (!confirm('Delete client "' + (cl.client_name || cl.client_id) + '"?')) return;
+        $.ajax({ url: '/api/oidc/clients/' + encodeURIComponent(cl.client_id), method: 'DELETE' })
+          .done(openOIDC)
+          .fail(function (x) { $('#oidc-err').text('delete failed: ' + (x.responseText || x.status)); });
+      });
+      $c.append($row);
+    }
+  }
+
+  // renderOIDCUsers lists peers that have enrolled a passkey — the IdP's
+  // notion of a "registered user" (there's no user table; identity is the
+  // camp pub). Their app accounts live in each relying app's own DB.
+  function renderOIDCUsers(users) {
+    const $u = $('#oidc-users');
+    if (!users.length) { $u.html('<div class="ax-oidc-empty">no passkeys enrolled yet</div>'); return; }
+    $u.empty();
+    for (const u of users) {
+      const n = u.credentials || 0;
+      const $row = $(
+        '<div class="ax-oidc-client">' +
+          '<div class="ax-oidc-cmeta">' +
+            '<span class="ax-oidc-cname"></span>' +
+            '<span class="ax-oidc-ckind"></span>' +
+          '</div>' +
+          '<div class="ax-oidc-cid">pub: <code></code></div>' +
+        '</div>');
+      $row.find('.ax-oidc-cname').text(u.name || '(unnamed)');
+      $row.find('.ax-oidc-ckind').text(n + ' passkey' + (n === 1 ? '' : 's'));
+      $row.find('.ax-oidc-cid code').text(u.pub);
+      $u.append($row);
+    }
+  }
+
+  function createOIDCClient() {
+    $('#oidc-err').text('');
+    const name = $('#oidc-name').val().trim();
+    const lines = (id) => $(id).val().split('\n').map(s => s.trim()).filter(Boolean);
+    const redirects = lines('#oidc-redirects');
+    if (!redirects.length) { $('#oidc-err').text('at least one callback URL required'); return; }
+    $.ajax({
+      url: '/api/oidc/clients', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({
+        name: name,
+        redirect_uris: redirects,
+        logout_uris: lines('#oidc-logout'),
+        public: $('#oidc-public').is(':checked'),
+        pkce: $('#oidc-pkce').is(':checked'),
+      }),
+    }).done(function (d) {
+      // Show the credentials once — the secret is never retrievable again.
+      let html = '<div class="ax-oidc-label">client registered</div>' +
+        '<div>client_id: <code>' + esc(d.client_id) + '</code></div>';
+      if (d.client_secret) {
+        html += '<div>client_secret: <code>' + esc(d.client_secret) + '</code></div>';
+      }
+      $('#oidc-new').removeClass('hidden').html(html);
+      $('#oidc-name').val(''); $('#oidc-redirects').val(''); $('#oidc-logout').val('');
+      // Refresh only the list — don't clear the one-time secret panel.
+      $.getJSON('/api/oidc').done(function (d) { renderOIDCClients(d.clients || []); });
+    }).fail(function (x) {
+      $('#oidc-err').text('create failed: ' + (x.responseText || x.status));
+    });
+  }
+
+  $('#oidc-create').on('click', createOIDCClient);
+  $('#oidc-copy').on('click', function () {
+    const t = $('#oidc-issuer').text();
+    if (t && navigator.clipboard) navigator.clipboard.writeText(t);
+  });
+
   // renderThread paints the open thread: the root message, an "N replies"
   // divider, then the replies (oldest-first), all with edits applied. If the
   // root isn't loaded yet (deep-link before history lands) it shows a stub and
@@ -1517,6 +1641,8 @@ $(function () {
   const PEER_TTL_MS = 35000;
   let shellSeen = {};      // /api/shell/peers
   let vncSeen = {};        // /api/vnc/peers
+  let oidcClients = [];    // /api/oidc clients, for the sidebar list
+  let oidcUsers = [];      // /api/oidc passkey users, for the OIDC tab
   function markSeen(seen, list) {
     if (!Array.isArray(list)) return;
     const now = Date.now();
@@ -1781,6 +1907,7 @@ $(function () {
     drop:     'bi-folder-fill',
     domains:  'bi-globe2',
     tunnel:   'bi-hdd-network-fill',
+    blob:     'bi-database-fill',
     oidc:     'bi-person-badge-fill',
     secrets:  'bi-key-fill',
     policies: 'bi-shield-lock-fill',
@@ -2156,7 +2283,14 @@ $(function () {
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
-      + category('oidc',      'OIDC',      null, empty('coming soon'))
+      + category('blob',      'Blob Storage', null, empty('coming soon'))
+      + category('oidc',      'OIDC',      oidcClients.length || null,
+          addRow('manage applications →', 'oidc')
+          + (oidcClients.length
+              ? oidcClients.map(cl => row('online',
+                  cl.client_name || (cl.client_id || '').slice(0, 8),
+                  cl.confidential ? '' : 'public', null, 'oidc')).join('')
+              : empty('no applications')))
       + category('secrets',   'secrets',   null, empty('coming soon'))
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
@@ -3482,10 +3616,19 @@ $(function () {
       if (lastStatus) renderSidebarTree(lastStatus);
     }).fail(() => {});
   }
+  function refreshOIDC() {
+    $.getJSON('/api/oidc', (d) => {
+      oidcClients = (d && d.clients) || [];
+      oidcUsers = (d && d.users) || [];
+      if (lastStatus) renderSidebarTree(lastStatus);
+    }).fail(() => {});
+  }
   refreshShellPeers();
   refreshVncPeers();
+  refreshOIDC();
   setInterval(refreshShellPeers, 5000);
   setInterval(refreshVncPeers, 5000);
+  setInterval(refreshOIDC, 5000);
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);

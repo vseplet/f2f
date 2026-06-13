@@ -31,11 +31,27 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/pki"
 )
 
+// attestHeader carries the AmneziaWG-attested pub of the calling peer to
+// backends. Kept in sync with services/oidc.attestHeader — the OIDC
+// provider reads it to identify the visitor. The proxy strips any inbound
+// copy and re-sets it from the connection, so a backend can trust it.
+const attestHeader = "X-F2F-Peer"
+
+// oidcPrefix is the path under which the built-in OIDC provider is served
+// on every domain this peer hosts. The issuer becomes <app-host>/oidc.
+const oidcPrefix = "/oidc"
+
 // Service owns the :80/:443 reverse-proxy listeners. Constructed once;
 // Start/Stop run on the engine lifecycle.
 type Service struct {
 	dns *dns.Service
 	pki *pki.Service
+	// oidcPort is the loopback port the built-in OIDC provider listens on
+	// (0 disables the built-in id.<zone>.f2f route).
+	oidcPort int
+	// peerByOverlayIP resolves a tunnel client IP to its pub for the
+	// attested-identity header. nil ⇒ no attestation injected.
+	peerByOverlayIP func(ip string) string
 
 	mu   sync.Mutex
 	srvs []*http.Server
@@ -46,8 +62,10 @@ type Service struct {
 
 // New constructs the proxy service. dns supplies the published-domain
 // lookup; pki supplies the leaf-cert issuer for HTTPS termination.
-func New(dnsSvc *dns.Service, pkiSvc *pki.Service) *Service {
-	return &Service{dns: dnsSvc, pki: pkiSvc}
+// oidcPort/peerByOverlayIP wire the built-in OIDC provider route (see
+// attestHeader); pass 0/nil to disable it.
+func New(dnsSvc *dns.Service, pkiSvc *pki.Service, oidcPort int, peerByOverlayIP func(ip string) string) *Service {
+	return &Service{dns: dnsSvc, pki: pkiSvc, oidcPort: oidcPort, peerByOverlayIP: peerByOverlayIP}
 }
 
 // Start brings up the reverse-proxy listeners for camp campID, bound on
@@ -182,6 +200,38 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Attested identity of the caller: resolve the tunnel client IP to a
+	// pub. We always strip any inbound X-F2F-Peer (a backend must never
+	// trust a client-supplied value) and re-set it from the connection.
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	attestedPub := ""
+	if s.peerByOverlayIP != nil {
+		attestedPub = s.peerByOverlayIP(clientIP)
+	}
+
+	// Dedicated per-peer OIDC issuer host (auth-<fp>.<zone>.f2f): serve
+	// the provider at the host root on both loopback and tunnel. This is
+	// the canonical issuer shown in the admin UI.
+	if s.oidcPort != 0 && label == s.dns.OIDCLabel() && s.dns.OIDCLabel() != "" {
+		s.forward(w, r, "127.0.0.1", s.oidcPort, host, attestedPub, "")
+		return
+	}
+
+	// Built-in OIDC provider, also co-located under the /oidc prefix on
+	// ANY domain we host: the app's domain already routes here over the
+	// tunnel, so a visiting peer's browser reaches our IdP at e.g.
+	// https://grafana.<zone>.f2f/oidc. We strip the prefix before
+	// forwarding and tell the backend the external base via
+	// X-Forwarded-Prefix so it builds the right issuer.
+	if s.oidcPort != 0 && (r.URL.Path == oidcPrefix || strings.HasPrefix(r.URL.Path, oidcPrefix+"/")) {
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, oidcPrefix)
+		if r.URL.Path == "" {
+			r.URL.Path = "/"
+		}
+		s.forward(w, r, "127.0.0.1", s.oidcPort, host, attestedPub, oidcPrefix)
+		return
+	}
+
 	// Two-pass match against our domains: exact wins over wildcard.
 	// Loopback also matches local-only routes (portal → web UI).
 	var (
@@ -216,6 +266,15 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	s.forward(w, r, upHost, port, host, attestedPub, "")
+}
+
+// forward reverse-proxies r to upHost:port, setting the standard
+// X-Forwarded-* headers and the attested X-F2F-Peer (always stripping any
+// client-supplied copy first). host is the original Host (for logs);
+// prefix, when non-empty, is the external path prefix stripped before
+// forwarding (sent on as X-Forwarded-Prefix).
+func (s *Service) forward(w http.ResponseWriter, r *http.Request, upHost string, port int, host, attestedPub, prefix string) {
 	target, _ := url.Parse("http://" + net.JoinHostPort(upHost, strconv.Itoa(port)))
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
@@ -235,6 +294,15 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 		req.Header.Set("X-Forwarded-Host", fwdHost)
 		if clientIP != "" {
 			req.Header.Set("X-Forwarded-For", clientIP)
+		}
+		// Anti-spoof: never trust an inbound value; set only what the
+		// overlay attests.
+		req.Header.Del(attestHeader)
+		if attestedPub != "" {
+			req.Header.Set(attestHeader, attestedPub)
+		}
+		if prefix != "" {
+			req.Header.Set("X-Forwarded-Prefix", prefix)
 		}
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
