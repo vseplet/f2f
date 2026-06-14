@@ -24,8 +24,12 @@ type SQLiteStore struct {
 
 func NewSQLiteStore(dirFn func() string) *SQLiteStore { return &SQLiteStore{dirFn: dirFn} }
 
+// Legacy installs stored frames in a table named "entries"; rename it in
+// place (data + indexes carry over) before ensuring the schema.
+const sqliteMigrate = `ALTER TABLE entries RENAME TO frames;`
+
 const sqliteSchema = `
-CREATE TABLE IF NOT EXISTS entries (
+CREATE TABLE IF NOT EXISTS frames (
   id      TEXT PRIMARY KEY,
   scope   TEXT NOT NULL,
   author  TEXT NOT NULL,
@@ -38,8 +42,8 @@ CREATE TABLE IF NOT EXISTS entries (
   sig     TEXT NOT NULL,
   UNIQUE(scope, author, seq)
 );
-CREATE INDEX IF NOT EXISTS ix_scope_lamport ON entries(scope, lamport);
-CREATE INDEX IF NOT EXISTS ix_scope_type    ON entries(scope, type);`
+CREATE INDEX IF NOT EXISTS ix_scope_lamport ON frames(scope, lamport);
+CREATE INDEX IF NOT EXISTS ix_scope_type    ON frames(scope, type);`
 
 // connLocked returns the DB handle for the current camp, (re)opening it on
 // first use or after a camp switch. Caller holds s.mu.
@@ -61,6 +65,10 @@ func (s *SQLiteStore) connLocked() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db: open %s: %w", path, err)
 	}
+	// Best-effort rename of the legacy "entries" table; errors (no such table,
+	// already renamed) are expected and ignored — the schema below is the source
+	// of truth.
+	_, _ = d.Exec(sqliteMigrate)
 	if _, err := d.Exec(sqliteSchema); err != nil {
 		_ = d.Close()
 		return nil, fmt.Errorf("db: schema: %w", err)
@@ -69,7 +77,7 @@ func (s *SQLiteStore) connLocked() (*sql.DB, error) {
 	return d, nil
 }
 
-func (s *SQLiteStore) Append(e *Entry) error {
+func (s *SQLiteStore) Append(e *Frame) error {
 	if err := e.verify(); err != nil {
 		return err
 	}
@@ -86,7 +94,7 @@ func (s *SQLiteStore) Append(e *Entry) error {
 	defer tx.Rollback()
 
 	var dummy string
-	switch err := tx.QueryRow(`SELECT id FROM entries WHERE id=?`, e.ID).Scan(&dummy); err {
+	switch err := tx.QueryRow(`SELECT id FROM frames WHERE id=?`, e.ID).Scan(&dummy); err {
 	case nil:
 		return nil // idempotent: already have it
 	case sql.ErrNoRows:
@@ -97,7 +105,7 @@ func (s *SQLiteStore) Append(e *Entry) error {
 
 	var wantSeq uint64 = 1
 	var wantPrev string
-	row := tx.QueryRow(`SELECT seq, id FROM entries WHERE scope=? AND author=? ORDER BY seq DESC LIMIT 1`, e.Scope, e.Author)
+	row := tx.QueryRow(`SELECT seq, id FROM frames WHERE scope=? AND author=? ORDER BY seq DESC LIMIT 1`, e.Scope, e.Author)
 	var lastSeq uint64
 	var lastID string
 	switch err := row.Scan(&lastSeq, &lastID); err {
@@ -115,7 +123,7 @@ func (s *SQLiteStore) Append(e *Entry) error {
 		return fmt.Errorf("db: broken chain for %s/%s at seq %d", short(e.Author), e.Scope, e.Seq)
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO entries(id,scope,author,seq,prev,lamport,type,ts,payload,sig) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO frames(id,scope,author,seq,prev,lamport,type,ts,payload,sig) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.Scope, e.Author, e.Seq, e.Prev, e.Lamport, e.Type, e.TS, e.Payload, e.Sig,
 	); err != nil {
 		return err
@@ -123,7 +131,7 @@ func (s *SQLiteStore) Append(e *Entry) error {
 	return tx.Commit()
 }
 
-func (s *SQLiteStore) Head(scope, author string) *Entry {
+func (s *SQLiteStore) Head(scope, author string) *Frame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.connLocked()
@@ -131,15 +139,15 @@ func (s *SQLiteStore) Head(scope, author string) *Entry {
 		return nil
 	}
 	row := d.QueryRow(`SELECT id,scope,author,seq,prev,lamport,type,ts,payload,sig
-		FROM entries WHERE scope=? AND author=? ORDER BY seq DESC LIMIT 1`, scope, author)
-	e, err := scanEntry(row)
+		FROM frames WHERE scope=? AND author=? ORDER BY seq DESC LIMIT 1`, scope, author)
+	e, err := scanFrame(row)
 	if err != nil {
 		return nil
 	}
 	return e
 }
 
-func (s *SQLiteStore) Entries(scope string) []*Entry {
+func (s *SQLiteStore) Frames(scope string) []*Frame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.connLocked()
@@ -147,12 +155,12 @@ func (s *SQLiteStore) Entries(scope string) []*Entry {
 		return nil
 	}
 	rows, err := d.Query(`SELECT id,scope,author,seq,prev,lamport,type,ts,payload,sig
-		FROM entries WHERE scope=? ORDER BY lamport, id`, scope)
+		FROM frames WHERE scope=? ORDER BY lamport, id`, scope)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
-	return scanEntries(rows)
+	return scanFrames(rows)
 }
 
 func (s *SQLiteStore) Vector(scope string) VersionVector {
@@ -163,7 +171,7 @@ func (s *SQLiteStore) Vector(scope string) VersionVector {
 	if err != nil {
 		return vv
 	}
-	rows, err := d.Query(`SELECT author, MAX(seq) FROM entries WHERE scope=? GROUP BY author`, scope)
+	rows, err := d.Query(`SELECT author, MAX(seq) FROM frames WHERE scope=? GROUP BY author`, scope)
 	if err != nil {
 		return vv
 	}
@@ -178,17 +186,17 @@ func (s *SQLiteStore) Vector(scope string) VersionVector {
 	return vv
 }
 
-// Since returns entries beyond `have`, read per-author via the
+// Since returns frames beyond `have`, read per-author via the
 // UNIQUE(scope,author,seq) index — a cheap delta that doesn't scan (or
 // unmarshal) the whole scope, which matters for incremental folding.
-func (s *SQLiteStore) Since(scope string, have VersionVector) []*Entry {
+func (s *SQLiteStore) Since(scope string, have VersionVector) []*Frame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.connLocked()
 	if err != nil {
 		return nil
 	}
-	ar, err := d.Query(`SELECT DISTINCT author FROM entries WHERE scope=?`, scope)
+	ar, err := d.Query(`SELECT DISTINCT author FROM frames WHERE scope=?`, scope)
 	if err != nil {
 		return nil
 	}
@@ -201,17 +209,17 @@ func (s *SQLiteStore) Since(scope string, have VersionVector) []*Entry {
 	}
 	ar.Close()
 
-	var out []*Entry
+	var out []*Frame
 	for _, a := range authors {
 		rows, err := d.Query(`SELECT id,scope,author,seq,prev,lamport,type,ts,payload,sig
-			FROM entries WHERE scope=? AND author=? AND seq>? ORDER BY seq`, scope, a, have[a])
+			FROM frames WHERE scope=? AND author=? AND seq>? ORDER BY seq`, scope, a, have[a])
 		if err != nil {
 			continue
 		}
-		out = append(out, scanEntries(rows)...)
+		out = append(out, scanFrames(rows)...)
 		rows.Close()
 	}
-	sortEntries(out)
+	sortFrames(out)
 	return out
 }
 
@@ -223,7 +231,7 @@ func (s *SQLiteStore) MaxLamport() uint64 {
 		return 0
 	}
 	var m sql.NullInt64
-	if err := d.QueryRow(`SELECT MAX(lamport) FROM entries`).Scan(&m); err != nil || !m.Valid {
+	if err := d.QueryRow(`SELECT MAX(lamport) FROM frames`).Scan(&m); err != nil || !m.Valid {
 		return 0
 	}
 	return uint64(m.Int64)
@@ -236,7 +244,7 @@ func (s *SQLiteStore) Scopes() []string {
 	if err != nil {
 		return nil
 	}
-	rows, err := d.Query(`SELECT DISTINCT scope FROM entries`)
+	rows, err := d.Query(`SELECT DISTINCT scope FROM frames`)
 	if err != nil {
 		return nil
 	}
@@ -253,8 +261,8 @@ func (s *SQLiteStore) Scopes() []string {
 
 type scannable interface{ Scan(...any) error }
 
-func scanEntry(r scannable) (*Entry, error) {
-	var e Entry
+func scanFrame(r scannable) (*Frame, error) {
+	var e Frame
 	var prev, sig sql.NullString
 	var payload []byte
 	if err := r.Scan(&e.ID, &e.Scope, &e.Author, &e.Seq, &prev, &e.Lamport, &e.Type, &e.TS, &payload, &sig); err != nil {
@@ -264,10 +272,10 @@ func scanEntry(r scannable) (*Entry, error) {
 	return &e, nil
 }
 
-func scanEntries(rows *sql.Rows) []*Entry {
-	var out []*Entry
+func scanFrames(rows *sql.Rows) []*Frame {
+	var out []*Frame
 	for rows.Next() {
-		if e, err := scanEntry(rows); err == nil {
+		if e, err := scanFrame(rows); err == nil {
 			out = append(out, e)
 		}
 	}

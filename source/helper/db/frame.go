@@ -29,10 +29,10 @@ import (
 	"strings"
 )
 
-// Entry is one immutable, signed record in a per-(author,scope) log.
+// Frame is one immutable, signed record in a per-(author,scope) log.
 // Nothing is ever mutated or deleted — "edit" and "delete" are new
 // entries. State is a deterministic fold over a scope's entries.
-type Entry struct {
+type Frame struct {
 	// Scope is the log namespace: a channel, document, or task list id.
 	Scope string `json:"scope"`
 	// Author is the writer's identity (user_id; currently the Ed25519 pub
@@ -72,7 +72,7 @@ type signer interface {
 // canonical builds the deterministic byte string the signature and ID
 // cover. Excludes Sig and ID. Field separators are newlines; the binary
 // payload is base64 so it can't inject a separator.
-func (e *Entry) canonical() []byte {
+func (e *Frame) canonical() []byte {
 	var b strings.Builder
 	b.WriteString("f2f-db-v1\n")
 	b.WriteString(e.Scope)
@@ -94,14 +94,14 @@ func (e *Entry) canonical() []byte {
 }
 
 // computeID returns the content hash (hex SHA-256 of canonical bytes).
-func (e *Entry) computeID() string {
+func (e *Frame) computeID() string {
 	sum := sha256.Sum256(e.canonical())
 	return hex.EncodeToString(sum[:])
 }
 
 // sign sets Author, Sig and ID using s. Seq/Prev/Lamport/TS must already
 // be set by the store.
-func (e *Entry) sign(s signer) {
+func (e *Frame) sign(s signer) {
 	e.Author = s.PubHex()
 	e.Sig = hex.EncodeToString(s.Sign(e.canonical()))
 	e.ID = e.computeID()
@@ -109,7 +109,7 @@ func (e *Entry) sign(s signer) {
 
 // verify checks the signature against Author and that ID matches the
 // content. Returns nil if the entry is authentic and intact.
-func (e *Entry) verify() error {
+func (e *Frame) verify() error {
 	pub, err := hex.DecodeString(e.Author)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return errors.New("db: bad author key")

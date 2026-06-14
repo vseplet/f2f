@@ -108,7 +108,7 @@ func TestReplication(t *testing.T) {
 	if b.Vector("chan:x")[id.PubHex()] != 3 {
 		t.Fatalf("b vector: %v", b.Vector("chan:x"))
 	}
-	ae, be := a.Entries("chan:x"), b.Entries("chan:x")
+	ae, be := a.Frames("chan:x"), b.Frames("chan:x")
 	if len(ae) != len(be) {
 		t.Fatalf("len mismatch %d %d", len(ae), len(be))
 	}

@@ -65,7 +65,7 @@ func TestSyncPull(t *testing.T) {
 	if err := syncB.PullScope(context.Background(), "A", "doc:1"); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
-	ae, be := sa.Entries("doc:1"), sb.Entries("doc:1")
+	ae, be := sa.Frames("doc:1"), sb.Frames("doc:1")
 	if len(be) != 3 || len(ae) != len(be) {
 		t.Fatalf("len a=%d b=%d", len(ae), len(be))
 	}
@@ -78,7 +78,7 @@ func TestSyncPull(t *testing.T) {
 	if err := syncB.PullScope(context.Background(), "A", "doc:1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(sb.Entries("doc:1")) != 3 {
+	if len(sb.Frames("doc:1")) != 3 {
 		t.Fatal("second pull changed count")
 	}
 }
@@ -104,7 +104,7 @@ func TestSyncScopeDiscovery(t *testing.T) {
 		t.Fatalf("B should know no scopes yet, has %v", sb.Scopes())
 	}
 	syncB.PullAll(context.Background())
-	if got := len(sb.Entries("note:*/general")); got != 3 {
+	if got := len(sb.Frames("note:*/general")); got != 3 {
 		t.Fatalf("B got %d entries after discovery, want 3", got)
 	}
 }
@@ -125,7 +125,7 @@ func TestSyncPush(t *testing.T) {
 		}
 		syncA.Push(e) // eager fan-out → B's onPush applies
 	}
-	if got := len(sb.Entries("chan:x")); got != 2 {
+	if got := len(sb.Frames("chan:x")); got != 2 {
 		t.Fatalf("B got %d entries via push, want 2", got)
 	}
 }

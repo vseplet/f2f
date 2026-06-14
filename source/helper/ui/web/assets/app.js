@@ -676,6 +676,7 @@ $(function () {
   let noteConv = null;            // conversation scope of the open note, or null
   let noteBlocks = [];            // last loaded blocks for the open note
   const noteSaveTimers = {};      // bid → debounce timer for block edits
+  const noteDeleting = {};        // bid → true while a delete+reload is in flight (dedupe)
   // Undo/redo stack for block deletions. Delete is a tombstone version, so undo
   // = write the prior content back (revives the block), redo = re-tombstone.
   // Each entry: {bid, content}. Cleared when switching conversations.
@@ -1005,7 +1006,12 @@ $(function () {
   }
 
   function delNoteBlock(bid, fromRedo) {
-    if (!noteConv) return;
+    // Guard against a double-delete: deleting reloads the list, which removes
+    // the focused textarea and fires blur → the blur handler would delete the
+    // (empty) block again. Likewise ✕ blurs then clicks. Stay locked until the
+    // reload's render is done, so the spurious blur is ignored.
+    if (!noteConv || noteDeleting[bid]) return;
+    noteDeleting[bid] = true;
     // Snapshot current content so the delete can be undone (revived).
     const b = noteBlocks.find((x) => x.bid === bid);
     const head = (b && b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
@@ -1016,7 +1022,8 @@ $(function () {
     $.ajax({
       url: '/api/blocks/delete', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ channel: noteScopeOf(noteConv), bid }),
-    }).done(() => loadNoteBlocks());
+    }).done(() => loadNoteBlocks(() => { delete noteDeleting[bid]; }))
+      .fail(() => { delete noteDeleting[bid]; });
   }
 
   // undoDelete revives the last deleted block (writes its prior content over the

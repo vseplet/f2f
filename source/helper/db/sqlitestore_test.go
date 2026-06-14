@@ -21,7 +21,7 @@ func TestSQLitePersistence(t *testing.T) {
 
 	// reopen the same dir with a fresh store → data persisted
 	svc2 := New(NewSQLiteStore(dirFn))
-	es := svc2.Entries("doc:1")
+	es := svc2.Frames("doc:1")
 	if len(es) != 3 {
 		t.Fatalf("after reopen got %d entries, want 3", len(es))
 	}

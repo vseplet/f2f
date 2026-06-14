@@ -17,18 +17,18 @@ type Service struct {
 	store    Store
 	lamport  uint64         // highest Lamport seen across all scopes
 	now      func() int64   // wall-clock ms; injectable for tests
-	onCommit func(e *Entry) // optional hook fired after a local Commit (sync push)
-	onApply  func(e *Entry) // optional hook fired after a remote entry is applied
+	onCommit func(e *Frame) // optional hook fired after a local Commit (sync push)
+	onApply  func(e *Frame) // optional hook fired after a remote entry is applied
 }
 
 // OnCommit registers a hook called after each successful local Commit —
 // the sync layer uses it to eagerly push new entries to peers.
-func (svc *Service) OnCommit(fn func(*Entry)) { svc.onCommit = fn }
+func (svc *Service) OnCommit(fn func(*Frame)) { svc.onCommit = fn }
 
 // OnApply registers a hook called after each remote entry is successfully
 // applied (anti-entropy) — the UI uses it to live-refresh open views, since
 // OnCommit only covers local writes.
-func (svc *Service) OnApply(fn func(*Entry)) { svc.onApply = fn }
+func (svc *Service) OnApply(fn func(*Frame)) { svc.onApply = fn }
 
 // New builds the service over store (use NewMemStore for now).
 func New(store Store) *Service {
@@ -38,7 +38,7 @@ func New(store Store) *Service {
 // Commit appends a local entry authored by s into scope. It assigns the
 // next Seq, links Prev to the author's head, stamps a fresh Lamport, and
 // signs. Returns the stored entry.
-func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry, error) {
+func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Frame, error) {
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 
@@ -56,7 +56,7 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry,
 		svc.lamport = m
 	}
 	svc.lamport++
-	e := &Entry{
+	e := &Frame{
 		Scope:   scope,
 		Seq:     seq,
 		Prev:    prev,
@@ -77,7 +77,7 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry,
 
 // Apply ingests an entry received from a peer (anti-entropy). It advances
 // the local Lamport clock and validates+stores via the Store.
-func (svc *Service) Apply(e *Entry) error {
+func (svc *Service) Apply(e *Frame) error {
 	svc.mu.Lock()
 	if e.Lamport > svc.lamport {
 		svc.lamport = e.Lamport
@@ -91,15 +91,15 @@ func (svc *Service) Apply(e *Entry) error {
 	return err
 }
 
-// Entries returns scope's entries in canonical order — apps fold over it.
-func (svc *Service) Entries(scope string) []*Entry { return svc.store.Entries(scope) }
+// Frames returns scope's entries in canonical order — apps fold over it.
+func (svc *Service) Frames(scope string) []*Frame { return svc.store.Frames(scope) }
 
 // Vector returns scope's version vector (for anti-entropy).
 func (svc *Service) Vector(scope string) VersionVector { return svc.store.Vector(scope) }
 
 // Since returns entries in scope beyond what `have` covers (the bytes a
 // peer is missing).
-func (svc *Service) Since(scope string, have VersionVector) []*Entry {
+func (svc *Service) Since(scope string, have VersionVector) []*Frame {
 	return svc.store.Since(scope, have)
 }
 
@@ -107,24 +107,24 @@ func (svc *Service) Since(scope string, have VersionVector) []*Entry {
 func (svc *Service) Scopes() []string { return svc.store.Scopes() }
 
 // Dump serializes the entire database (every scope's entries) to JSON —
-// for sharing or backup. Entries carry their own signatures, so a dump is
+// for sharing or backup. Frames carry their own signatures, so a dump is
 // self-verifying on Import.
 func (svc *Service) Dump() ([]byte, error) {
 	svc.mu.Lock()
 	scopes := svc.store.Scopes()
-	var all []*Entry
+	var all []*Frame
 	for _, sc := range scopes {
-		all = append(all, svc.store.Entries(sc)...)
+		all = append(all, svc.store.Frames(sc)...)
 	}
 	svc.mu.Unlock()
 	return json.Marshal(all)
 }
 
-// Import merges a dumped database into this one. Entries are applied in
+// Import merges a dumped database into this one. Frames are applied in
 // per-author chain order so prev-links resolve; bad or duplicate entries
 // are skipped. Returns how many new entries were stored.
 func (svc *Service) Import(blob []byte) (int, error) {
-	var all []*Entry
+	var all []*Frame
 	if err := json.Unmarshal(blob, &all); err != nil {
 		return 0, fmt.Errorf("db: import decode: %w", err)
 	}

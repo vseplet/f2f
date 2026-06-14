@@ -5,10 +5,10 @@
 // many = unresolved variants (tabs). Nothing is edited or deleted in
 // place: "update"/"delete"/"merge" are new versions. See docs/BLOCKS.md.
 //
-// Mapping onto db.Entry: Scope = channel, Author = writer, Type =
+// Mapping onto db.Frame: Scope = channel, Author = writer, Type =
 // "block.<blockType>" (cleartext, indexed for search), Payload = the op
 // (bid, op, parents, pos, content). The version-DAG (op.parents = entry
-// IDs) is distinct from the per-author log chain (Entry.Prev).
+// IDs) is distinct from the per-author frame chain (Frame.Prev).
 package blocks
 
 import (
@@ -229,7 +229,7 @@ func (m *Manager) Blocks(channel string) []*Block {
 		// fold from scratch.
 		cf = &scopeFold{vec: db.VersionVector{}, seen: map[string]bool{}, by: map[string]*acc{}}
 		m.cache[channel] = cf
-		foldInto(cf, m.db.Entries(channel))
+		foldInto(cf, m.db.Frames(channel))
 		cf.blocks = buildBlocks(channel, cf.by)
 		cf.vec = cur
 		return cf.blocks
@@ -246,9 +246,9 @@ func (m *Manager) Blocks(channel string) []*Block {
 
 // foldInto accumulates entries into cf (skipping non-block types and already-
 // seen IDs). Returns true if any new block entry was folded.
-func foldInto(cf *scopeFold, entries []*db.Entry) bool {
+func foldInto(cf *scopeFold, frames []*db.Frame) bool {
 	changed := false
-	for _, e := range entries {
+	for _, e := range frames {
 		if !strings.HasPrefix(e.Type, typePrefix) || cf.seen[e.ID] {
 			continue
 		}

@@ -19,8 +19,8 @@ type Bus interface {
 
 // Bus message types.
 const (
-	typePull   = "db.pull"   // Request: {scope, have} → reply: []*Entry the asker lacks
-	typePush   = "db.push"   // Notify: one *Entry, sent eagerly on local commit
+	typePull   = "db.pull"   // Request: {scope, have} → reply: []*Frame the asker lacks
+	typePush   = "db.push"   // Notify: one *Frame, sent eagerly on local commit
 	typeScopes = "db.scopes" // Request: nil → reply: []string of the peer's scopes
 )
 
@@ -79,7 +79,7 @@ func (s *Sync) onPull(_ string, payload []byte) ([]byte, error) {
 // onPush ingests an eagerly-pushed entry. On a gap (Apply fails because an
 // earlier seq is missing) it pulls the scope from the sender to fill in.
 func (s *Sync) onPush(from string, payload []byte) ([]byte, error) {
-	var e Entry
+	var e Frame
 	if err := json.Unmarshal(payload, &e); err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (s *Sync) onPush(from string, payload []byte) ([]byte, error) {
 
 // Push fans a freshly-committed entry to all reachable peers (best-effort;
 // anyone offline catches up later via pull).
-func (s *Sync) Push(e *Entry) {
+func (s *Sync) Push(e *Frame) {
 	payload, err := json.Marshal(e)
 	if err != nil {
 		return
@@ -111,7 +111,7 @@ func (s *Sync) PullScope(ctx context.Context, pub, scope string) error {
 	if err != nil {
 		return err
 	}
-	var entries []*Entry
+	var entries []*Frame
 	if err := json.Unmarshal(resp, &entries); err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func (s *Sync) PullAll(ctx context.Context) {
 
 // applyInOrder applies entries respecting each author's seq chain (sort by
 // author then seq) so prev-links resolve; gaps just skip that author's tail.
-func applyInOrder(svc *Service, entries []*Entry) {
+func applyInOrder(svc *Service, entries []*Frame) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Author != entries[j].Author {
 			return entries[i].Author < entries[j].Author

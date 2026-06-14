@@ -17,16 +17,16 @@ type VersionVector map[string]uint64
 type Store interface {
 	// Append validates and stores e. Idempotent on a known ID. Errors on
 	// a bad signature, a seq gap, or a prev-hash that breaks the chain.
-	Append(e *Entry) error
+	Append(e *Frame) error
 	// Head returns the author's latest entry in scope (nil if none).
-	Head(scope, author string) *Entry
-	// Entries returns every entry in scope in a deterministic total order
+	Head(scope, author string) *Frame
+	// Frames returns every entry in scope in a deterministic total order
 	// (Lamport, then ID) — the order apps fold over.
-	Entries(scope string) []*Entry
+	Frames(scope string) []*Frame
 	// Vector returns the per-author max seq for scope.
 	Vector(scope string) VersionVector
 	// Since returns entries in scope beyond what `have` covers.
-	Since(scope string, have VersionVector) []*Entry
+	Since(scope string, have VersionVector) []*Frame
 	// Scopes lists every scope with at least one entry.
 	Scopes() []string
 	// MaxLamport returns the highest Lamport across all stored entries (0 if
@@ -38,19 +38,19 @@ type Store interface {
 // MemStore is an in-memory Store. Safe for concurrent use.
 type MemStore struct {
 	mu     sync.Mutex
-	scopes map[string]*scopeLog
+	scopes map[string]*scopeFrames
 }
 
-type scopeLog struct {
-	byID     map[string]*Entry   // ID → entry (idempotency)
-	byAuthor map[string][]*Entry // author → entries in seq order
+type scopeFrames struct {
+	byID     map[string]*Frame   // ID → entry (idempotency)
+	byAuthor map[string][]*Frame // author → entries in seq order
 }
 
 func NewMemStore() *MemStore {
-	return &MemStore{scopes: map[string]*scopeLog{}}
+	return &MemStore{scopes: map[string]*scopeFrames{}}
 }
 
-func (m *MemStore) Append(e *Entry) error {
+func (m *MemStore) Append(e *Frame) error {
 	if err := e.verify(); err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func (m *MemStore) Append(e *Entry) error {
 	defer m.mu.Unlock()
 	sl := m.scopes[e.Scope]
 	if sl == nil {
-		sl = &scopeLog{byID: map[string]*Entry{}, byAuthor: map[string][]*Entry{}}
+		sl = &scopeFrames{byID: map[string]*Frame{}, byAuthor: map[string][]*Frame{}}
 		m.scopes[e.Scope] = sl
 	}
 	if _, dup := sl.byID[e.ID]; dup {
@@ -82,7 +82,7 @@ func (m *MemStore) Append(e *Entry) error {
 	return nil
 }
 
-func (m *MemStore) Head(scope, author string) *Entry {
+func (m *MemStore) Head(scope, author string) *Frame {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sl := m.scopes[scope]
@@ -96,10 +96,10 @@ func (m *MemStore) Head(scope, author string) *Entry {
 	return c[len(c)-1]
 }
 
-func (m *MemStore) Entries(scope string) []*Entry {
+func (m *MemStore) Frames(scope string) []*Frame {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return sortedEntries(m.scopes[scope])
+	return sortedFrames(m.scopes[scope])
 }
 
 func (m *MemStore) Vector(scope string) VersionVector {
@@ -118,14 +118,14 @@ func (m *MemStore) Vector(scope string) VersionVector {
 	return vv
 }
 
-func (m *MemStore) Since(scope string, have VersionVector) []*Entry {
+func (m *MemStore) Since(scope string, have VersionVector) []*Frame {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sl := m.scopes[scope]
 	if sl == nil {
 		return nil
 	}
-	var out []*Entry
+	var out []*Frame
 	for author, c := range sl.byAuthor {
 		from := have[author]
 		for _, e := range c {
@@ -134,7 +134,7 @@ func (m *MemStore) Since(scope string, have VersionVector) []*Entry {
 			}
 		}
 	}
-	sortEntries(out)
+	sortFrames(out)
 	return out
 }
 
@@ -163,23 +163,23 @@ func (m *MemStore) Scopes() []string {
 	return out
 }
 
-// sortedEntries flattens a scope's per-author chains into one
+// sortedFrames flattens a scope's per-author chains into one
 // deterministic order.
-func sortedEntries(sl *scopeLog) []*Entry {
+func sortedFrames(sl *scopeFrames) []*Frame {
 	if sl == nil {
 		return nil
 	}
-	out := make([]*Entry, 0, len(sl.byID))
+	out := make([]*Frame, 0, len(sl.byID))
 	for _, e := range sl.byID {
 		out = append(out, e)
 	}
-	sortEntries(out)
+	sortFrames(out)
 	return out
 }
 
-// sortEntries imposes the canonical total order: Lamport asc, then ID.
+// sortFrames imposes the canonical total order: Lamport asc, then ID.
 // Causal order (app-level parent refs) is a refinement apps apply on top.
-func sortEntries(es []*Entry) {
+func sortFrames(es []*Frame) {
 	sort.Slice(es, func(i, j int) bool {
 		if es[i].Lamport != es[j].Lamport {
 			return es[i].Lamport < es[j].Lamport
