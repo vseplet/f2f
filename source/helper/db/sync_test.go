@@ -83,6 +83,32 @@ func TestSyncPull(t *testing.T) {
 	}
 }
 
+// TestSyncScopeDiscovery: B joins after A already has a scope and was never
+// pushed it. PullAll must discover the scope via db.scopes and pull it in.
+func TestSyncScopeDiscovery(t *testing.T) {
+	net := &fakeNet{nodes: map[string]*fakeNode{}}
+	a, b := net.node("A"), net.node("B")
+	sa, sb := New(NewMemStore()), New(NewMemStore())
+	NewSync(sa, a).Register()
+	syncB := NewSync(sb, b)
+	syncB.Register()
+
+	id, _ := identity.Generate()
+	// A populates a scope B has never heard of, with no live push to B.
+	for _, body := range []string{"a", "b", "c"} {
+		if _, err := sa.Commit(id, "note:*/general", "block.text", []byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(sb.Scopes()) != 0 {
+		t.Fatalf("B should know no scopes yet, has %v", sb.Scopes())
+	}
+	syncB.PullAll(context.Background())
+	if got := len(sb.Entries("note:*/general")); got != 3 {
+		t.Fatalf("B got %d entries after discovery, want 3", got)
+	}
+}
+
 func TestSyncPush(t *testing.T) {
 	net := &fakeNet{nodes: map[string]*fakeNode{}}
 	a, b := net.node("A"), net.node("B")

@@ -19,8 +19,9 @@ type Bus interface {
 
 // Bus message types.
 const (
-	typePull = "db.pull" // Request: {scope, have} → reply: []*Entry the asker lacks
-	typePush = "db.push" // Notify: one *Entry, sent eagerly on local commit
+	typePull   = "db.pull"   // Request: {scope, have} → reply: []*Entry the asker lacks
+	typePush   = "db.push"   // Notify: one *Entry, sent eagerly on local commit
+	typeScopes = "db.scopes" // Request: nil → reply: []string of the peer's scopes
 )
 
 // Sync replicates the log between peers by anti-entropy: pull (ask a peer
@@ -38,6 +39,27 @@ func NewSync(svc *Service, bus Bus) *Sync { return &Sync{svc: svc, bus: bus} }
 func (s *Sync) Register() {
 	s.bus.Handle(typePull, s.onPull)
 	s.bus.Handle(typePush, s.onPush)
+	s.bus.Handle(typeScopes, s.onScopes)
+}
+
+// onScopes answers a peer's "which scopes do you have" — lets a peer that
+// joined late discover scopes it has never seen and pull them.
+func (s *Sync) onScopes(_ string, _ []byte) ([]byte, error) {
+	return json.Marshal(s.svc.Scopes())
+}
+
+// remoteScopes asks a peer for its scope list (empty on an un-upgraded peer
+// that lacks the handler — caller falls back to its own scopes).
+func (s *Sync) remoteScopes(ctx context.Context, pub string) []string {
+	resp, err := s.bus.Request(ctx, pub, typeScopes, nil)
+	if err != nil {
+		return nil
+	}
+	var scopes []string
+	if json.Unmarshal(resp, &scopes) != nil {
+		return nil
+	}
+	return scopes
 }
 
 type pullReq struct {
@@ -97,11 +119,22 @@ func (s *Sync) PullScope(ctx context.Context, pub, scope string) error {
 	return nil
 }
 
-// PullAll pulls every scope we know about from every reachable peer.
+// PullAll pulls from every reachable peer. For each peer it unions our scopes
+// with that peer's (discovered via db.scopes), so a scope we've never seen —
+// e.g. a channel's notes created while we were offline — gets discovered and
+// pulled rather than staying invisible forever.
 func (s *Sync) PullAll(ctx context.Context) {
-	for _, scope := range s.svc.Scopes() {
-		for _, pub := range s.bus.Peers() {
-			_ = s.PullScope(ctx, pub, scope)
+	local := s.svc.Scopes()
+	for _, pub := range s.bus.Peers() {
+		scopes := map[string]bool{}
+		for _, sc := range local {
+			scopes[sc] = true
+		}
+		for _, sc := range s.remoteScopes(ctx, pub) {
+			scopes[sc] = true
+		}
+		for sc := range scopes {
+			_ = s.PullScope(ctx, pub, sc)
 		}
 	}
 }
