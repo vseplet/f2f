@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/vseplet/f2f/source/helper/db"
 )
@@ -72,10 +73,34 @@ type Block struct {
 	Deleted bool      `json:"deleted"`
 }
 
-// Manager is the block engine over a db.Service.
-type Manager struct{ db *db.Service }
+// Manager is the block engine over a db.Service. It keeps an incremental fold
+// cache per scope so reads don't re-scan the whole log every time: on each
+// read it detects new entries via the version vector and folds only the delta.
+type Manager struct {
+	db    *db.Service
+	mu    sync.Mutex
+	cache map[string]*scopeFold
+}
 
-func New(d *db.Service) *Manager { return &Manager{db: d} }
+func New(d *db.Service) *Manager { return &Manager{db: d, cache: map[string]*scopeFold{}} }
+
+// acc accumulates one block's versions while folding a scope.
+type acc struct {
+	blockType  string
+	versions   []Version
+	parents    map[string]bool // entry IDs referenced as parents
+	pos        string          // from the latest op carrying a pos (create/move)
+	posLamport uint64
+	parent     string // containing block, from the create op
+}
+
+// scopeFold is the cached, incrementally-maintained fold of one scope.
+type scopeFold struct {
+	vec    db.VersionVector // author→maxSeq we've folded (change detection)
+	seen   map[string]bool  // folded entry IDs (dedupe; Lamport isn't unique)
+	by     map[string]*acc  // bid → accumulator
+	blocks []*Block         // last built output (rebuilt only when by changes)
+}
 
 // Create writes a new block into channel and returns its BID. parent/pos
 // place it within a container/order ("" for both = root, unordered).
@@ -188,31 +213,54 @@ func (m *Manager) Block(channel, bid string) *Block {
 	return nil
 }
 
-// Blocks folds every block in channel from the log. Order: by latest
-// head's Pos then BID. Tombstoned blocks are included with Deleted=true
-// (callers filter as they wish).
+// Blocks folds every block in channel from the log. Order: by latest head's
+// Pos then BID. Tombstoned blocks are included with Deleted=true (callers
+// filter as they wish). Incremental: only entries new since the last call are
+// folded; an unchanged scope returns the cached slice untouched.
+//
+// The returned slice is shared with the cache — callers must not mutate it.
 func (m *Manager) Blocks(channel string) []*Block {
-	type acc struct {
-		blockType  string
-		versions   []Version
-		parents    map[string]bool // entry IDs referenced as parents
-		pos        string          // from the latest op carrying a pos (create/move)
-		posLamport uint64
-		parent     string // containing block, from the create op
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cf := m.cache[channel]
+	cur := m.db.Vector(channel)
+	if cf == nil || regressed(cur, cf.vec) {
+		// First read, or the log shrank/changed under us (e.g. camp switch) —
+		// fold from scratch.
+		cf = &scopeFold{vec: db.VersionVector{}, seen: map[string]bool{}, by: map[string]*acc{}}
+		m.cache[channel] = cf
+		foldInto(cf, m.db.Entries(channel))
+		cf.blocks = buildBlocks(channel, cf.by)
+		cf.vec = cur
+		return cf.blocks
 	}
-	by := map[string]*acc{}
-	for _, e := range m.db.Entries(channel) {
-		if !strings.HasPrefix(e.Type, typePrefix) {
+	if vecEqual(cur, cf.vec) {
+		return cf.blocks // nothing new
+	}
+	if foldInto(cf, m.db.Since(channel, cf.vec)) {
+		cf.blocks = buildBlocks(channel, cf.by)
+	}
+	cf.vec = cur
+	return cf.blocks
+}
+
+// foldInto accumulates entries into cf (skipping non-block types and already-
+// seen IDs). Returns true if any new block entry was folded.
+func foldInto(cf *scopeFold, entries []*db.Entry) bool {
+	changed := false
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Type, typePrefix) || cf.seen[e.ID] {
 			continue
 		}
 		var o op
 		if json.Unmarshal(e.Payload, &o) != nil || o.BID == "" {
 			continue
 		}
-		a := by[o.BID]
+		cf.seen[e.ID] = true
+		a := cf.by[o.BID]
 		if a == nil {
 			a = &acc{parents: map[string]bool{}}
-			by[o.BID] = a
+			cf.by[o.BID] = a
 		}
 		a.blockType = strings.TrimPrefix(e.Type, typePrefix)
 		a.versions = append(a.versions, Version{
@@ -228,8 +276,13 @@ func (m *Manager) Blocks(channel string) []*Block {
 		if o.Pos != "" && e.Lamport >= a.posLamport { // latest pos wins (create or move)
 			a.pos, a.posLamport = o.Pos, e.Lamport
 		}
+		changed = true
 	}
+	return changed
+}
 
+// buildBlocks materializes the output blocks from accumulated state.
+func buildBlocks(channel string, by map[string]*acc) []*Block {
 	out := make([]*Block, 0, len(by))
 	for bid, a := range by {
 		// Heads = versions not superseded by any other version's parents.
@@ -266,6 +319,30 @@ func (m *Manager) Blocks(channel string) []*Block {
 		return out[i].BID < out[j].BID
 	})
 	return out
+}
+
+// regressed reports whether cur lost ground vs old (an author's seq went
+// backwards or vanished) — meaning the underlying store changed and the cache
+// must be rebuilt from scratch.
+func regressed(cur, old db.VersionVector) bool {
+	for a, s := range old {
+		if cur[a] < s {
+			return true
+		}
+	}
+	return false
+}
+
+func vecEqual(a, b db.VersionVector) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func randHex(n int) string {

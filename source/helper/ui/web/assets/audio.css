@@ -2899,6 +2899,7 @@ a.ax-domain-link:hover {
 .ax-nb-meta { display: flex; visibility: hidden; opacity: 0; transition: opacity .12s; gap: 8px; align-items: center; min-height: 14px; font-size: 10px; color: var(--muted); margin-top: 1px; user-select: none; }
 .ax-nb:hover .ax-nb-meta, .ax-nb:focus-within .ax-nb-meta { visibility: visible; opacity: 1; }
 .ax-nb-type { text-transform: uppercase; letter-spacing: 0.04em; }
+.ax-nb-editor { color: var(--muted); }
 .ax-nb-variants { color: #e0a64e; }
 .ax-nb-ctl { margin-left: auto; display: flex; gap: 2px; }
 .ax-nb-ctl button { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 3px; }

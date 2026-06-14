@@ -338,6 +338,8 @@ func run(bind string, console bool, autostart bool) error {
 
 	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
+	// Remote block entries (sync) → live-refresh any open editor in the browser.
+	dbSvc.OnApply(func(e *db.Entry) { srv.NotifyBlockChange(e.Scope) })
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.

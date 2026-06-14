@@ -728,6 +728,46 @@ $(function () {
     }).fail(() => { if (noteConv === conv) $('#note-status').text('load failed'); });
   }
 
+  // refreshPreservingEdit reloads the note WITHOUT disturbing the block the
+  // user is editing: it snapshots the focused editor (which block / inline
+  // draft, its text and caret), repaints everything else, then puts the editor
+  // back. This is what lets a peer's edits to OTHER blocks show up live while
+  // you sit in an open block — the coarse noteEditingNow() guard would just
+  // drop the refresh until you blur or reload.
+  let noteRefreshTimer = null;
+  function refreshPreservingEdit() {
+    clearTimeout(noteRefreshTimer); // coalesce bursts (peer adds several blocks)
+    noteRefreshTimer = setTimeout(() => {
+      const a = document.activeElement;
+      const $ta = a && $(a).hasClass('ax-nb-in') && $(a).closest('#note-blocks').length ? $(a) : null;
+      let snap = null;
+      if ($ta) {
+        const $row = $ta.closest('.ax-nb');
+        snap = {
+          bid: $row.length ? $row.attr('data-bid') : null,
+          idraft: $ta.hasClass('ax-nb-idraft'),
+          pos: $ta.attr('data-pos') || null,
+          val: $ta.val(), start: a.selectionStart, end: a.selectionEnd,
+        };
+      }
+      loadNoteBlocks(() => {
+        if (!snap) return;
+        let el = null;
+        if (snap.bid) {
+          const $row = $('#note-blocks .ax-nb[data-bid="' + snap.bid + '"]');
+          if ($row.length) { editBlock($row); el = $row.find('.ax-nb-text')[0]; }
+        } else if (snap.idraft) {
+          insertDraftAtPos(snap.pos);
+          el = $('#note-blocks .ax-nb-idraft')[0];
+        }
+        if (el) { // restore the user's in-progress text + caret untouched
+          el.value = snap.val; autogrow(el); el.focus();
+          try { el.setSelectionRange(snap.start, snap.end); } catch (_) {}
+        }
+      });
+    }, 120);
+  }
+
   // noteEditingNow guards the background refresh: don't repaint while a block
   // is focused or a save is pending (would eat the cursor / in-flight text).
   function noteEditingNow() {
@@ -759,15 +799,21 @@ $(function () {
     renderView($ed, content);
     const hist = b.history || [];
     const creator = hist.length ? nameForPub(hist[0].author) : (head ? nameForPub(head.author) : '?');
+    const editor = head ? nameForPub(head.author) : (hist.length ? nameForPub(hist[hist.length - 1].author) : '?');
     const nver = hist.length || (head ? 1 : 0);
     const editedTs = head ? head.ts : (hist.length ? hist[hist.length - 1].ts : 0);
+    // Show the last editor only once a block has been revised (otherwise it's
+    // just the creator). Created-by always shows; version history is the vN btn.
+    const editedBy = nver > 1
+      ? '<span class="ax-nb-editor" title="last edited by">✎ ' + esc(editor) + '</span>' : '';
     const variants = (b.heads && b.heads.length > 1)
       ? '<span class="ax-nb-variants" title="concurrent versions">' + b.heads.length + ' variants</span>' : '';
     const $meta = $(
       '<div class="ax-nb-meta">' +
         '<span class="ax-nb-author" title="created by">' + esc(creator) + '</span>' +
         '<span class="ax-nb-vbtn" title="version history">v' + nver + '</span>' +
-        '<span class="ax-nb-time">' + esc(editedTs ? notifWhen(editedTs) : '') + '</span>' +
+        editedBy +
+        '<span class="ax-nb-time" title="last edited">' + esc(editedTs ? notifWhen(editedTs) : '') + '</span>' +
         variants +
         '<span class="ax-nb-ctl">' +
           '<button class="ax-nb-up" title="move up">↑</button>' +
@@ -932,6 +978,20 @@ $(function () {
     autogrow($d[0]);
   }
 
+  // insertDraftAtPos re-inserts an inline draft at a fractional pos after a
+  // re-render (blocks are pos-sorted): place it after the last block whose pos
+  // is below the draft's, else at the top.
+  function insertDraftAtPos(pos) {
+    let $after = null;
+    for (const b of noteBlocks) {
+      if (posNum(b.pos) < posNum(pos)) {
+        const $r = $('#note-blocks .ax-nb[data-bid="' + b.bid + '"]');
+        if ($r.length) $after = $r;
+      } else break;
+    }
+    insertDraftAfter($after, pos);
+  }
+
   // createNoteBlock POSTs a new markdown block, then reloads and opens a fresh
   // draft line after it (Notion-style: keep typing on a new line). Pending
   // edits are flushed first so the reload sees them.
@@ -1020,8 +1080,10 @@ $(function () {
     const $row = $(this).closest('.ax-nb');
     const bid = $row.attr('data-bid');
     const md = $(this).val();
-    if (noteSaveTimers[bid]) { // flush a pending debounced save now
-      clearTimeout(noteSaveTimers[bid]); delete noteSaveTimers[bid];
+    const pending = !!noteSaveTimers[bid];
+    if (pending) { clearTimeout(noteSaveTimers[bid]); delete noteSaveTimers[bid]; }
+    if (!md.trim()) { delNoteBlock(bid); return; } // empty block vanishes on blur
+    if (pending) { // flush a pending debounced save now
       $.ajax({ url: '/api/blocks/update', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md } }) });
     }
     renderView($row.find('.ax-nb-body'), { md });
@@ -1049,7 +1111,9 @@ $(function () {
       insertDraftAfter($row, posAfter(bid));
       return;
     }
-    if (e.key === 'Backspace' && !$(this).hasClass('ax-nb-draft') && !$(this).val() && this.selectionStart === 0 && this.selectionEnd === 0) {
+    // Backspace at the start of an empty block (whitespace-only counts) removes
+    // it in one press — no need to first delete a stray newline.
+    if (e.key === 'Backspace' && !$(this).hasClass('ax-nb-draft') && !$(this).val().trim() && this.selectionStart === 0) {
       e.preventDefault();
       delNoteBlock($(this).closest('.ax-nb').attr('data-bid'));
     }
@@ -1170,6 +1234,21 @@ $(function () {
     es.onerror = () => {}; // EventSource auto-reconnects
   }
   openChatStream();
+
+  // Live-refresh the open note when a peer's block edits sync in. The server
+  // emits {scope} on remote db.Apply. We refresh even while editing, preserving
+  // the block under the caret (refreshPreservingEdit) so a peer's edits to
+  // OTHER blocks appear without waiting for blur or a reload.
+  function openBlocksStream() {
+    const es = new EventSource('/api/blocks/stream');
+    es.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+      if (!m.scope || !noteConv || $('#tab-note').hasClass('hidden')) return;
+      if (m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
+    };
+    es.onerror = () => {}; // EventSource auto-reconnects
+  }
+  openBlocksStream();
   fetchChannels();
 
   // Hash router. Handles conversation routes (channel:<key>, where a bare pub

@@ -178,14 +178,40 @@ func (s *SQLiteStore) Vector(scope string) VersionVector {
 	return vv
 }
 
+// Since returns entries beyond `have`, read per-author via the
+// UNIQUE(scope,author,seq) index — a cheap delta that doesn't scan (or
+// unmarshal) the whole scope, which matters for incremental folding.
 func (s *SQLiteStore) Since(scope string, have VersionVector) []*Entry {
-	all := s.Entries(scope)
-	out := all[:0]
-	for _, e := range all {
-		if e.Seq > have[e.Author] {
-			out = append(out, e)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.connLocked()
+	if err != nil {
+		return nil
+	}
+	ar, err := d.Query(`SELECT DISTINCT author FROM entries WHERE scope=?`, scope)
+	if err != nil {
+		return nil
+	}
+	var authors []string
+	for ar.Next() {
+		var a string
+		if ar.Scan(&a) == nil {
+			authors = append(authors, a)
 		}
 	}
+	ar.Close()
+
+	var out []*Entry
+	for _, a := range authors {
+		rows, err := d.Query(`SELECT id,scope,author,seq,prev,lamport,type,ts,payload,sig
+			FROM entries WHERE scope=? AND author=? AND seq>? ORDER BY seq`, scope, a, have[a])
+		if err != nil {
+			continue
+		}
+		out = append(out, scanEntries(rows)...)
+		rows.Close()
+	}
+	sortEntries(out)
 	return out
 }
 

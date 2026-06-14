@@ -18,11 +18,17 @@ type Service struct {
 	lamport  uint64         // highest Lamport seen across all scopes
 	now      func() int64   // wall-clock ms; injectable for tests
 	onCommit func(e *Entry) // optional hook fired after a local Commit (sync push)
+	onApply  func(e *Entry) // optional hook fired after a remote entry is applied
 }
 
 // OnCommit registers a hook called after each successful local Commit —
 // the sync layer uses it to eagerly push new entries to peers.
 func (svc *Service) OnCommit(fn func(*Entry)) { svc.onCommit = fn }
+
+// OnApply registers a hook called after each remote entry is successfully
+// applied (anti-entropy) — the UI uses it to live-refresh open views, since
+// OnCommit only covers local writes.
+func (svc *Service) OnApply(fn func(*Entry)) { svc.onApply = fn }
 
 // New builds the service over store (use NewMemStore for now).
 func New(store Store) *Service {
@@ -73,11 +79,16 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry,
 // the local Lamport clock and validates+stores via the Store.
 func (svc *Service) Apply(e *Entry) error {
 	svc.mu.Lock()
-	defer svc.mu.Unlock()
 	if e.Lamport > svc.lamport {
 		svc.lamport = e.Lamport
 	}
-	return svc.store.Append(e)
+	err := svc.store.Append(e)
+	hook := svc.onApply
+	svc.mu.Unlock()
+	if err == nil && hook != nil {
+		hook(e) // outside the lock: the hook must not call back into svc
+	}
+	return err
 }
 
 // Entries returns scope's entries in canonical order — apps fold over it.

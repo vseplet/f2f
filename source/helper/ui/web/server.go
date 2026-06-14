@@ -76,6 +76,7 @@ type Server struct {
 
 	signals     *signalHub
 	callSignals *signalHub   // SSE hub for SFU signals → local browser
+	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
@@ -100,6 +101,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
+		blockEvents: newSignalHub(),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -242,6 +244,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/blocks/move", s.handleBlocksMove)
 	mux.HandleFunc("POST /api/blocks/delete", s.handleBlocksDelete)
 	mux.HandleFunc("POST /api/blocks/merge", s.handleBlocksMerge)
+	mux.HandleFunc("GET /api/blocks/stream", s.handleBlocksStream)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
