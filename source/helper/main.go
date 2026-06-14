@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/channels"
 	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
@@ -170,6 +171,7 @@ func run(bind string, console bool, autostart bool) error {
 	// commit; PullAll periodically (below) catches up offline gaps.
 	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
 	blocksMgr := blocks.New(dbSvc)
+	channelsMgr := channels.New(blocksMgr) // channels are blocks in the "channels" scope
 	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
 	dbSync.Register()
 	dbSvc.OnCommit(dbSync.Push)
@@ -444,6 +446,15 @@ func run(bind string, console bool, autostart bool) error {
 			clog.Warn("main", "start bus: %v", err)
 		}
 		gossipSvc.Start() // replicate NodeState across the mesh
+		// Ensure the camp-wide general channel exists (everyone has it). No-op
+		// if already present locally or pulled from a peer.
+		if st.CampID != "" {
+			if id := eng.Identity(); id != nil {
+				if _, err := channelsMgr.EnsureGeneral(id); err != nil {
+					clog.Warn("main", "ensure general channel: %v", err)
+				}
+			}
+		}
 		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID

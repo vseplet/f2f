@@ -103,13 +103,28 @@ type scopeFold struct {
 }
 
 // Create writes a new block into channel and returns its BID. parent/pos
-// place it within a container/order ("" for both = root, unordered).
+// place it within a container/order ("" for both = root, unordered). The BID
+// is namespaced by the creator (NewBID) so independent authors never collide
+// without coordination (Yjs actorId-style); use Upsert for well-known/derived
+// BIDs (general, DMs) that several peers must agree on.
 func (m *Manager) Create(s Signer, channel, blockType string, content json.RawMessage, parent, pos string) (string, error) {
-	bid := randHex(16)
+	bid := NewBID(s.PubHex())
 	if err := m.commit(s, channel, blockType, op{BID: bid, Op: OpCreate, Parent: parent, Pos: pos, Content: content}); err != nil {
 		return "", err
 	}
 	return bid, nil
+}
+
+// NewBID mints a creator-namespaced block id: "<fp16>-<randHex16>", where fp16
+// is the first 16 hex of the author's pub. The fp prefix guarantees distinct
+// authors occupy disjoint id-spaces (no coordination, no collisions); the
+// random suffix makes each of an author's blocks unique.
+func NewBID(pub string) string {
+	fp := pub
+	if len(fp) > 16 {
+		fp = fp[:16]
+	}
+	return fp + "-" + randHex(16)
 }
 
 // Update writes a new version of bid. parents are the version(s) it builds
