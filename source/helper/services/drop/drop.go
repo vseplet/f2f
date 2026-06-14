@@ -34,9 +34,13 @@ import (
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
 )
 
-// busTypeFiles is the bus message type serving our seeded-file catalog
-// to peers.
-const busTypeFiles = "files"
+// busTypeFiles is the bus message type serving our seeded-file catalog to
+// peers. busTypeFilesNext is the namespaced name we're migrating to: accept
+// both during the wire rollout, keep requesting the old one, flip later.
+const (
+	busTypeFiles     = "files"
+	busTypeFilesNext = "drop.files"
+)
 
 // PeerFile is one file entry as published by a peer's /api/files.
 // Path is stripped — peer-facing data only.
@@ -103,7 +107,7 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeFiles, func(fromPub string, _ []byte) ([]byte, error) {
+	filesHandler := func(fromPub string, _ []byte) ([]byte, error) {
 		c := s.Client()
 		if c == nil {
 			return nil, fmt.Errorf("torrent client not running")
@@ -124,7 +128,9 @@ func (s *Service) Register() {
 			})
 		}
 		return json.Marshal(out)
-	})
+	}
+	s.bus.Handle(busTypeFiles, filesHandler)
+	s.bus.Handle(busTypeFilesNext, filesHandler) // accept the new name during rollout
 }
 
 // Start binds the BT client on the overlay v4 alias for the given

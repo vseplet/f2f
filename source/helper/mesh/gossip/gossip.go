@@ -20,7 +20,10 @@ import (
 )
 
 const (
-	msgType       = "gossip"
+	msgType = "gossip"
+	// msgTypeNext is the namespaced name we're migrating to: accept both during
+	// the wire rollout, keep sending the old one, flip later.
+	msgTypeNext   = "gossip.state"
 	announceEvery = 20 * time.Second
 )
 
@@ -72,6 +75,7 @@ type Service struct {
 func New(b *bus.Service, local Source) *Service {
 	s := &Service{bus: b, local: local, peers: make(map[string]NodeState)}
 	b.Handle(msgType, s.handle)
+	b.Handle(msgTypeNext, s.handle) // accept the new name during rollout
 	return s
 }
 

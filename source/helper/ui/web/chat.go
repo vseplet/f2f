@@ -135,6 +135,29 @@ func (s *Server) handleChatNotes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
+// handleChatQuery runs a read-only SQL query against the camp's messenger.db
+// and returns columns + rows. Loopback UI only; read-only is enforced by the
+// store (SQLite mode=ro). A SQL error is returned as a 400 with its text.
+func (s *Server) handleChatQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.SQL == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("sql required"))
+		return
+	}
+	res, err := s.msg.Query(req.SQL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleChatClear wipes a conversation's messages locally (memory + SQLite).
 // Body: {kind, key}. Peers keep their copies — nothing is sent.
 func (s *Server) handleChatClear(w http.ResponseWriter, r *http.Request) {

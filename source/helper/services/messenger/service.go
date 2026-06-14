@@ -18,7 +18,15 @@ import (
 // typeMsg is the single bus message type. Text, channel creation, and
 // membership changes are all messages — distinguished by Message.Type — so
 // there's nothing else to send: a channel is the fold of its messages.
-const typeMsg = "chat.msg"
+//
+// typeMsgNext is the cleaned-up name we're migrating to (a DM is a degenerate
+// channel, so "channel.msg" covers both). During rollout we ACCEPT both names
+// but still SEND the old one, so un-upgraded peers keep working; once every
+// peer is updated, switch sends to typeMsgNext and drop typeMsg.
+const (
+	typeMsg     = "chat.msg"
+	typeMsgNext = "channel.msg"
+)
 
 // GeneralChannelID is the reserved id of the camp-wide "general" channel every
 // peer implicitly belongs to. The "*" owner marks it ownerless: no single peer
@@ -145,6 +153,7 @@ func (s *Service) LoadCamp() {
 // after constructing the bus.
 func (s *Service) Register() {
 	s.bus.Handle(typeMsg, s.onMsg)
+	s.bus.Handle(typeMsgNext, s.onMsg) // accept the new name during the wire rollout
 	go s.flushLoop()
 }
 
@@ -238,6 +247,15 @@ func (s *Service) onMsg(fromPub string, payload []byte) ([]byte, error) {
 	s.append(convKey(m, selfPub), m)
 	s.publish(m)
 	return nil, nil
+}
+
+// Query runs a read-only SQL query against the active camp's messenger.db (for
+// the in-app SQL console). Read-only is enforced at the SQLite engine level.
+func (s *Service) Query(query string) (*QueryResult, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("chat: no store")
+	}
+	return s.store.Query(s.camp(), query)
 }
 
 // ClearConversation wipes a conversation's messages from memory and the local

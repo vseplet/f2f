@@ -6,6 +6,7 @@ package messenger
 // modernc.org/sqlite driver (no cgo) keeps the binary cross-platform.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -440,6 +441,68 @@ func (s *Store) PruneOutbox(campID string, cutoff int64) error {
 	}
 	_, err = db.Exec(`DELETE FROM outbox WHERE ts < ?`, cutoff)
 	return err
+}
+
+// QueryResult is the outcome of a read-only SQL query against a camp's
+// messenger.db — column names plus rows of values (a runaway result set is
+// capped). Used by the in-app SQL console.
+type QueryResult struct {
+	Columns   []string `json:"columns"`
+	Rows      [][]any  `json:"rows"`
+	Truncated bool     `json:"truncated"`
+}
+
+// queryRowCap bounds a console query's result set so a `SELECT *` over a huge
+// channel can't blow up the UI / memory.
+const queryRowCap = 2000
+
+// Query runs an ad-hoc SQL query against campID's database on a READ-ONLY
+// connection (mode=ro) — SQLite rejects any write at the engine level, so no
+// statement parsing is needed and DELETE/UPDATE/DROP simply fail. Bounded by a
+// timeout and a row cap. For the in-app query console (loopback UI only).
+func (s *Store) Query(campID, query string) (*QueryResult, error) {
+	path := filepath.Join(s.campDir(campID), "messenger.db")
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&mode=ro"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("messenger: open ro: %w", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err // surface the SQL error to the user as-is
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	out := &QueryResult{Columns: cols, Rows: [][]any{}}
+	for rows.Next() {
+		if len(out.Rows) >= queryRowCap {
+			out.Truncated = true
+			break
+		}
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok { // []byte → string so JSON is readable
+				vals[i] = string(b)
+			}
+		}
+		out.Rows = append(out.Rows, vals)
+	}
+	return out, rows.Err()
 }
 
 func jsonArr(v []string) string {

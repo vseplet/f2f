@@ -40,8 +40,14 @@ import (
 )
 
 // busTypeDomains is the bus message type serving our published domain
-// catalog to peers.
-const busTypeDomains = "domains"
+// catalog to peers. busTypeDomainsNext is the namespaced name we're migrating
+// to; during the wire rollout we ACCEPT both but still REQUEST the old one, so
+// un-upgraded peers keep answering. Flip the request + drop the old once all
+// peers are updated.
+const (
+	busTypeDomains     = "domains"
+	busTypeDomainsNext = "dns.domains"
+)
 
 // Entry is one (name, port, proto) record this peer publishes inside
 // the camp's <camp>.f2f zone. Port and proto are advisory: DNS only
@@ -199,9 +205,11 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeDomains, func(string, []byte) ([]byte, error) {
+	domainsHandler := func(string, []byte) ([]byte, error) {
 		return json.Marshal(s.MyDomains())
-	})
+	}
+	s.bus.Handle(busTypeDomains, domainsHandler)
+	s.bus.Handle(busTypeDomainsNext, domainsHandler) // accept the new name during rollout
 }
 
 // Start opens the DNS server on a free loopback port, installs the

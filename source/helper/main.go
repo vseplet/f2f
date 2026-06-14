@@ -174,6 +174,7 @@ func run(bind string, console bool, autostart bool) error {
 	notifySvc := notify.New(store.CampDir, func() string { return eng.Status().CampID })
 	defer notifySvc.Close()
 	busSvc.Handle("notify", notifySvc.FromBus)
+	busSvc.Handle("notify.push", notifySvc.FromBus) // new name, accepted during the wire rollout
 
 	// peerName resolves a peer pub to its display name (falls back to a short
 	// fingerprint) from the live roster — used to title presence/chat alerts.

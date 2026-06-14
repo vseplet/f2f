@@ -36,7 +36,12 @@ import (
 // busTypeFirewall is the bus message type serving our allow list to
 // peers. Response shape matches the loopback HTTP endpoint:
 // {"active":…, "builtin":[…], "user":[…]}.
-const busTypeFirewall = "firewall"
+// busTypeFirewallNext is the namespaced name we're migrating to: accept both
+// during the wire rollout, keep requesting the old one, flip later.
+const (
+	busTypeFirewall     = "firewall"
+	busTypeFirewallNext = "firewall.ports"
+)
 
 // ErrEngineNotRunning is returned by SetUserPorts when the engine
 // hasn't been Start'ed yet (no camp loaded → no per-camp config file
@@ -118,13 +123,15 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeFirewall, func(string, []byte) ([]byte, error) {
+	firewallHandler := func(string, []byte) ([]byte, error) {
 		return json.Marshal(map[string]any{
 			"active":  s.Active(),
 			"builtin": s.BuiltinPorts(),
 			"user":    s.UserPorts(),
 		})
-	})
+	}
+	s.bus.Handle(busTypeFirewall, firewallHandler)
+	s.bus.Handle(busTypeFirewallNext, firewallHandler) // accept the new name during rollout
 }
 
 // PeerPorts returns a copy of one peer's most recently-polled

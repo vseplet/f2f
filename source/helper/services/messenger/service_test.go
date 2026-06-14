@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 )
@@ -87,6 +88,60 @@ func TestRedelivery(t *testing.T) {
 	if fb.sent.Load() != 1 {
 		t.Fatalf("sent = %d, want 1", fb.sent.Load())
 	}
+}
+
+// TestRedeliveryIntegration exercises the REAL production path: SendDM while
+// the peer is down must enqueue (async), survive a "restart" (fresh service
+// hydrating the same store), and flush once the peer is back.
+func TestRedeliveryIntegration(t *testing.T) {
+	dir := t.TempDir()
+	st := NewStore(func(id string) string {
+		d := filepath.Join(dir, id)
+		_ = os.MkdirAll(d, 0o755)
+		return d
+	})
+	defer st.Close()
+	fb := &fakeBus{}
+	fb.down.Store(true) // bob is unreachable
+
+	s := newTestService()
+	s.bus, s.store, s.camp = fb, st, func() string { return "c1" }
+
+	// Real send path — deliver runs in a goroutine and enqueues on failure.
+	if _, err := s.SendDM("bob", "hi", nil, "", "", ""); err != nil {
+		t.Fatalf("SendDM: %v", err)
+	}
+	// Wait for the async deliver to fail and queue the item.
+	if !waitFor(func() bool { it, _ := st.Outbox("c1"); return len(it) == 1 }) {
+		it, _ := st.Outbox("c1")
+		t.Fatalf("message not queued after send to down peer: %+v", it)
+	}
+
+	// "Restart": a fresh service on the same store. The outbox must survive and
+	// be retried by this new instance's flush.
+	s2 := newTestService()
+	s2.bus, s2.store, s2.camp = fb, st, func() string { return "c1" }
+	s2.LoadCamp()
+	fb.down.Store(false) // bob is back
+
+	s2.flush("")
+	if it, _ := st.Outbox("c1"); len(it) != 0 {
+		t.Fatalf("outbox not drained after restart+flush: %+v", it)
+	}
+	if fb.sent.Load() != 1 {
+		t.Fatalf("redelivered count = %d, want 1", fb.sent.Load())
+	}
+}
+
+// waitFor polls cond up to ~2s. Async deliver goroutines need a moment.
+func waitFor(cond func() bool) bool {
+	for i := 0; i < 200; i++ {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return cond()
 }
 
 func TestPersistAndLoad(t *testing.T) {

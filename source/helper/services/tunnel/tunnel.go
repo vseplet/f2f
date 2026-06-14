@@ -45,7 +45,12 @@ import (
 // its corporate VPN, etc.). As a side effect the handler prepares
 // per-target egress NAT for the resolved IPs, so a follow-up
 // intercept route through this node actually reaches them.
-const busTypeResolve = "resolve"
+// busTypeResolveNext is the namespaced name we're migrating to: accept both
+// during the wire rollout, keep requesting the old one, flip later.
+const (
+	busTypeResolve     = "resolve"
+	busTypeResolveNext = "tunnel.resolve"
+)
 
 // InterceptInfo describes one intercept entry — the spec the user
 // typed, the host routes it owns on the local route table, and the
@@ -112,7 +117,7 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	s.bus.Handle(busTypeResolve, func(fromPub string, payload []byte) ([]byte, error) {
+	resolveHandler := func(fromPub string, payload []byte) ([]byte, error) {
 		name := strings.ToLower(strings.TrimSpace(string(payload)))
 		if name == "" || len(name) > 253 || !isDomainSpec(name) {
 			return nil, fmt.Errorf("bad resolve name %q", name)
@@ -140,7 +145,9 @@ func (s *Service) Register() {
 		}
 		clog.Info("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
 		return json.Marshal(out)
-	})
+	}
+	s.bus.Handle(busTypeResolve, resolveHandler)
+	s.bus.Handle(busTypeResolveNext, resolveHandler) // accept the new name during rollout
 }
 
 // Start picks up the active camp_id, restores every (spec, peer)
