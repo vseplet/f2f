@@ -2885,6 +2885,9 @@ a.ax-domain-link:hover {
 }
 .ax-nb-heading { font-size: 20px; font-weight: 700; line-height: 1.3; }
 .ax-nb-in::placeholder { color: var(--muted); }
+/* An inline draft has no meta line under it; reserve the same space a block's
+   (hidden) meta line does, so the gap to the block below matches the rhythm. */
+.ax-nb-idraft { margin-bottom: 15px; }
 .ax-nb-todo { display: flex; align-items: flex-start; gap: 8px; }
 .ax-nb-todo .ax-nb-done { margin-top: 6px; flex: 0 0 auto; }
 .ax-nb-todotext { flex: 1; }

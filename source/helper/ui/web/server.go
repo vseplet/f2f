@@ -244,7 +244,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/blocks/move", s.handleBlocksMove)
 	mux.HandleFunc("POST /api/blocks/delete", s.handleBlocksDelete)
 	mux.HandleFunc("POST /api/blocks/merge", s.handleBlocksMerge)
-	mux.HandleFunc("GET /api/blocks/stream", s.handleBlocksStream)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)

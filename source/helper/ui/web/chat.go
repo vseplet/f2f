@@ -382,8 +382,18 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This is the single always-on server→browser push stream. Chat messages,
+	// block-change events (remote db sync) and notifications all ride it, so a
+	// browser keeps ONE long-lived SSE instead of several — extra persistent
+	// connections starve the per-host connection budget on HTTP/1.1, which left
+	// some streams silently unconnected. (Only call signalling and the diag log
+	// stream stay separate: occasional, special-purpose.)
 	ch, unsubscribe := s.msg.Subscribe(64)
 	defer unsubscribe()
+	bch, bunsub := s.blockEvents.subscribe()
+	defer bunsub()
+	nch, nunsub := s.notify.Subscribe()
+	defer nunsub()
 
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
@@ -405,6 +415,20 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+		case data, ok := <-bch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data) // {"type":"blocks","scope":...}
+			flusher.Flush()
+		case n, ok := <-nch:
+			if !ok {
+				return
+			}
+			if nb, err := json.Marshal(n); err == nil {
+				fmt.Fprintf(w, "data: {\"type\":\"notif\",\"n\":%s}\n\n", nb)
+				flusher.Flush()
+			}
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()

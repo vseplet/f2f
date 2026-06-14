@@ -4,56 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 )
 
 // NotifyBlockChange announces (to connected browsers) that a block scope
 // changed because of remote sync, so an open editor can live-refresh. Wired
 // from db.Service.OnApply in main; local edits update the UI optimistically
-// and don't need this.
+// and don't need this. Delivered over the chat SSE stream (see
+// handleChatStream) to avoid a second persistent connection per browser.
 func (s *Server) NotifyBlockChange(scope string) {
-	data, err := json.Marshal(map[string]string{"scope": scope})
+	data, err := json.Marshal(map[string]string{"type": "blocks", "scope": scope})
 	if err != nil {
 		return
 	}
 	s.blockEvents.broadcast(data)
-}
-
-// GET /api/blocks/stream — SSE of {scope} events on remote block changes.
-func (s *Server) handleBlocksStream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	ch, unsubscribe := s.blockEvents.subscribe()
-	defer unsubscribe()
-
-	keepalive := time.NewTicker(20 * time.Second)
-	defer keepalive.Stop()
-	fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case data, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		case <-keepalive.C:
-			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
-		}
-	}
 }
 
 // Block API over services/blocks — drives the block (Notion-style) editor.

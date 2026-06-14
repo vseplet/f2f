@@ -268,17 +268,8 @@ $(function () {
     };
   }
 
-  (function notifStream() {
-    let es;
-    try { es = new EventSource('/api/notifications/stream'); } catch (_) { return; }
-    es.onmessage = function (e) {
-      let n; try { n = JSON.parse(e.data); } catch (_) { return; }
-      notifications.unshift(n);
-      if (notifications.length > 200) notifications.length = 200;
-      renderNotifications();
-      osNotify(n);
-    };
-  })();
+  // Notifications arrive over the unified chat stream (type:'notif') — see
+  // openChatStream — so there's no separate EventSource here.
   setInterval(renderNotifications, 30000); // refresh relative timestamps
 
   // Category collapse: click the row toggles .collapsed on the category;
@@ -1193,6 +1184,21 @@ $(function () {
     const es = new EventSource('/api/chat/stream');
     es.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+      // Block-change event (remote db sync) rides this stream — live-refresh the
+      // open note, preserving the block under the caret. Not a chat message.
+      if (m.type === 'blocks') {
+        if (m.scope && noteConv && !$('#tab-note').hasClass('hidden') && m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
+        return;
+      }
+      // Notification events ride this stream too (one connection for all push).
+      if (m.type === 'notif') {
+        const n = m.n;
+        notifications.unshift(n);
+        if (notifications.length > 200) notifications.length = 200;
+        renderNotifications();
+        osNotify(n);
+        return;
+      }
       const key = m.kind === 'channel' ? m.peer : (m.mine ? m.to : m.from);
       // A channel lifecycle event may have created/changed/removed a channel
       // — refresh the list so it (dis)appears.
@@ -1233,22 +1239,7 @@ $(function () {
     };
     es.onerror = () => {}; // EventSource auto-reconnects
   }
-  openChatStream();
-
-  // Live-refresh the open note when a peer's block edits sync in. The server
-  // emits {scope} on remote db.Apply. We refresh even while editing, preserving
-  // the block under the caret (refreshPreservingEdit) so a peer's edits to
-  // OTHER blocks appear without waiting for blur or a reload.
-  function openBlocksStream() {
-    const es = new EventSource('/api/blocks/stream');
-    es.onmessage = (e) => {
-      let m; try { m = JSON.parse(e.data); } catch (_) { return; }
-      if (!m.scope || !noteConv || $('#tab-note').hasClass('hidden')) return;
-      if (m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
-    };
-    es.onerror = () => {}; // EventSource auto-reconnects
-  }
-  openBlocksStream();
+  openChatStream(); // block-change events ride this same stream (type:'blocks')
   fetchChannels();
 
   // Hash router. Handles conversation routes (channel:<key>, where a bare pub
