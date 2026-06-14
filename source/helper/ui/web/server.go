@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/blocks"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -32,6 +33,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/firewall"
 	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
+	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
@@ -67,15 +69,18 @@ type Server struct {
 	gossip   *gossip.Service
 	shell    *shell.Service
 	vnc      *vnc.Service
+	oidc     *oidc.Service
+	blocks   *blocks.Manager
 	addr     string
 	srv      *http.Server
 
 	signals     *signalHub
 	callSignals *signalHub   // SSE hub for SFU signals → local browser
+	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -91,9 +96,12 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		gossip:      gossipSvc,
 		shell:       shellSvc,
 		vnc:         vncSvc,
+		oidc:        oidcSvc,
+		blocks:      blocksMgr,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
+		blockEvents: newSignalHub(),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -227,6 +235,15 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("POST /api/chat/clear", s.handleChatClear)
 	mux.HandleFunc("POST /api/chat/query", s.handleChatQuery)
+	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
+	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
+	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
+	mux.HandleFunc("GET /api/blocks", s.handleBlocksList)
+	mux.HandleFunc("POST /api/blocks", s.handleBlocksCreate)
+	mux.HandleFunc("POST /api/blocks/update", s.handleBlocksUpdate)
+	mux.HandleFunc("POST /api/blocks/move", s.handleBlocksMove)
+	mux.HandleFunc("POST /api/blocks/delete", s.handleBlocksDelete)
+	mux.HandleFunc("POST /api/blocks/merge", s.handleBlocksMerge)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)

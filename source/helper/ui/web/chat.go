@@ -100,19 +100,45 @@ func (s *Server) handleChatLeaveChannel(w http.ResponseWriter, r *http.Request) 
 
 // handleChatGetNotes returns a conversation's shared notes doc.
 // Query: key=<channel id | peer pub>.
+// noteDoc mirrors the old messenger.NoteDoc JSON so the notes UI is
+// unchanged. Notes are now a block: a single "note" text block per
+// conversation scope, in the db log, synced by db anti-entropy.
+type noteDoc struct {
+	Scope string `json:"scope"`
+	Body  string `json:"body"`
+	TS    int64  `json:"ts"`
+	By    string `json:"by"`
+}
+
+const noteBID = "note" // singleton notes block per conversation scope
+
+func (s *Server) noteDocFor(scope string) noteDoc {
+	d := noteDoc{Scope: scope}
+	b := s.blocks.Block(scope, noteBID)
+	if b == nil || len(b.Heads) == 0 {
+		return d
+	}
+	h := b.Heads[len(b.Heads)-1] // latest head = deterministic default of any variants
+	var c struct {
+		Md string `json:"md"`
+	}
+	_ = json.Unmarshal(h.Content, &c)
+	d.Body, d.TS, d.By = c.Md, h.TS, h.Author
+	return d
+}
+
 func (s *Server) handleChatGetNotes(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
 		return
 	}
-	writeJSON(w, http.StatusOK, s.msg.Notes(key))
+	writeJSON(w, http.StatusOK, s.noteDocFor(key))
 }
 
-// handleChatNotes sets a conversation's shared notes document. Body:
-// {key, body} where key is a channel id or a peer pub (a DM is a channel too).
-// Any participant may edit; the write fans out to the conversation and
-// converges last-writer-wins.
+// handleChatNotes sets a conversation's notes (the "note" block in that
+// scope). Any member may edit; concurrent edits become block variants and
+// converge via the block engine. The commit is pushed to peers by db sync.
 func (s *Server) handleChatNotes(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key  string `json:"key"`
@@ -127,12 +153,19 @@ func (s *Server) handleChatNotes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
 		return
 	}
-	doc, err := s.msg.SetNotes(req.Key, req.Body)
-	if err != nil {
+	id := s.engine.Identity()
+	if id == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("not in a camp"))
+		return
+	}
+	content, _ := json.Marshal(struct {
+		Md string `json:"md"`
+	}{req.Body})
+	if err := s.blocks.Upsert(id, req.Key, noteBID, "text", content); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, doc)
+	writeJSON(w, http.StatusOK, s.noteDocFor(req.Key))
 }
 
 // handleChatQuery runs a read-only SQL query against the camp's messenger.db
@@ -349,8 +382,18 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This is the single always-on server→browser push stream. Chat messages,
+	// block-change events (remote db sync) and notifications all ride it, so a
+	// browser keeps ONE long-lived SSE instead of several — extra persistent
+	// connections starve the per-host connection budget on HTTP/1.1, which left
+	// some streams silently unconnected. (Only call signalling and the diag log
+	// stream stay separate: occasional, special-purpose.)
 	ch, unsubscribe := s.msg.Subscribe(64)
 	defer unsubscribe()
+	bch, bunsub := s.blockEvents.subscribe()
+	defer bunsub()
+	nch, nunsub := s.notify.Subscribe()
+	defer nunsub()
 
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
@@ -372,6 +415,20 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+		case data, ok := <-bch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data) // {"type":"blocks","scope":...}
+			flusher.Flush()
+		case n, ok := <-nch:
+			if !ok {
+				return
+			}
+			if nb, err := json.Marshal(n); err == nil {
+				fmt.Fprintf(w, "data: {\"type\":\"notif\",\"n\":%s}\n\n", nb)
+				flusher.Flush()
+			}
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
