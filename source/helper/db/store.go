@@ -29,6 +29,10 @@ type Store interface {
 	Since(scope string, have VersionVector) []*Entry
 	// Scopes lists every scope with at least one entry.
 	Scopes() []string
+	// MaxLamport returns the highest Lamport across all stored entries (0 if
+	// empty) — used to reseed the logical clock after a restart so new local
+	// writes never collide with persisted ones.
+	MaxLamport() uint64
 }
 
 // MemStore is an in-memory Store. Safe for concurrent use.
@@ -132,6 +136,20 @@ func (m *MemStore) Since(scope string, have VersionVector) []*Entry {
 	}
 	sortEntries(out)
 	return out
+}
+
+func (m *MemStore) MaxLamport() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var max uint64
+	for _, sl := range m.scopes {
+		for _, e := range sl.byID {
+			if e.Lamport > max {
+				max = e.Lamport
+			}
+		}
+	}
+	return max
 }
 
 func (m *MemStore) Scopes() []string {

@@ -52,6 +52,37 @@ func TestCommitChain(t *testing.T) {
 	}
 }
 
+// TestLamportSurvivesRestart: a fresh Service over a populated store must not
+// stamp new writes below persisted Lamports (the in-memory clock resets to 0
+// on restart) — else the new edit folds as "older" than the version it
+// supersedes and the UI shows stale content until reload.
+func TestLamportSurvivesRestart(t *testing.T) {
+	store := NewMemStore()
+	id := mustID(t)
+
+	svc := New(store)
+	svc.now = func() int64 { return 1 }
+	var last uint64
+	for i := 0; i < 5; i++ {
+		e, err := svc.Commit(id, "doc:1", "block.update", []byte("x"))
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		last = e.Lamport
+	}
+
+	// Simulate a restart: brand-new Service (lamport=0) over the same store.
+	svc2 := New(store)
+	svc2.now = func() int64 { return 1 }
+	e, err := svc2.Commit(id, "doc:1", "block.update", []byte("y"))
+	if err != nil {
+		t.Fatalf("post-restart commit: %v", err)
+	}
+	if e.Lamport <= last {
+		t.Fatalf("lamport regressed after restart: had %d, got %d", last, e.Lamport)
+	}
+}
+
 // TestReplication: B catches up from A via Since(have) + Apply, converging.
 func TestReplication(t *testing.T) {
 	a := newSvc(t)

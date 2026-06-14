@@ -13,11 +13,16 @@ import (
 // writes, accepts replicated entries from peers, and can dump/import the
 // whole DB for sharing.
 type Service struct {
-	mu      sync.Mutex
-	store   Store
-	lamport uint64       // highest Lamport seen across all scopes
-	now     func() int64 // wall-clock ms; injectable for tests
+	mu       sync.Mutex
+	store    Store
+	lamport  uint64         // highest Lamport seen across all scopes
+	now      func() int64   // wall-clock ms; injectable for tests
+	onCommit func(e *Entry) // optional hook fired after a local Commit (sync push)
 }
+
+// OnCommit registers a hook called after each successful local Commit —
+// the sync layer uses it to eagerly push new entries to peers.
+func (svc *Service) OnCommit(fn func(*Entry)) { svc.onCommit = fn }
 
 // New builds the service over store (use NewMemStore for now).
 func New(store Store) *Service {
@@ -38,6 +43,12 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry,
 		seq = head.Seq + 1
 		prev = head.ID
 	}
+	// Reseed the logical clock from the store so a restart (lamport resets to
+	// 0 in memory) never stamps a new write below persisted ones — otherwise
+	// the fresh edit sorts as "older" and the fold shows stale content.
+	if m := svc.store.MaxLamport(); m > svc.lamport {
+		svc.lamport = m
+	}
 	svc.lamport++
 	e := &Entry{
 		Scope:   scope,
@@ -51,6 +62,9 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Entry,
 	e.sign(s)
 	if err := svc.store.Append(e); err != nil {
 		return nil, err
+	}
+	if svc.onCommit != nil {
+		svc.onCommit(e)
 	}
 	return e, nil
 }

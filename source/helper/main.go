@@ -20,9 +20,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/blocks"
 	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/camp"
@@ -161,6 +163,16 @@ func run(bind string, console bool, autostart bool) error {
 	oidcKeys := oidc.NewSignKeys(oidcDir)
 	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcCreds, oidcClients, oidcKeys)
 	proxySvc := proxy.New(dnsSvc, pkiSvc, oidcPort, busResolver{eng: eng}.PubForIP)
+
+	// Distributed DB substrate: one append-only signed log per camp
+	// (db.sqlite), replicated by anti-entropy over the bus. Block apps
+	// (notes now; docs/tasks/chat later) build on it. Push on every local
+	// commit; PullAll periodically (below) catches up offline gaps.
+	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
+	blocksMgr := blocks.New(dbSvc)
+	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
+	dbSync.Register()
+	dbSvc.OnCommit(dbSync.Push)
 
 	// Messaging — direct messages and channels over the bus, backed by a
 	// per-camp SQLite store for durable history. Identity (our pub) and the
@@ -324,7 +336,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
@@ -499,6 +511,26 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}()
 
+	// db anti-entropy: pull from peers periodically to catch up gaps (push
+	// on commit handles the live path). No-ops when not in a camp / no peers.
+	go func() {
+		t := time.NewTicker(7 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if eng.Status().CampID == "" {
+					continue
+				}
+				c, cancel := context.WithTimeout(ctx, 5*time.Second)
+				dbSync.PullAll(c)
+				cancel()
+			}
+		}
+	}()
+
 	// Bring up the chosen camp (eng.Start → OnStarted → services start).
 	if selErr != nil {
 		clog.Console("camp select: %v", selErr)
@@ -552,6 +584,18 @@ func (b oidcBackend) PeerName(pub string) string {
 	}
 	return ""
 }
+
+// dbBus adapts *bus.Service to db.Bus. The only wrinkle is Handle: db.Bus
+// uses a plain func type (to stay decoupled from mesh/bus), assignable to
+// bus.HandlerFunc here.
+type dbBus struct{ b *bus.Service }
+
+func (a dbBus) Handle(typ string, fn func(string, []byte) ([]byte, error)) { a.b.Handle(typ, fn) }
+func (a dbBus) Request(ctx context.Context, pub, typ string, payload []byte) ([]byte, error) {
+	return a.b.Request(ctx, pub, typ, payload)
+}
+func (a dbBus) Notify(pub, typ string, payload []byte) error { return a.b.Notify(pub, typ, payload) }
+func (a dbBus) Peers() []string                              { return a.b.Peers() }
 
 type busResolver struct{ eng *engine.Engine }
 

@@ -614,10 +614,9 @@ $(function () {
       chatChannels = Array.isArray(list) ? list : [];
       if (lastStatus && typeof renderSidebarTree === 'function') renderSidebarTree(lastStatus);
       if (!$('#chat-members-panel').hasClass('hidden')) renderMembersPanel();
-      // Refresh the open notes editor — renderNote keeps unsaved edits (so
-      // this fills the editor on first paint after a reload, once the list
-      // arrives, and reflects remote edits otherwise).
-      if (noteConv && !$('#tab-note').hasClass('hidden')) renderNote();
+      // Refresh the open notes editor once the channel list arrives — skipped
+      // while editing (noteEditingNow) so it never eats in-progress text.
+      if (noteConv && !$('#tab-note').hasClass('hidden') && !noteEditingNow()) loadNoteBlocks();
     });
   }
 
@@ -683,11 +682,15 @@ $(function () {
   // not a dropdown — a clean full-pane editor (whitepaper-style). A DM is a
   // channel too, so DMs carry notes as well; the doc is fetched/saved by scope
   // (channel id or peer pub). Edits debounce-save (last-writer-wins).
-  let noteConv = null;       // scope of the open note, or null
-  let noteSaveTimer = null;
-  let noteDirty = false;     // unsaved local edits — guards against clobbering
-  let noteDoc = null;        // last doc from the server: {scope, body, ts, by}
-  let notePreview = false;   // true → show rendered markdown instead of the editor
+  let noteConv = null;            // conversation scope of the open note, or null
+  let noteBlocks = [];            // last loaded blocks for the open note
+  const noteSaveTimers = {};      // bid → debounce timer for block edits
+  // Undo/redo stack for block deletions. Delete is a tombstone version, so undo
+  // = write the prior content back (revives the block), redo = re-tombstone.
+  // Each entry: {bid, content}. Cleared when switching conversations.
+  let noteUndo = [];
+  let noteRedo = [];
+  function noteScopeOf(conv) { return 'note:' + conv; } // db scope for a conversation's notes
 
   // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
   // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
@@ -699,91 +702,348 @@ $(function () {
     return nameForPub(scope) + ' · notes';
   }
 
-  function openNote(scope, preview) {
+  function openNote(scope) {
     noteConv = scope;
-    noteDirty = false;
-    noteDoc = null;
-    notePreview = !!preview;
+    noteBlocks = [];
+    noteUndo = []; noteRedo = [];
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-note').removeClass('hidden');
     $('#note-title').text(noteTitle(scope));
     $('#note-status').text('loading…');
-    $('#note-text').val('');
-    fetchNote(scope);
-    if (!notePreview) setTimeout(() => $('#note-text').focus(), 0);
+    $('#note-blocks').empty();
+    loadNoteBlocks();
   }
 
-  // fetchNote loads the doc for a scope from the backend, then paints it.
-  function fetchNote(scope) {
-    $.getJSON('/api/chat/notes?key=' + encodeURIComponent(scope), (doc) => {
-      if (noteConv !== scope) return; // navigated away mid-flight
-      noteDoc = doc || {};
-      renderNote();
-    }).fail(() => { if (noteConv === scope) $('#note-status').text('load failed'); });
-  }
-
-  // renderNote paints the editor from the fetched doc. It mirrors the server
-  // copy UNLESS there are unsaved local edits — so it reflects remote edits
-  // without ever eating what you're typing.
-  function renderNote() {
+  // loadNoteBlocks fetches the conversation's note blocks and paints them.
+  function loadNoteBlocks(cb) {
     if (!noteConv) return;
-    $('#note-title').text(noteTitle(noteConv));
-    $('#note-status').text(noteDoc && noteDoc.by ? 'last edit · ' + nameForPub(noteDoc.by) : '');
-    // Mode toggle reflects the current view: an eye to enter preview, a pencil
-    // to return to editing.
-    $('#note-mode')
-      .html(notePreview ? '<i class="bi bi-pencil-fill"></i>' : '<i class="bi bi-eye-fill"></i>')
-      .attr('title', notePreview ? 'edit' : 'preview');
-    if (notePreview) {
-      // Render the live content (unsaved edits included) as full markdown.
-      const src = noteDirty ? $('#note-text').val() : ((noteDoc && noteDoc.body) || '');
-      const $pv = $('#note-preview');
-      $pv.html(window.f2fRich ? f2fRich.markdown(src) : esc(src)).removeClass('hidden');
-      if (window.f2fRich) f2fRich.renderDiagrams($pv[0]);
-      $('#note-text').addClass('hidden');
-    } else {
-      $('#note-preview').addClass('hidden').empty();
-      $('#note-text').removeClass('hidden');
-      if (!noteDirty) $('#note-text').val((noteDoc && noteDoc.body) || '');
+    const conv = noteConv;
+    $.getJSON('/api/blocks?channel=' + encodeURIComponent(noteScopeOf(conv)), (list) => {
+      if (noteConv !== conv) return; // navigated away
+      noteBlocks = (list || []).filter((b) => !b.deleted);
+      renderNoteBlocks();
+      $('#note-status').text(noteBlocks.length + (noteBlocks.length === 1 ? ' block' : ' blocks'));
+      if (typeof cb === 'function') cb();
+    }).fail(() => { if (noteConv === conv) $('#note-status').text('load failed'); });
+  }
+
+  // noteEditingNow guards the background refresh: don't repaint while a block
+  // is focused or a save is pending (would eat the cursor / in-flight text).
+  function noteEditingNow() {
+    if (Object.keys(noteSaveTimers).length) return true;
+    const a = document.activeElement;
+    return !!(a && $(a).closest('#note-blocks').length);
+  }
+
+  function autogrow(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+
+  function renderNoteBlocks() {
+    const $c = $('#note-blocks');
+    $c.empty();
+    for (const b of noteBlocks) $c.append(noteBlockRow(b));
+    // Trailing draft line — type + Enter to add a block (Notion-style, no buttons).
+    const ph = noteBlocks.length ? 'type to add a block…' : 'empty — type to start…';
+    $c.append($('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-draft').attr('placeholder', ph));
+    $c.find('textarea').each(function () { autogrow(this); });
+  }
+
+  // noteBlockRow builds one editable block + its meta line (type · author ·
+  // version · variant count). The latest head is the default shown.
+  function noteBlockRow(b) {
+    const head = (b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
+    const content = (head && head.content) || {};
+    const $row = $('<div class="ax-nb"></div>').attr('data-bid', b.bid);
+    // Every block is markdown: rendered by default, click → raw-markdown edit.
+    const $ed = $('<div class="ax-nb-body"></div>');
+    renderView($ed, content);
+    const hist = b.history || [];
+    const creator = hist.length ? nameForPub(hist[0].author) : (head ? nameForPub(head.author) : '?');
+    const nver = hist.length || (head ? 1 : 0);
+    const editedTs = head ? head.ts : (hist.length ? hist[hist.length - 1].ts : 0);
+    const variants = (b.heads && b.heads.length > 1)
+      ? '<span class="ax-nb-variants" title="concurrent versions">' + b.heads.length + ' variants</span>' : '';
+    const $meta = $(
+      '<div class="ax-nb-meta">' +
+        '<span class="ax-nb-author" title="created by">' + esc(creator) + '</span>' +
+        '<span class="ax-nb-vbtn" title="version history">v' + nver + '</span>' +
+        '<span class="ax-nb-time">' + esc(editedTs ? notifWhen(editedTs) : '') + '</span>' +
+        variants +
+        '<span class="ax-nb-ctl">' +
+          '<button class="ax-nb-up" title="move up">↑</button>' +
+          '<button class="ax-nb-down" title="move down">↓</button>' +
+          '<button class="ax-nb-del" title="delete">✕</button>' +
+        '</span></div>');
+    return $row.append($ed, $meta);
+  }
+
+  // renderView paints a text/heading block as RENDERED markdown (full
+  // markdown incl. code highlighting + mermaid via f2fRich) — the default
+  // when not editing. Stashes the raw md for the click-to-edit swap.
+  function renderView($body, content) {
+    const md = (content && (content.md || content.text)) || '';
+    $body.attr('data-md', md);
+    const inner = md
+      ? (window.f2fRich ? f2fRich.markdown(md) : esc(md))
+      : '<span class="ax-nb-ph">empty — click to edit</span>';
+    $body.html('<div class="ax-nb-view ax-md">' + inner + '</div>');
+    if (window.f2fRich && f2fRich.renderDiagrams) f2fRich.renderDiagrams($body[0]); // code + mermaid
+  }
+
+  // editBlock swaps a rendered block to a raw-markdown textarea, focused.
+  function editBlock($row) {
+    const $body = $row.find('.ax-nb-body');
+    const md = $body.attr('data-md') || '';
+    const $ta = $('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-text').val(md);
+    $body.empty().append($ta);
+    $ta.focus();
+    autogrow($ta[0]);
+    placeCaretEnd($ta[0]);
+  }
+
+  // toggleHistory shows/hides a block's version list under its meta line. Each
+  // row is one immutable version (newest first): vK · author · time. Clicking a
+  // row previews that version with restore/current actions.
+  function toggleHistory($row) {
+    const $existing = $row.find('.ax-nb-hist');
+    if ($existing.length) { $existing.remove(); return; }
+    // close any other open history panel first
+    $('#note-blocks .ax-nb-hist').remove();
+    const bid = $row.attr('data-bid');
+    const b = noteBlocks.find((x) => x.bid === bid);
+    const hist = (b && b.history) || [];
+    const $h = $('<div class="ax-nb-hist"></div>');
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const v = hist[i];
+      const head = (b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
+      const isCurrent = head && head.entry_id === v.entry_id;
+      const $r = $('<div class="ax-nb-hrow"></div>')
+        .attr('data-entry', v.entry_id)
+        .toggleClass('ax-nb-hcur', !!isCurrent);
+      $r.html(
+        '<span class="ax-nb-hver">v' + (i + 1) + '</span>' +
+        '<span class="ax-nb-hauthor">' + esc(nameForPub(v.author)) + '</span>' +
+        '<span class="ax-nb-hop">' + esc(v.op || '') + '</span>' +
+        '<span class="ax-nb-htime">' + esc(v.ts ? notifWhen(v.ts) : '') + '</span>' +
+        (isCurrent ? '<span class="ax-nb-hcur-tag">current</span>' : ''));
+      $h.append($r);
     }
+    $row.find('.ax-nb-meta').after($h);
   }
 
-  function saveNote(scope, body) {
-    $('#note-status').text('saving…');
+  // previewVersion paints a chosen historical version into the block body with
+  // a banner offering restore (write it as a new head) or back-to-current.
+  function previewVersion($row, entryId) {
+    const bid = $row.attr('data-bid');
+    const b = noteBlocks.find((x) => x.bid === bid);
+    if (!b) return;
+    const v = (b.history || []).find((x) => x.entry_id === entryId);
+    if (!v) return;
+    const $body = $row.find('.ax-nb-body');
+    $row.attr('data-viewing', entryId);
+    renderView($body, v.content || {});
+    $body.find('.ax-nb-view').prepend(
+      '<div class="ax-nb-vbanner">viewing an old version · ' +
+        '<button class="ax-nb-restore">restore</button>' +
+        '<button class="ax-nb-current">back to current</button></div>');
+  }
+
+  // restoreVersion writes the previewed version's content as a new head.
+  function restoreVersion($row) {
+    const bid = $row.attr('data-bid');
+    const entryId = $row.attr('data-viewing');
+    const b = noteBlocks.find((x) => x.bid === bid);
+    const v = b && (b.history || []).find((x) => x.entry_id === entryId);
+    if (!v) return;
     $.ajax({
-      url: '/api/chat/notes', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ key: scope, body }),
-    }).done((doc) => {
-      if (noteConv !== scope) return;
-      noteDoc = doc || noteDoc;
-      // Clear dirty only if no edit happened during the request (the textarea
-      // still holds exactly what we sent) — otherwise a newer edit is pending.
-      if ($('#note-text').val() === body) noteDirty = false;
-      $('#note-status').text('saved');
-    }).fail((xhr) => { if (noteConv === scope) $('#note-status').text('save failed: ' + errorOf(xhr)); });
+      url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: v.content || {} }),
+    }).done(() => loadNoteBlocks());
   }
 
-  // Debounced auto-save on every edit (whitepaper-style — no save button).
-  $('#note-text').on('input', function () {
+  // showCurrent drops the preview and repaints the latest head.
+  function showCurrent($row) {
+    const bid = $row.attr('data-bid');
+    const b = noteBlocks.find((x) => x.bid === bid);
+    $row.removeAttr('data-viewing');
+    const head = (b && b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
+    renderView($row.find('.ax-nb-body'), (head && head.content) || {});
+  }
+
+  // saveBlock debounce-saves one block (update over current heads; concurrent
+  // edits resolve as the engine merges heads).
+  function saveBlock(bid, content) {
+    const conv = noteConv;
+    clearTimeout(noteSaveTimers[bid]);
+    noteSaveTimers[bid] = setTimeout(() => {
+      delete noteSaveTimers[bid];
+      $.ajax({
+        url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ channel: noteScopeOf(conv), bid, content }),
+      });
+    }, 500);
+  }
+
+  // fractional positions over zero-padded numbers (gap 1000 leaves room to
+  // insert between neighbours without re-indexing).
+  function posNum(s) { return parseInt(s || '0', 10) || 0; }
+  function posPad(n) { return String(n).padStart(8, '0'); }
+  function posEnd() { let m = 0; for (const b of noteBlocks) { const n = posNum(b.pos); if (n > m) m = n; } return posPad(m + 1000); }
+  function posAfter(bid) {
+    const i = noteBlocks.findIndex((b) => b.bid === bid);
+    if (i < 0) return posEnd();
+    const a = posNum(noteBlocks[i].pos);
+    const b = i + 1 < noteBlocks.length ? posNum(noteBlocks[i + 1].pos) : a + 2000;
+    return posPad(Math.floor((a + b) / 2));
+  }
+  function placeCaretEnd(el) { if (el && el.setSelectionRange) { const n = el.value.length; el.setSelectionRange(n, n); } }
+
+  // flushNoteSaves sends any pending debounced block edits NOW (reading the
+  // live textarea value) and returns a promise that resolves once they land.
+  // Callers that reload the list must wait on it, else the GET races the save
+  // and paints stale content (the edit only appears after a manual reload).
+  function flushNoteSaves() {
+    const reqs = [];
+    for (const bid of Object.keys(noteSaveTimers)) {
+      clearTimeout(noteSaveTimers[bid]);
+      delete noteSaveTimers[bid];
+      const $ta = $('#note-blocks .ax-nb[data-bid="' + bid + '"] .ax-nb-text');
+      if (!$ta.length) continue;
+      reqs.push($.ajax({
+        url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md: $ta.val() } }),
+      }));
+    }
+    return reqs.length ? $.when.apply($, reqs) : $.Deferred().resolve().promise();
+  }
+
+  // createNoteBlock POSTs a new markdown block, then reloads and focuses it.
+  // Pending edits are flushed first so the reload sees them. (Types come
+  // later; for now every note block is markdown text.)
+  function createNoteBlock(content, pos) {
     if (!noteConv) return;
-    noteDirty = true;
-    const body = $(this).val();
-    $('#note-status').text('editing…');
-    clearTimeout(noteSaveTimer);
-    noteSaveTimer = setTimeout(() => saveNote(noteConv, body), 600);
+    const conv = noteConv;
+    flushNoteSaves().always(() => {
+      $.ajax({
+        url: '/api/blocks', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ channel: noteScopeOf(conv), type: 'text', content, pos }),
+      }).done((r) => {
+        const bid = r && r.bid;
+        loadNoteBlocks(() => {
+          const el = $('#note-blocks .ax-nb[data-bid="' + bid + '"] .ax-nb-in').first()[0];
+          if (el) { el.focus(); placeCaretEnd(el); } else $('#note-blocks .ax-nb-draft').focus();
+        });
+      }).fail((x) => $('#note-status').text('add failed: ' + errorOf(x)));
+    });
+  }
+
+  function delNoteBlock(bid, fromRedo) {
+    if (!noteConv) return;
+    // Snapshot current content so the delete can be undone (revived).
+    const b = noteBlocks.find((x) => x.bid === bid);
+    const head = (b && b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
+    if (b) {
+      noteUndo.push({ bid, content: (head && head.content) || {} });
+      if (!fromRedo) noteRedo = [];
+    }
+    $.ajax({
+      url: '/api/blocks/delete', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: noteScopeOf(noteConv), bid }),
+    }).done(() => loadNoteBlocks());
+  }
+
+  // undoDelete revives the last deleted block (writes its prior content over the
+  // tombstone head). redoDelete re-tombstones it. Both keep the stacks paired.
+  function undoDelete() {
+    const e = noteUndo.pop();
+    if (!e) { $('#note-status').text('nothing to undo'); return; }
+    noteRedo.push(e);
+    $.ajax({
+      url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: noteScopeOf(noteConv), bid: e.bid, content: e.content }),
+    }).done(() => loadNoteBlocks());
+  }
+  function redoDelete() {
+    const e = noteRedo.pop();
+    if (!e) { $('#note-status').text('nothing to redo'); return; }
+    delNoteBlock(e.bid, true);
+  }
+
+  // moveNoteBlock reorders by swapping pos with the neighbour.
+  function moveNoteBlock(bid, dir) {
+    const i = noteBlocks.findIndex((b) => b.bid === bid);
+    if (i < 0) return;
+    const j = dir < 0 ? i - 1 : i + 1;
+    if (j < 0 || j >= noteBlocks.length) return;
+    const conv = noteConv, a = noteBlocks[i], b = noteBlocks[j];
+    const mv = (id, pos) => $.ajax({ url: '/api/blocks/move', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(conv), bid: id, pos }) });
+    $.when(mv(a.bid, b.pos), mv(b.bid, a.pos)).always(loadNoteBlocks);
+  }
+
+  // --- block editor wiring (Notion-style: keyboard-driven, no buttons) ---
+  // Every block is markdown text (types come later). Edit → debounce-save.
+  $('#note-blocks').on('input', '.ax-nb-text', function () {
+    autogrow(this);
+    saveBlock($(this).closest('.ax-nb').attr('data-bid'), { md: $(this).val() });
   });
+  $('#note-blocks').on('input', '.ax-nb-draft', function () { autogrow(this); });
+  // Click a rendered block → edit it; blur → flush save + render back. Don't
+  // open the editor while previewing a historical version (banner buttons act).
+  $('#note-blocks').on('click', '.ax-nb-view', function (e) {
+    if ($(e.target).closest('.ax-nb-vbanner').length) return; // banner button
+    const $row = $(this).closest('.ax-nb');
+    if ($row.attr('data-viewing')) return;
+    editBlock($row);
+  });
+  // Version history: toggle the panel, preview a version, restore / current.
+  $('#note-blocks').on('click', '.ax-nb-vbtn', function () { toggleHistory($(this).closest('.ax-nb')); });
+  $('#note-blocks').on('click', '.ax-nb-hrow', function () { previewVersion($(this).closest('.ax-nb'), $(this).attr('data-entry')); });
+  $('#note-blocks').on('click', '.ax-nb-restore', function (e) { e.stopPropagation(); restoreVersion($(this).closest('.ax-nb')); });
+  $('#note-blocks').on('click', '.ax-nb-current', function (e) { e.stopPropagation(); showCurrent($(this).closest('.ax-nb')); });
+  $('#note-blocks').on('blur', '.ax-nb-text', function () {
+    const $row = $(this).closest('.ax-nb');
+    const bid = $row.attr('data-bid');
+    const md = $(this).val();
+    if (noteSaveTimers[bid]) { // flush a pending debounced save now
+      clearTimeout(noteSaveTimers[bid]); delete noteSaveTimers[bid];
+      $.ajax({ url: '/api/blocks/update', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md } }) });
+    }
+    renderView($row.find('.ax-nb-body'), { md });
+  });
+  // Enter = new block; Shift+Enter = newline (default). Backspace on an empty
+  // block at the start deletes it.
+  $('#note-blocks').on('keydown', '.ax-nb-text, .ax-nb-draft', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if ($(this).hasClass('ax-nb-draft')) {
+        const v = $(this).val().trim();
+        if (v) createNoteBlock({ md: v }, posEnd());
+        return;
+      }
+      createNoteBlock({ md: '' }, posAfter($(this).closest('.ax-nb').attr('data-bid')));
+      return;
+    }
+    if (e.key === 'Backspace' && !$(this).hasClass('ax-nb-draft') && !$(this).val() && this.selectionStart === 0 && this.selectionEnd === 0) {
+      e.preventDefault();
+      delNoteBlock($(this).closest('.ax-nb').attr('data-bid'));
+    }
+  });
+  $('#note-blocks').on('click', '.ax-nb-del', function () { delNoteBlock($(this).closest('.ax-nb').attr('data-bid')); });
+  // Undo/redo for deletions while the notes view is open.
+  $(document).on('keydown', function (e) {
+    if (noteConv === null || $('#tab-note').hasClass('hidden')) return;
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+    e.preventDefault();
+    if (e.shiftKey) redoDelete(); else undoDelete();
+  });
+  $('#note-blocks').on('click', '.ax-nb-up', function () { moveNoteBlock($(this).closest('.ax-nb').attr('data-bid'), -1); });
+  $('#note-blocks').on('click', '.ax-nb-down', function () { moveNoteBlock($(this).closest('.ax-nb').attr('data-bid'), 1); });
 
   // Open a channel's notes from the hover icon on its sidebar row.
   $('#ax-tree').on('click', '.ax-tree-note', function (e) {
     e.stopPropagation();
     const id = $(this).attr('data-note');
     if (id) location.hash = noteRoute(id);
-  });
-  // Toggle the notes view between edit and rendered-markdown preview (the mode
-  // rides in the URL as a ":preview" suffix).
-  $('#note-mode').on('click', function () {
-    if (noteConv) location.hash = noteRoute(noteConv) + (notePreview ? '' : ':preview');
   });
   // Back from the notes view to its conversation.
   $('#note-back').on('click', function () {
@@ -843,11 +1103,10 @@ $(function () {
       // A channel lifecycle event may have created/changed/removed a channel
       // — refresh the list so it (dis)appears.
       if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
-      // A notes edit mutates the conversation's shared doc, not the feed:
-      // re-fetch if its scope is the one we're viewing, and never render it as
-      // a chat line. (key, computed above, is the conversation scope.)
+      // Legacy notes-over-bus messages (notes are now blocks synced via db):
+      // never render them as a chat line; refresh the block editor if open.
       if (m.type === 'notes') {
-        if (noteConv && noteConv === key && !$('#tab-note').hasClass('hidden')) fetchNote(noteConv);
+        if (noteConv && noteConv === key && !$('#tab-note').hasClass('hidden') && !noteEditingNow()) loadNoteBlocks();
         return;
       }
       // The open channel was deleted (or we left) → close the view.
@@ -940,18 +1199,13 @@ $(function () {
       location.hash = '';
       return;
     }
-    // note:<id> → the conversation's shared notes in the main pane; a trailing
-    // ":preview" suffix renders markdown instead of the editor.
+    // note:<id> → the conversation's block-based notes in the main pane.
     const nm = h.match(/^note:(.+)$/);
     if (nm) {
-      let key = nm[1], preview = false;
-      const pm = key.match(/^(.+):preview$/);
-      if (pm) { key = pm[1]; preview = true; }
-      if (key === GENERAL_ID) { location.hash = noteRoute(GENERAL_ID) + (preview ? ':preview' : ''); return; }
+      let key = nm[1].replace(/:preview$/, ''); // tolerate old preview links
       if (key === 'general') key = GENERAL_ID;
-      // Same note already open → just switch mode (keep unsaved edits, no refetch).
-      if (noteConv === key && !$('#tab-note').hasClass('hidden')) { notePreview = preview; renderNote(); return; }
-      openNote(key, preview);
+      if (noteConv === key && !$('#tab-note').hasClass('hidden')) return; // already open
+      openNote(key);
       return;
     }
     // A conversation: channel:<key>, optionally with a thread suffix

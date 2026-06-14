@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/blocks"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -69,6 +70,7 @@ type Server struct {
 	shell    *shell.Service
 	vnc      *vnc.Service
 	oidc     *oidc.Service
+	blocks   *blocks.Manager
 	addr     string
 	srv      *http.Server
 
@@ -77,7 +79,7 @@ type Server struct {
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -94,6 +96,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		shell:       shellSvc,
 		vnc:         vncSvc,
 		oidc:        oidcSvc,
+		blocks:      blocksMgr,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
@@ -233,6 +236,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
 	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
 	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
+	mux.HandleFunc("GET /api/blocks", s.handleBlocksList)
+	mux.HandleFunc("POST /api/blocks", s.handleBlocksCreate)
+	mux.HandleFunc("POST /api/blocks/update", s.handleBlocksUpdate)
+	mux.HandleFunc("POST /api/blocks/move", s.handleBlocksMove)
+	mux.HandleFunc("POST /api/blocks/delete", s.handleBlocksDelete)
+	mux.HandleFunc("POST /api/blocks/merge", s.handleBlocksMerge)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
