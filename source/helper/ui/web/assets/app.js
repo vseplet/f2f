@@ -917,9 +917,24 @@ $(function () {
     return reqs.length ? $.when.apply($, reqs) : $.Deferred().resolve().promise();
   }
 
-  // createNoteBlock POSTs a new markdown block, then reloads and focuses it.
-  // Pending edits are flushed first so the reload sees them. (Types come
-  // later; for now every note block is markdown text.)
+  // insertDraftAfter drops a TRANSIENT, unsaved editing line right after a row
+  // (or at the top if none). Empty blocks are never written to the log — only
+  // when the draft gets text + Enter does a real block get created at its pos.
+  // The pos is stashed on the element so the eventual create lands in place.
+  function insertDraftAfter($afterRow, pos) {
+    $('#note-blocks .ax-nb-idraft').remove(); // at most one inline draft
+    const $d = $('<textarea rows="1" spellcheck="false"></textarea>')
+      .addClass('ax-nb-in ax-nb-draft ax-nb-idraft')
+      .attr('placeholder', 'type…').attr('data-pos', pos);
+    if ($afterRow && $afterRow.length) $afterRow.after($d);
+    else $('#note-blocks').prepend($d);
+    $d[0].focus();
+    autogrow($d[0]);
+  }
+
+  // createNoteBlock POSTs a new markdown block, then reloads and opens a fresh
+  // draft line after it (Notion-style: keep typing on a new line). Pending
+  // edits are flushed first so the reload sees them.
   function createNoteBlock(content, pos) {
     if (!noteConv) return;
     const conv = noteConv;
@@ -930,8 +945,9 @@ $(function () {
       }).done((r) => {
         const bid = r && r.bid;
         loadNoteBlocks(() => {
-          const el = $('#note-blocks .ax-nb[data-bid="' + bid + '"] .ax-nb-in').first()[0];
-          if (el) { el.focus(); placeCaretEnd(el); } else $('#note-blocks .ax-nb-draft').focus();
+          const $row = $('#note-blocks .ax-nb[data-bid="' + bid + '"]');
+          if ($row.length) insertDraftAfter($row, posAfter(bid));
+          else $('#note-blocks .ax-nb-draft').last().focus();
         });
       }).fail((x) => $('#note-status').text('add failed: ' + errorOf(x)));
     });
@@ -1010,23 +1026,37 @@ $(function () {
     }
     renderView($row.find('.ax-nb-body'), { md });
   });
-  // Enter = new block; Shift+Enter = newline (default). Backspace on an empty
-  // block at the start deletes it.
+  // Enter = new line below; Shift+Enter = newline within the block. We never
+  // persist empties: Enter on a block collapses it back to a view and opens a
+  // transient draft line below; the draft only becomes a real block once it
+  // has text. Backspace on an empty block at the start deletes it.
   $('#note-blocks').on('keydown', '.ax-nb-text, .ax-nb-draft', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if ($(this).hasClass('ax-nb-draft')) {
         const v = $(this).val().trim();
-        if (v) createNoteBlock({ md: v }, posEnd());
+        const pos = $(this).attr('data-pos') || posEnd();
+        if (v) createNoteBlock({ md: v }, pos);
+        else if ($(this).hasClass('ax-nb-idraft')) $(this).remove(); // empty inline draft → discard
         return;
       }
-      createNoteBlock({ md: '' }, posAfter($(this).closest('.ax-nb').attr('data-bid')));
+      // Editing an existing block: flush it, render it back, open a draft below.
+      const $row = $(this).closest('.ax-nb');
+      const bid = $row.attr('data-bid');
+      const md = $(this).val();
+      flushNoteSaves();
+      renderView($row.find('.ax-nb-body'), { md });
+      insertDraftAfter($row, posAfter(bid));
       return;
     }
     if (e.key === 'Backspace' && !$(this).hasClass('ax-nb-draft') && !$(this).val() && this.selectionStart === 0 && this.selectionEnd === 0) {
       e.preventDefault();
       delNoteBlock($(this).closest('.ax-nb').attr('data-bid'));
     }
+  });
+  // An inline draft left empty just vanishes — nothing is written to the log.
+  $('#note-blocks').on('blur', '.ax-nb-idraft', function () {
+    if (!$(this).val().trim()) $(this).remove();
   });
   $('#note-blocks').on('click', '.ax-nb-del', function () { delNoteBlock($(this).closest('.ax-nb').attr('data-bid')); });
   // Undo/redo for deletions while the notes view is open.

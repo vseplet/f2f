@@ -2943,6 +2943,9 @@ a.ax-domain-link:hover {
 .ax-md h2 { font-size: 1.4em; }
 .ax-md h3 { font-size: 1.2em; }
 .ax-md h1, .ax-md h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+/* Note blocks: each heading is its own block, so the GitHub-style underline
+   reads as a divider between blocks — drop it there (keep it in chat). */
+.ax-note-blocks .ax-md h1, .ax-note-blocks .ax-md h2 { border-bottom: none; padding-bottom: 0; }
 .ax-md blockquote { margin: 0.5em 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .ax-md hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
 .ax-md table { border-collapse: collapse; margin: 0.5em 0; }
