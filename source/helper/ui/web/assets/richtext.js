@@ -87,12 +87,21 @@
     return '<pre class="ax-mermaid">' + escape(src) + '</pre>';
   }
 
+  // A ```sandbox fence is a runnable HTML/JS cell. Like mermaid, it's emitted as
+  // a placeholder carrying its source as TEXT (DOMPurify-safe); the notes view
+  // turns it into a SANDBOXED iframe post-insert (see mountSandboxes in app.js).
+  // Messages just show the source — they never auto-run peer code.
+  function sandboxBlock(src) {
+    return '<pre class="ax-sandbox">' + escape(src) + '</pre>';
+  }
+
   // blockFor dispatches a fenced block to its renderer by language tag. Shared
   // by the top-level fence parser AND marked's code renderer (so code inside a
   // ```md block is highlighted / a mermaid fence inside it still draws).
   function blockFor(lang, code) {
     lang = (lang || '').trim().toLowerCase().split(/\s+/)[0];
     if (lang === 'mermaid') return mermaidBlock(code);
+    if (lang === 'sandbox' || lang === 'html-run') return sandboxBlock(code);
     if (lang === 'md' || lang === 'markdown') return mdBlock(code);
     return codeBlock(lang, code);
   }

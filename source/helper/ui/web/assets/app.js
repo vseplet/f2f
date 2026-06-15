@@ -339,6 +339,8 @@ $(function () {
   const DEFAULT_QUERY =
     "SELECT scope, type, substr(author,1,8) AS author, seq, lamport\n  FROM frames\n ORDER BY lamport DESC\n LIMIT 50;";
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
+  let chatPending = [];       // staged (not yet sent) attachment File objects
+  let chatPendingUrls = [];   // object URLs for staged image thumbnails, revoked on clear
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
   const chatUnread = {};      // conversation key → unread count
@@ -576,6 +578,7 @@ $(function () {
     $m.html(html || '<div class="ax-msg-system">no messages yet</div>');
     $m.scrollTop($m[0].scrollHeight);
     if (window.f2fRich) f2fRich.renderDiagrams($m[0]); // turn ```mermaid into SVG
+    mountSandboxes($m[0]); // ```sandbox fences → isolated iframes
     updateTorrentChips(); // paint cached status, then refresh from the backend
     pollTorrents();
   }
@@ -682,7 +685,8 @@ $(function () {
   // not a dropdown — a clean full-pane editor (whitepaper-style). A DM is a
   // channel too, so DMs carry notes as well; the doc is fetched/saved by scope
   // (channel id or peer pub). Edits debounce-save (last-writer-wins).
-  let noteConv = null;            // conversation scope of the open note, or null
+  let noteConv = null;            // conversation key of the open note, or null
+  let noteScope = null;           // resolved db scope ("note:<channelBid>") of the open note
   let noteBlocks = [];            // last loaded blocks for the open note
   const noteSaveTimers = {};      // bid → debounce timer for block edits
   const noteDeleting = {};        // bid → true while a delete+reload is in flight (dedupe)
@@ -692,7 +696,11 @@ $(function () {
   let noteUndo = [];
   let noteRedo = [];
   let notePage = '';              // bid of the open page within the note ('' = root)
-  function noteScopeOf(conv) { return 'note:' + conv; } // db scope for a conversation's notes
+  // The open note's db scope is resolved once per open (via /api/notes/scope,
+  // which runs the SAME chanBID messages use — so a DM resolves to the symmetric
+  // "note:dm-<hash>" both peers share, not each peer's "note:<other-pub>").
+  // Everything operates on the currently-open note, so this returns that scope.
+  function noteScopeOf() { return noteScope; }
 
   // A note is a tree of blocks (Notion-style): text blocks are content, `page`
   // blocks are containers; both nest via the block's parent. The open page shows
@@ -732,8 +740,9 @@ $(function () {
     return nameForPub(scope) + ' · notes';
   }
 
-  function openNote(scope, page) {
-    noteConv = scope;
+  function openNote(conv, page) {
+    noteConv = conv;
+    noteScope = null;
     notePage = page || '';
     noteBlocks = [];
     noteUndo = []; noteRedo = [];
@@ -744,7 +753,17 @@ $(function () {
     $('#note-status').text('loading…');
     $('#note-crumbs').empty();
     $('#note-blocks').empty();
-    loadNoteBlocks();
+    // Resolve the db scope (channel bid) first, then load — a DM keys off the
+    // shared dm bid, not the peer's pub, so both sides see the same notes.
+    resolveNoteScope(conv, () => { if (noteConv === conv) loadNoteBlocks(); });
+  }
+  // resolveNoteScope asks the server for the conversation's note scope (chanBID),
+  // falling back to the legacy "note:<conv>" if the call fails.
+  function resolveNoteScope(conv, cb) {
+    const kind = convKind(conv);
+    $.getJSON('/api/notes/scope?kind=' + encodeURIComponent(kind) + '&key=' + encodeURIComponent(conv))
+      .done((r) => { if (noteConv !== conv) return; noteScope = (r && r.scope) || ('note:' + conv); cb(); })
+      .fail(() => { if (noteConv !== conv) return; noteScope = 'note:' + conv; cb(); });
   }
 
   // loadNoteBlocks fetches the conversation's note blocks and paints them.
@@ -1011,7 +1030,49 @@ $(function () {
       : '<span class="ax-nb-ph">empty — click to edit</span>';
     $body.html('<div class="ax-nb-view ax-md">' + inner + '</div>');
     if (window.f2fRich && f2fRich.renderDiagrams) f2fRich.renderDiagrams($body[0]); // code + mermaid
+    mountSandboxes($body[0]); // ```sandbox fences → isolated iframes (notes only)
   }
+
+  // sandboxDoc wraps a ```sandbox cell's HTML/JS so it runs in a locked-down
+  // iframe: null origin (no allow-same-origin → no access to /api, cookies, the
+  // parent DOM) and a CSP that blocks ALL network (no exfiltration, no remote
+  // code). A tiny reporter posts its height out so the iframe can auto-size.
+  function sandboxDoc(code) {
+    const csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+      "img-src data: blob:; media-src data: blob:; font-src data:;";
+    const reporter = '(function(){function r(){try{parent.postMessage({__sbHeight:' +
+      'document.documentElement.scrollHeight},"*")}catch(e){}}' +
+      'if(window.ResizeObserver){new ResizeObserver(r).observe(document.documentElement)}' +
+      'window.addEventListener("load",r);setTimeout(r,60);setTimeout(r,400);r()})();';
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<meta http-equiv="Content-Security-Policy" content="' + csp + '">' +
+      '<style>html,body{margin:0;padding:8px;font:14px/1.5 system-ui,sans-serif;color:#e6e6e6;background:transparent}' +
+      '*{box-sizing:border-box}</style></head><body>' + code +
+      '<scr' + 'ipt>' + reporter + '</scr' + 'ipt></body></html>';
+  }
+  // mountSandboxes converts ```sandbox placeholders (emitted by richtext) into
+  // sandboxed iframes. Only ever called for notes — messages keep the source.
+  function mountSandboxes(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('pre.ax-sandbox:not([data-done])').forEach((pre) => {
+      pre.setAttribute('data-done', '1');
+      const f = document.createElement('iframe');
+      f.className = 'ax-nb-sandbox';
+      f.setAttribute('sandbox', 'allow-scripts'); // NO allow-same-origin
+      f.setAttribute('referrerpolicy', 'no-referrer');
+      f.srcdoc = sandboxDoc(pre.textContent || ''); // raw code; iframe is isolated
+      pre.replaceWith(f);
+    });
+  }
+  // Height auto-size: each sandbox posts its scrollHeight; match by contentWindow
+  // (the iframe is cross-origin, so origin is "null" — don't check it).
+  window.addEventListener('message', function (e) {
+    const h = e.data && e.data.__sbHeight;
+    if (!h) return;
+    document.querySelectorAll('iframe.ax-nb-sandbox').forEach((f) => {
+      if (f.contentWindow === e.source) f.style.height = Math.min(Math.max(h, 24) + 2, 4000) + 'px';
+    });
+  });
 
   // editBlock swaps a rendered block to a raw-markdown textarea (with a line-
   // number gutter, code-editor style), focused.
@@ -1191,6 +1252,16 @@ $(function () {
   // The pos is stashed on the element so the eventual create lands in place.
   function insertDraftAfter($afterRow, pos) {
     $('#note-blocks .ax-nb-idraft').closest('.ax-nb-editwrap').remove(); // at most one inline draft
+    // Inserting at the very end? Reuse the always-present trailing draft instead
+    // of stacking a second draft line right next to it.
+    if ($afterRow && $afterRow.length && $afterRow.nextAll('.ax-nb').length === 0) {
+      const $tail = $('#note-blocks .ax-nb-draft').last();
+      if ($tail.length) {
+        $tail[0].focus(); autogrow($tail[0]); placeCaretEnd($tail[0]);
+        updateGutter($tail[0]); $tail[0].scrollIntoView({ block: 'nearest' });
+        return;
+      }
+    }
     const $d = $('<textarea rows="1" spellcheck="false"></textarea>')
       .addClass('ax-nb-in ax-nb-draft ax-nb-idraft')
       .attr('placeholder', 'type…').attr('data-pos', pos);
@@ -1222,10 +1293,13 @@ $(function () {
   // createNoteBlock POSTs a new markdown block, then reloads and opens a fresh
   // draft line after it (Notion-style: keep typing on a new line). Pending
   // edits are flushed first so the reload sees them.
+  let noteCreating = false; // guards against a second Enter while a create is in flight
   function createNoteBlock(content, pos) {
-    if (!noteConv) return;
+    if (!noteConv || noteCreating) return;
+    noteCreating = true;
     const conv = noteConv;
     const parent = notePage;
+    $('#note-status').text('saving…');
     flushNoteSaves().always(() => {
       $.ajax({
         url: '/api/notes', method: 'POST', contentType: 'application/json',
@@ -1233,11 +1307,12 @@ $(function () {
       }).done((r) => {
         const bid = r && r.bid;
         loadNoteBlocks(() => {
+          noteCreating = false;
           const $row = $('#note-blocks .ax-nb[data-bid="' + bid + '"]');
           if ($row.length) insertDraftAfter($row, posAfter(bid));
           else $('#note-blocks .ax-nb-draft').last().focus();
         });
-      }).fail((x) => $('#note-status').text('add failed: ' + errorOf(x)));
+      }).fail((x) => { noteCreating = false; $('#note-status').text('add failed: ' + errorOf(x)); });
     });
   }
 
@@ -1440,6 +1515,16 @@ $(function () {
       const pos = inBlock ? posAfter($row.attr('data-bid')) : posEnd();
       uploadNoteFile(dt.files[0], { parent: notePage, pos, place: inBlock ? { after: $row } : null });
     });
+  // Paste an image/file into a note block or draft → attach it at that spot.
+  // Plain-text pastes fall through. The draft's text is preserved (see uploadNoteFile).
+  $('#note-blocks').on('paste', '.ax-nb-in', function (e) {
+    if (!noteConv) return;
+    const files = clipboardFiles(e.originalEvent && e.originalEvent.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    const target = attachTargetFor($(this).closest('.ax-nb-editwrap'));
+    files.forEach((f) => uploadNoteFile(f, target));
+  });
 
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
@@ -1531,12 +1616,19 @@ $(function () {
         // panel (hidden from the timeline) → full redraw. A normal message just
         // appends (cheaper, keeps scroll).
         if (m.edit_id || m.thread) {
-          renderChat(chatMsgs);
+          renderChat(chatMsgs); // full redraw also clears optimistic bubbles
           if (threadRoot && !$('#chat-thread').hasClass('hidden')) renderThread();
         } else {
-          $('#chat-messages').append(msgRow(m, false, 0, false));
+          // Our own echo replaces its optimistic "sending…" bubble IN PLACE
+          // (so it's visible until the message lands, with no flash/duplicate);
+          // everyone else's just appends.
+          const $slot = m.mine ? matchPending(m.body) : $();
+          const $row = $(msgRow(m, false, 0, false));
+          if ($slot.length) $slot.replaceWith($row);
+          else $('#chat-messages').append($row);
           const $m = $('#chat-messages');
           if (window.f2fRich) f2fRich.renderDiagrams($m[0]);
+          mountSandboxes($m[0]);
           $m.scrollTop($m[0].scrollHeight);
           if (m.file && m.file.info_hash) { updateTorrentChips(); pollTorrents(); }
         }
@@ -1650,6 +1742,7 @@ $(function () {
       $('#chat-members').toggle(kind === 'channel'); // members button: channels only
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
+      clearChatPending(); // nor a staged attachment
       loadConversation();
     }
     // Reconcile the thread panel with the URL.
@@ -2062,6 +2155,7 @@ $(function () {
     for (const r of replies) html += msgRow(applyEdit(r, edits), false, 0, true);
     $tm.html(html);
     if (window.f2fRich) f2fRich.renderDiagrams($tm[0]);
+    mountSandboxes($tm[0]);
     // Scroll to the latest reply. Deferred to the next frame: the panel may
     // have just been shown (display flipped), so its flex layout — and thus
     // scrollHeight — isn't final until layout settles.
@@ -2100,20 +2194,86 @@ $(function () {
   // Send: POST to the messenger service; the message comes back on the SSE
   // stream (the backend echoes our own copy), which appends it — so we don't
   // append here, avoiding a duplicate.
+  // appendPending shows an optimistic "sending…" bubble the instant you hit
+  // Enter — so there's immediate feedback and you don't retype (the cause of
+  // duplicate sends). The next full chat redraw (the echoed message arriving
+  // over SSE) replaces it; a failed send marks it instead of silently vanishing.
+  function appendPending(text) {
+    const $m = $('#chat-messages');
+    if (!$m.length) return null;
+    const $b = $('<div class="ax-msg is-mine ax-msg-pending">' +
+      '<div class="ax-msg-text"></div>' +
+      '<div class="ax-msg-pendtag">отправляется…</div></div>').attr('data-pending-body', text);
+    $b.find('.ax-msg-text').html(richBody(text));
+    $m.append($b);
+    $m.scrollTop($m[0].scrollHeight);
+    return $b;
+  }
+  // appendPendingFile is the optimistic bubble for an attachment send: a local
+  // thumbnail (image) or file card + "sending…", replaced in place by the echoed
+  // message. data-pending-body carries the caption so matchPending pairs them.
+  function appendPendingFile(file, caption) {
+    const $m = $('#chat-messages');
+    if (!$m.length) return null;
+    const cap = caption ? '<div class="ax-msg-caption">' + richBody(caption) + '</div>' : '';
+    let inner;
+    if ((file.type || '').indexOf('image/') === 0) {
+      const url = URL.createObjectURL(file); chatBlobUrls.push(url);
+      inner = '<div class="ax-msg-media"><img class="ax-msg-img" src="' + url + '">' + cap + '</div>';
+    } else {
+      inner = '<div class="ax-msg-filecard"><a class="ax-msg-doc">' +
+        '<span class="ax-msg-doc-ic"><i class="bi bi-file-earmark-fill"></i></span>' +
+        '<span class="ax-msg-doc-meta"><span class="ax-msg-doc-name">' + esc(file.name || 'file') + '</span>' +
+        '<span class="ax-msg-doc-sub">' + esc(fmtBytes(file.size || 0)) + '</span></span></a>' + cap + '</div>';
+    }
+    const $b = $('<div class="ax-msg is-mine ax-msg-pending">' + inner +
+      '<div class="ax-msg-pendtag">отправляется…</div></div>').attr('data-pending-body', caption || '');
+    $m.append($b);
+    $m.scrollTop($m[0].scrollHeight);
+    return $b;
+  }
+  // matchPending finds the optimistic bubble an arriving own-message replaces:
+  // the one whose text matches, else the oldest (body may be normalised in
+  // transit) — one own-echo = one staged bubble. Returns an empty set if none.
+  function matchPending(body) {
+    const $all = $('#chat-messages .ax-msg-pending');
+    if (!$all.length) return $();
+    const want = (body || '').trim();
+    const $hit = $all.filter(function () { return ($(this).attr('data-pending-body') || '').trim() === want; }).first();
+    return $hit.length ? $hit : $all.first();
+  }
+
   $('#chat-form').on('submit', function (e) {
     e.preventDefault();
     if (!chatConv) return;
     const $in = $('#chat-input');
     const text = $in.val().trim();
-    if (!text) return;
+    const files = chatPending.slice();
+    if (!text && !files.length) return;
+    const reply_to = replyId(), thread = threadId(), edit_id = editId();
+    // Staged attachments: send each (first carries the typed text as caption).
+    if (files.length) {
+      $in.val(''); autoGrowInput();
+      clearReplyTarget();
+      clearChatPending();
+      files.forEach((f, i) => {
+        const cap = i === 0 ? text : '';
+        appendPendingFile(f, cap); // optimistic "sending…" with a local thumbnail
+        attachFrom(f, cap, { reply_to, thread, edit_id: i === 0 ? edit_id : '' });
+      });
+      return;
+    }
     $in.val('');
     autoGrowInput();
-    const reply_to = replyId(), thread = threadId(), edit_id = editId();
     clearReplyTarget();
+    const $pending = edit_id ? null : appendPending(text); // optimistic, new sends only
     $.ajax({
       url: '/api/messages', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread, edit_id }),
-    }).fail((xhr) => alert('send: ' + errorOf(xhr)));
+    }).fail((xhr) => {
+      if ($pending) $pending.addClass('ax-msg-failed').find('.ax-msg-pendtag').text('не отправлено');
+      alert('send: ' + errorOf(xhr));
+    });
   });
 
   // Composer is a textarea: Enter sends, Shift+Enter inserts a newline (so a
@@ -2187,17 +2347,55 @@ $(function () {
     if (file.size > MAX_ATTACH) sendShare(file, caption, ctx);
     else sendInline(file, caption, ctx);
   }
-  // Main composer attach.
+
+  // Staged attachments for the main composer: picking/pasting a file doesn't
+  // send — it stages a preview chip, and the typed text becomes the caption on
+  // Enter. (The thread composer still sends immediately.) State declared up top
+  // so clearChatPending (called from applyRoute at startup) isn't in the TDZ.
+  function stageChatFiles(files) {
+    if (!chatConv || !files || !files.length) return;
+    for (const f of files) if (f) chatPending.push(f);
+    renderChatPreview();
+    $('#chat-input').focus();
+  }
+  function clearChatPending() {
+    chatPendingUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+    chatPendingUrls = [];
+    chatPending = [];
+    $('#chat-attach-preview').addClass('hidden').empty();
+  }
+  function renderChatPreview() {
+    const $p = $('#chat-attach-preview');
+    chatPendingUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+    chatPendingUrls = [];
+    if (!chatPending.length) { $p.addClass('hidden').empty(); return; }
+    $p.empty().removeClass('hidden');
+    chatPending.forEach((f, i) => {
+      const $chip = $('<div class="ax-chat-att-chip"></div>').attr('data-i', i);
+      if ((f.type || '').indexOf('image/') === 0) {
+        const url = URL.createObjectURL(f); chatPendingUrls.push(url);
+        $chip.append($('<img class="ax-chat-att-thumb">').attr('src', url));
+      } else {
+        $chip.append('<span class="ax-chat-att-ic"><i class="bi bi-file-earmark-fill"></i></span>');
+      }
+      $chip.append($('<span class="ax-chat-att-name"></span>').text(f.name || 'file'));
+      $chip.append($('<span class="ax-chat-att-sz"></span>').text(fmtBytes(f.size || 0)));
+      $chip.append('<button type="button" class="ax-chat-att-x" title="remove">✕</button>');
+      $p.append($chip);
+    });
+  }
+  $('#chat-attach-preview').on('click', '.ax-chat-att-x', function () {
+    const i = parseInt($(this).closest('.ax-chat-att-chip').attr('data-i'), 10);
+    if (i >= 0) chatPending.splice(i, 1);
+    renderChatPreview();
+  });
+
+  // Main composer attach → stage (don't send).
   $('#chat-attach').on('click', function () { if (chatConv) $('#chat-file').trigger('click'); });
   $('#chat-file').on('change', function () {
-    const file = this.files && this.files[0];
+    const files = Array.from(this.files || []);
     this.value = '';
-    if (!file || !chatConv) return;
-    const caption = $('#chat-input').val().trim();
-    $('#chat-input').val(''); autoGrowInput();
-    const ctx = { reply_to: replyId(), thread: threadId(), edit_id: editId() };
-    clearReplyTarget();
-    attachFrom(file, caption, ctx);
+    stageChatFiles(files);
   });
   // Thread composer attach — same flow, scoped to the open thread.
   $('#thread-attach').on('click', function () { if (chatConv && threadRoot) $('#thread-file').trigger('click'); });
@@ -2208,6 +2406,44 @@ $(function () {
     const caption = $('#thread-input').val().trim();
     $('#thread-input').val('');
     attachFrom(file, caption, { thread: threadRoot });
+  });
+
+  // clipboardFiles pulls any files off a paste/drop event. Pasted screenshots
+  // arrive with no filename, so synthesize one from the mime type.
+  function clipboardFiles(cd) {
+    if (!cd) return [];
+    const out = [];
+    if (cd.files && cd.files.length) {
+      for (let i = 0; i < cd.files.length; i++) out.push(cd.files[i]);
+    } else if (cd.items) {
+      for (let i = 0; i < cd.items.length; i++) {
+        const it = cd.items[i];
+        if (it.kind === 'file') { const f = it.getAsFile(); if (f) out.push(f); }
+      }
+    }
+    return out.map((f) => {
+      if (f.name) return f;
+      const ext = ((f.type || '').split('/')[1] || 'bin').replace('+xml', '');
+      try { return new File([f], 'pasted-' + Date.now() + '.' + ext, { type: f.type }); } catch (_) { return f; }
+    });
+  }
+  // Paste images/files straight into the composer (Ctrl/Cmd+V). Plain-text
+  // pastes fall through untouched. The first file carries the typed caption.
+  $('#chat-input').on('paste', function (e) {
+    if (!chatConv) return;
+    const files = clipboardFiles(e.originalEvent && e.originalEvent.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    stageChatFiles(files); // stage; the typed text stays as the caption, send on Enter
+  });
+  $('#thread-input').on('paste', function (e) {
+    if (!chatConv || !threadRoot) return;
+    const files = clipboardFiles(e.originalEvent && e.originalEvent.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    const caption = $('#thread-input').val().trim();
+    $('#thread-input').val('');
+    files.forEach((f, i) => attachFrom(f, i === 0 ? caption : '', { thread: threadRoot }));
   });
 
   // --- torrent transfers surfaced in chat ---
