@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,7 +35,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
@@ -178,28 +176,9 @@ func run(bind string, console bool, autostart bool) error {
 	dbSync.Register()
 	dbSvc.OnCommit(dbSync.Push)
 
-	// Messaging — direct messages and channels over the bus, backed by a
-	// per-camp SQLite store for durable history. Identity (our pub) and the
-	// active camp come from the engine so a camp switch is picked up; the
-	// camp's history is hydrated in OnStarted (LoadCamp).
-	msgStore := messenger.NewStore(store.CampDir)
-	defer msgStore.Close()
-	msgSvc := messenger.NewService(busSvc,
-		func() string { return eng.Status().IdentityPub },
-		msgStore,
-		func() string { return eng.Status().CampID },
-		func() []string { // camp peer pubs (excl. self) — general fanout target
-			var pubs []string
-			for _, p := range eng.Status().Peers {
-				if !p.Self && p.Pub != "" {
-					pubs = append(pubs, p.Pub)
-				}
-			}
-			return pubs
-		})
-	msgSvc.Register()
-	// Scoped (channel/DM) files are served over torrent only to members of
-	// that conversation — the drop catalog asks the messenger who's in.
+	// Messaging is now blocks (db/blocks/message + channels) — see channelsMgr/
+	// msgMgr above. Scoped (channel/DM) files are served over torrent only to
+	// members of the channel; the drop catalog asks the channel registry.
 	dropSvc.SetMembershipCheck(channelsMgr.IsMember)
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
@@ -243,60 +222,8 @@ func run(bind string, console bool, autostart bool) error {
 		})
 	}
 
-	// Inbound chat/call activity: every message another peer sends us is
-	// published on the messenger stream. Text becomes a "message" alert; a
-	// channel call announcement becomes a "call" alert that opens to join.
-	go func() {
-		ch, _ := msgSvc.Subscribe(64)
-		for m := range ch {
-			if m.Mine || m.From == "" || m.From == eng.Status().IdentityPub {
-				continue // our own echo, not an inbound event
-			}
-			switch m.Type {
-			case messenger.TypeText:
-				// Prefer the text; fall back to an attachment label so a
-				// file-only message still reads sensibly in the toast.
-				preview := m.Body
-				if preview == "" && m.File != nil {
-					switch {
-					case strings.HasPrefix(m.File.Mime, "image/"):
-						preview = "📷 photo"
-					case strings.HasPrefix(m.File.Mime, "video/"):
-						preview = "🎬 video"
-					default:
-						preview = "📎 " + m.File.Name
-					}
-				}
-				if m.Kind == "channel" {
-					_, name := messenger.SplitChannelID(m.Peer)
-					notifySvc.Push(notify.Notification{
-						Kind:  "message",
-						Title: "#" + name,
-						Body:  peerName(m.From) + ": " + preview,
-						From:  m.From,
-						Route: "channel:" + m.Peer,
-					})
-				} else {
-					notifySvc.Push(notify.Notification{
-						Kind:  "message",
-						Title: peerName(m.From),
-						Body:  preview,
-						From:  m.From,
-						Route: "channel:" + m.From, // a DM is the degenerate channel
-					})
-				}
-			case messenger.TypeCallStart:
-				_, name := messenger.SplitChannelID(m.Peer)
-				notifySvc.Push(notify.Notification{
-					Kind:  "call",
-					Title: "Call in #" + name,
-					Body:  peerName(m.From) + " started a call",
-					From:  m.From,
-					Route: "call:group:" + m.Peer + "/" + m.From,
-				})
-			}
-		}
-	}()
+	// Inbound-message notifications are raised by the web layer when a remote
+	// message frame syncs in (OnFrameApplied), so no messenger bridge here.
 
 	// gossip: replicate our fabric-level NodeState (platform + peer-view)
 	// across the mesh. Source assembles it from engine.Status() + runtime.
@@ -340,7 +267,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, channelsMgr, msgMgr, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, channelsMgr, msgMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
 	dbSvc.OnApply(srv.OnFrameApplied)
@@ -429,7 +356,6 @@ func run(bind string, console bool, autostart bool) error {
 				clog.Warn("main", "switch camp log: %v", err)
 			}
 		}
-		msgSvc.LoadCamp() // hydrate chat history for the now-active camp
 		for _, s := range services {
 			if s.start == nil {
 				continue

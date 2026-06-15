@@ -9,6 +9,7 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
+	"github.com/vseplet/f2f/source/helper/services/notify"
 )
 
 var errNotInCamp = fmt.Errorf("not in a camp")
@@ -81,8 +82,9 @@ func (s *Server) emitMessage(channelBID, msgBID, op string) {
 }
 
 // OnFrameApplied is the db OnApply hook: a frame just synced in from a peer.
-// It live-refreshes open block views, and if the frame is a message, pushes it
-// to the messenger UI (local writes echo from the API handlers instead).
+// It live-refreshes open block views, pushes a message to the messenger UI, and
+// raises an inbound-message notification (local writes echo from the API
+// handlers instead and never notify).
 func (s *Server) OnFrameApplied(e *db.Frame) {
 	s.NotifyBlockChange(e.Scope)
 	if !strings.HasPrefix(e.Scope, message.ScopePrefix) {
@@ -95,7 +97,41 @@ func (s *Server) OnFrameApplied(e *db.Frame) {
 	if json.Unmarshal(e.Payload, &fo) != nil || fo.BID == "" {
 		return
 	}
-	s.emitMessage(strings.TrimPrefix(e.Scope, message.ScopePrefix), fo.BID, fo.Op)
+	bid := strings.TrimPrefix(e.Scope, message.ScopePrefix)
+	s.emitMessage(bid, fo.BID, fo.Op)
+	s.notifyInbound(bid, fo.BID, fo.Op)
+}
+
+// notifyInbound raises a toast for a freshly-arrived peer message.
+func (s *Server) notifyInbound(channelBID, msgBID, op string) {
+	if op != "create" || s.notify == nil {
+		return
+	}
+	m := s.messages.Get(channelBID, msgBID)
+	if m == nil || m.From == s.selfPub() {
+		return // our own echo, not an inbound event
+	}
+	preview := m.Body
+	if preview == "" && m.File != nil {
+		preview = "📎 " + m.File.Name
+	}
+	title, route := "", "channel:"+channelBID
+	if strings.HasPrefix(channelBID, "dm-") {
+		peer := s.dmPeer(channelBID)
+		title, route = s.peerName(peer), "channel:"+peer
+	} else {
+		title = "#" + channelBID
+		if c := s.channels.Get(channelBID); c != nil && c.Name != "" {
+			title = "#" + c.Name
+		}
+	}
+	s.notify.Push(notify.Notification{
+		Kind:  "message",
+		Title: title,
+		Body:  s.peerName(m.From) + ": " + preview,
+		From:  m.From,
+		Route: route,
+	})
 }
 
 // handleEventStream is the single always-on server→browser push stream:

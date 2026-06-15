@@ -152,6 +152,50 @@ func (s *Server) handleMessagesShare(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// POST /api/messages/clear {kind,key} — tombstones every message in the
+// conversation. Unlike the old messenger "clear", this is a real delete that
+// propagates to peers (a replicated log has no local-only copy).
+func (s *Server) handleMessagesClear(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kind string `json:"kind"`
+		Key  string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	bid, id, ok := s.resolveSigner(w, req.Kind, req.Key)
+	if !ok {
+		return
+	}
+	for _, m := range s.messages.Messages(bid) {
+		_ = s.messages.Delete(id, bid, m.ID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/db/query {sql} → columns + rows. Read-only SQL console over the
+// camp's db.sqlite (the block log) — a debugging aid.
+func (s *Server) handleDBQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.SQL == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("sql required"))
+		return
+	}
+	res, err := s.db.Query(req.SQL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // resolveSigner resolves the conversation to a channel bid and the local
 // signer, writing an error and returning ok=false if not in a camp.
 func (s *Server) resolveSigner(w http.ResponseWriter, kind, key string) (bid string, id signer, ok bool) {

@@ -223,6 +223,57 @@ func (s *SQLiteStore) Since(scope string, have VersionVector) []*Frame {
 	return out
 }
 
+// QueryResult is a read-only query's columns and string-rendered rows.
+type QueryResult struct {
+	Columns []string   `json:"columns"`
+	Rows    [][]string `json:"rows"`
+}
+
+// Query runs a read-only SQL query against the camp's db over a fresh
+// read-only connection (writes are impossible) — for the debug SQL console.
+func (s *SQLiteStore) Query(query string) (*QueryResult, error) {
+	dir := s.dirFn()
+	if dir == "" {
+		return nil, errors.New("db: not in a camp")
+	}
+	dsn := "file:" + filepath.Join(dir, "db.sqlite") + "?mode=ro&_pragma=busy_timeout(3000)"
+	d, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	rows, err := d.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	out := &QueryResult{Columns: cols, Rows: [][]string{}}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if rows.Scan(ptrs...) != nil {
+			continue
+		}
+		rec := make([]string, len(cols))
+		for i, v := range vals {
+			switch t := v.(type) {
+			case nil:
+				rec[i] = ""
+			case []byte:
+				rec[i] = string(t)
+			default:
+				rec[i] = fmt.Sprint(t)
+			}
+		}
+		out.Rows = append(out.Rows, rec)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) MaxLamport() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -94,6 +94,17 @@ func (svc *Service) Apply(e *Frame) error {
 // Frames returns scope's entries in canonical order — apps fold over it.
 func (svc *Service) Frames(scope string) []*Frame { return svc.store.Frames(scope) }
 
+// Query runs a read-only SQL query against the backing store (SQLite only) —
+// for the debug console. Errors on non-SQLite stores.
+func (svc *Service) Query(sql string) (*QueryResult, error) {
+	if q, ok := svc.store.(interface {
+		Query(string) (*QueryResult, error)
+	}); ok {
+		return q.Query(sql)
+	}
+	return nil, fmt.Errorf("db: query unsupported on this store")
+}
+
 // Vector returns scope's version vector (for anti-entropy).
 func (svc *Service) Vector(scope string) VersionVector { return svc.store.Vector(scope) }
 

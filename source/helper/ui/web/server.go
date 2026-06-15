@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/db/blocks"
 	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
@@ -33,7 +34,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
@@ -66,7 +66,7 @@ type Server struct {
 	tunnel   *tunnel.Service
 	camp     *camp.Service
 	dns      *dns.Service
-	msg      *messenger.Service
+	db       *db.Service
 	notify   *notify.Service
 	gossip   *gossip.Service
 	shell    *shell.Service
@@ -85,7 +85,7 @@ type Server struct {
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -96,7 +96,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		calls:       callsSvc,
 		tunnel:      tunnelSvc,
 		camp:        campSvc,
-		msg:         msgSvc,
+		db:          dbSvc,
 		notify:      notifySvc,
 		gossip:      gossipSvc,
 		shell:       shellSvc,
@@ -235,14 +235,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/peers/{pub}", s.handleForgetPeer)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
-	mux.HandleFunc("GET /api/chat/channels", s.handleChatChannels)
-	mux.HandleFunc("POST /api/chat/channels", s.handleChatCreateChannel)
-	mux.HandleFunc("POST /api/chat/members", s.handleChatMembers)
-	mux.HandleFunc("POST /api/chat/channels/delete", s.handleChatDeleteChannel)
-	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
-	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
-	mux.HandleFunc("POST /api/chat/clear", s.handleChatClear)
-	mux.HandleFunc("POST /api/chat/query", s.handleChatQuery)
 	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
 	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
 	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
@@ -264,12 +256,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/messages", s.handleMessagesList)
 	mux.HandleFunc("POST /api/messages", s.handleMessagesPost)
 	mux.HandleFunc("POST /api/messages/share", s.handleMessagesShare)
+	mux.HandleFunc("POST /api/messages/clear", s.handleMessagesClear)
 	mux.HandleFunc("GET /api/events", s.handleEventStream)
-	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
-	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
-	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
-	mux.HandleFunc("POST /api/chat/share", s.handleChatShare)
-	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)
+	mux.HandleFunc("POST /api/db/query", s.handleDBQuery)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// Remote terminal (services/shell over the bus). /peers lists camp peers

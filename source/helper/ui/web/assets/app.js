@@ -330,14 +330,14 @@ $(function () {
   // channel block bid ("general" or "<fp16>-<rand>"), a DM key is the peer's
   // pub (64 hex, no dash). So a dash (or the general id) ⇒ channel.
   function convKind(key) { return (key === GENERAL_ID || key.includes('-')) ? 'channel' : 'dm'; }
-  let chatChannels = [];      // /api/chat/channels — channels we belong to
+  let chatChannels = [];      // /api/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
   let replyTarget = null;     // message the next send will quote, or null
   let editTarget = null;      // { id } of the message the next send will edit, or null
   let threadRoot = null;      // id of the message whose thread panel is open, or null
   let querySchemaLoaded = false;  // SQL console: schema fetched on first open
   const DEFAULT_QUERY =
-    "SELECT mtype, sender, body, ts\n  FROM messages\n ORDER BY ts DESC\n LIMIT 50;";
+    "SELECT scope, type, substr(author,1,8) AS author, seq, lamport\n  FROM frames\n ORDER BY lamport DESC\n LIMIT 50;";
   let chatMsgs = [];          // messages of the open conversation (cached for redraw)
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
@@ -1160,9 +1160,9 @@ $(function () {
   // peers keep their copies.
   $('#chat-clear').on('click', function () {
     if (!chatConv) return;
-    if (!confirm('Clear all messages here? This removes only your local copy — others keep theirs.')) return;
+    if (!confirm('Delete all messages here? This removes them for everyone.')) return;
     $.ajax({
-      url: '/api/chat/clear', method: 'POST', contentType: 'application/json',
+      url: '/api/messages/clear', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key }),
     }).done(() => {
       chatMsgs = [];
@@ -1548,7 +1548,7 @@ $(function () {
     if (!sql) return;
     $('#query-status').text('running…');
     $.ajax({
-      url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+      url: '/api/db/query', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ sql }),
     }).done((res) => {
       renderQueryTable($('#query-results'), res);
@@ -1574,7 +1574,7 @@ $(function () {
   function loadQuerySchema() {
     querySchemaLoaded = true;
     $.ajax({
-      url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+      url: '/api/db/query', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name" }),
     }).done((res) => {
       const tables = (res.rows || []).map((r) => r[0]);
@@ -1585,7 +1585,7 @@ $(function () {
       const cols = {};
       tables.forEach((t) => {
         $.ajax({
-          url: '/api/chat/query', method: 'POST', contentType: 'application/json',
+          url: '/api/db/query', method: 'POST', contentType: 'application/json',
           data: JSON.stringify({ sql: 'PRAGMA table_info(' + t + ')' }),
         }).always((res2) => {
           cols[t] = (res2 && res2.rows) ? res2.rows.map((r) => r[1]) : [];
@@ -2493,7 +2493,7 @@ $(function () {
         }).join('')
       : empty('no peers');
 
-    // CHANNELS = the rooms we belong to (from /api/chat/channels). A name may
+    // CHANNELS = the rooms we belong to (from /api/channels). A name may
     // carry a "/" path ("dev/backend") which folds into a tree: each segment
     // nests under the channel — or a virtual folder — named by the prefix
     // above it. general (the camp-wide room) is pinned to the top, outside
