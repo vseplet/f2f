@@ -35,6 +35,25 @@ func (s *Server) blockSigner(w http.ResponseWriter) (signer interface {
 	return id, true
 }
 
+// GET /api/notes/scope?kind=&key= → {scope}. Resolves a conversation to its
+// note db scope via chanBID — the SAME bid messages use. For a DM that's the
+// symmetric "note:dm-<hash(sorted pubs)>" (and EnsureDM creates its membership),
+// so both peers share one note scope instead of each keying off the other's pub.
+func (s *Server) handleNotesScope(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	kind, key := q.Get("kind"), q.Get("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("key required"))
+		return
+	}
+	bid, err := s.chanBID(kind, key)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"scope": "note:" + bid})
+}
+
 // GET /api/notes?channel=<scope> → folded blocks (with heads/author/version).
 func (s *Server) handleNotesList(w http.ResponseWriter, r *http.Request) {
 	ch := r.URL.Query().Get("channel")
