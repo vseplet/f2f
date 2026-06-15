@@ -2897,25 +2897,20 @@ a.ax-domain-link:hover {
     font-size: 11px;
 }
 /* Block (Notion-style) notes editor. */
-.ax-note-blocks { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 2px; }
+.ax-note-blocks { flex: 1; overflow-y: auto; padding: 14px 18px 14px 28px; display: flex; flex-direction: column; gap: 2px; }
 .ax-nb { padding: 1px 0; position: relative; }
 /* Highlight the block (or draft) being edited — a soft filled card with a faint
    ring (box-shadow/bg don't affect layout, so no text shift). focus-within
    needs no JS: appears on focus, clears on blur. */
-/* Edit-mode card — wraps the editing textarea + its gutter (NOT the meta line
-   below). Same for editing a block and typing a new one (draft). */
-.ax-nb-editwrap:focus-within {
-    background: rgba(255,255,255,.04);
-    border-radius: 6px;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
-}
-/* Line-number gutter (code-editor style) — only while focused. */
-.ax-nb-editwrap { display: flex; gap: 8px; align-items: flex-start; }
-.ax-nb-editwrap .ax-nb-in { flex: 1; }
+/* Edit mode is indicated by the line-number gutter alone — no card/background. */
+/* Line-number gutter (code-editor style) — absolutely placed in the left
+   margin so the text doesn't shift when entering edit mode. Shown only while
+   focused. */
+.ax-nb-editwrap { position: relative; }
 .ax-nb-editwrap:not(:focus-within) .ax-nb-gutter { display: none; }
 .ax-nb-gutter {
-    flex: 0 0 auto; min-width: 1.6em; padding-left: 2px; text-align: right;
-    user-select: none; color: var(--muted); opacity: .4;
+    position: absolute; left: -28px; top: 0; width: 22px;
+    text-align: right; user-select: none; color: var(--muted); opacity: .4;
     font-size: 15px; line-height: 1.6; font-variant-numeric: tabular-nums;
 }
 .ax-nb-in {
