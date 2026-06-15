@@ -785,6 +785,16 @@ func (e *Engine) IdentityPub() string {
 	return e.identity.PubHex()
 }
 
+// Identity returns the running camp's Ed25519 identity, or nil when the
+// engine isn't in a camp. Callers that only need the pub hex should use
+// IdentityPub; this exposes the full keypair for signing (e.g. the OIDC
+// provider mints EdDSA tokens with it).
+func (e *Engine) Identity() *identity.Identity {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.identity
+}
+
 // UDPHandler claims a UDP packet by returning true. peerToTunLoop
 // walks registered handlers in order before falling through to the
 // engine's own dispatch (obfenv multiplex → tun.Write).

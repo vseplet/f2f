@@ -9,18 +9,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/camp"
@@ -30,8 +35,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
+	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
 	"github.com/vseplet/f2f/source/helper/services/shell"
@@ -142,31 +147,39 @@ func run(bind string, console bool, autostart bool) error {
 	// subdomain by hand.
 	dnsSvc.OnPinnedMiss = tunnelSvc.ResolveSubdomain
 	campSvc := camp.New(eng, store)
-	proxySvc := proxy.New(dnsSvc, pkiSvc)
+	// Built-in OIDC provider: turns overlay identity into standard tokens
+	// for co-located apps. Served on a loopback port; the proxy exposes it
+	// at id.<zone>.f2f and injects the attested caller pub.
+	const oidcPort = 2203
+	oidcDir := func() string {
+		id := eng.Status().CampID
+		if id == "" {
+			return ""
+		}
+		return store.CampDir(id)
+	}
+	oidcCreds := oidc.NewCredStore(oidcDir)
+	oidcClients := oidc.NewClientStore(oidcDir)
+	oidcKeys := oidc.NewSignKeys(oidcDir)
+	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcCreds, oidcClients, oidcKeys)
+	proxySvc := proxy.New(dnsSvc, pkiSvc, oidcPort, busResolver{eng: eng}.PubForIP)
 
-	// Messaging — direct messages and channels over the bus, backed by a
-	// per-camp SQLite store for durable history. Identity (our pub) and the
-	// active camp come from the engine so a camp switch is picked up; the
-	// camp's history is hydrated in OnStarted (LoadCamp).
-	msgStore := messenger.NewStore(store.CampDir)
-	defer msgStore.Close()
-	msgSvc := messenger.NewService(busSvc,
-		func() string { return eng.Status().IdentityPub },
-		msgStore,
-		func() string { return eng.Status().CampID },
-		func() []string { // camp peer pubs (excl. self) — general fanout target
-			var pubs []string
-			for _, p := range eng.Status().Peers {
-				if !p.Self && p.Pub != "" {
-					pubs = append(pubs, p.Pub)
-				}
-			}
-			return pubs
-		})
-	msgSvc.Register()
-	// Scoped (channel/DM) files are served over torrent only to members of
-	// that conversation — the drop catalog asks the messenger who's in.
-	dropSvc.SetMembershipCheck(msgSvc.IsMember)
+	// Distributed DB substrate: one append-only signed log per camp
+	// (db.sqlite), replicated by anti-entropy over the bus. Block apps
+	// (notes now; docs/tasks/chat later) build on it. Push on every local
+	// commit; PullAll periodically (below) catches up offline gaps.
+	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
+	blocksMgr := blocks.New(dbSvc)
+	channelsMgr := channels.New(blocksMgr) // channels are blocks in the "channels" scope
+	msgMgr := message.New(blocksMgr)       // messages are blocks in "message:<channelBid>"
+	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
+	dbSync.Register()
+	dbSvc.OnCommit(dbSync.Push)
+
+	// Messaging is now blocks (db/blocks/message + channels) — see channelsMgr/
+	// msgMgr above. Scoped (channel/DM) files are served over torrent only to
+	// members of the channel; the drop catalog asks the channel registry.
+	dropSvc.SetMembershipCheck(channelsMgr.IsMember)
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); we also surface peer
@@ -209,60 +222,8 @@ func run(bind string, console bool, autostart bool) error {
 		})
 	}
 
-	// Inbound chat/call activity: every message another peer sends us is
-	// published on the messenger stream. Text becomes a "message" alert; a
-	// channel call announcement becomes a "call" alert that opens to join.
-	go func() {
-		ch, _ := msgSvc.Subscribe(64)
-		for m := range ch {
-			if m.Mine || m.From == "" || m.From == eng.Status().IdentityPub {
-				continue // our own echo, not an inbound event
-			}
-			switch m.Type {
-			case messenger.TypeText:
-				// Prefer the text; fall back to an attachment label so a
-				// file-only message still reads sensibly in the toast.
-				preview := m.Body
-				if preview == "" && m.File != nil {
-					switch {
-					case strings.HasPrefix(m.File.Mime, "image/"):
-						preview = "📷 photo"
-					case strings.HasPrefix(m.File.Mime, "video/"):
-						preview = "🎬 video"
-					default:
-						preview = "📎 " + m.File.Name
-					}
-				}
-				if m.Kind == "channel" {
-					_, name := messenger.SplitChannelID(m.Peer)
-					notifySvc.Push(notify.Notification{
-						Kind:  "message",
-						Title: "#" + name,
-						Body:  peerName(m.From) + ": " + preview,
-						From:  m.From,
-						Route: "channel:" + m.Peer,
-					})
-				} else {
-					notifySvc.Push(notify.Notification{
-						Kind:  "message",
-						Title: peerName(m.From),
-						Body:  preview,
-						From:  m.From,
-						Route: "channel:" + m.From, // a DM is the degenerate channel
-					})
-				}
-			case messenger.TypeCallStart:
-				_, name := messenger.SplitChannelID(m.Peer)
-				notifySvc.Push(notify.Notification{
-					Kind:  "call",
-					Title: "Call in #" + name,
-					Body:  peerName(m.From) + " started a call",
-					From:  m.From,
-					Route: "call:group:" + m.Peer + "/" + m.From,
-				})
-			}
-		}
-	}()
+	// Inbound-message notifications are raised by the web layer when a remote
+	// message frame syncs in (OnFrameApplied), so no messenger bridge here.
 
 	// gossip: replicate our fabric-level NodeState (platform + peer-view)
 	// across the mesh. Source assembles it from engine.Status() + runtime.
@@ -306,8 +267,10 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, channelsMgr, msgMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
+	// Remote block entries (sync) → live-refresh any open editor in the browser.
+	dbSvc.OnApply(srv.OnFrameApplied)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.
@@ -393,7 +356,6 @@ func run(bind string, console bool, autostart bool) error {
 				clog.Warn("main", "switch camp log: %v", err)
 			}
 		}
-		msgSvc.LoadCamp() // hydrate chat history for the now-active camp
 		for _, s := range services {
 			if s.start == nil {
 				continue
@@ -412,6 +374,15 @@ func run(bind string, console bool, autostart bool) error {
 			clog.Warn("main", "start bus: %v", err)
 		}
 		gossipSvc.Start() // replicate NodeState across the mesh
+		// Ensure the camp-wide general channel exists (everyone has it). No-op
+		// if already present locally or pulled from a peer.
+		if st.CampID != "" {
+			if id := eng.Identity(); id != nil {
+				if _, err := channelsMgr.EnsureGeneral(id); err != nil {
+					clog.Warn("main", "ensure general channel: %v", err)
+				}
+			}
+		}
 		if st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
@@ -468,6 +439,39 @@ func run(bind string, console bool, autostart bool) error {
 		}
 	}()
 
+	// OIDC provider listener (loopback). The handler reads live engine
+	// state, so it's bound once and survives camp switches.
+	go func() {
+		oidcSrv := &http.Server{
+			Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(oidcPort)),
+			Handler:           oidcSvc.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		if err := oidcSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			clog.Warn("main", "oidc listener: %v", err)
+		}
+	}()
+
+	// db anti-entropy: pull from peers periodically to catch up gaps (push
+	// on commit handles the live path). No-ops when not in a camp / no peers.
+	go func() {
+		t := time.NewTicker(7 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if eng.Status().CampID == "" {
+					continue
+				}
+				c, cancel := context.WithTimeout(ctx, 5*time.Second)
+				dbSync.PullAll(c)
+				cancel()
+			}
+		}
+	}()
+
 	// Bring up the chosen camp (eng.Start → OnStarted → services start).
 	if selErr != nil {
 		clog.Console("camp select: %v", selErr)
@@ -506,6 +510,34 @@ func run(bind string, console bool, autostart bool) error {
 
 // busResolver adapts the engine's peer roster to bus.Resolver. Identity is
 // the overlay IP (WireGuard-attested), so the bus needs no auth of its own.
+// oidcBackend adapts the engine to services/oidc.Backend: the active
+// camp's signing identity and a pub→name lookup for the attested visitor.
+// (The issuer is derived per-request from the app host, not here.)
+type oidcBackend struct{ eng *engine.Engine }
+
+func (b oidcBackend) Identity() *identity.Identity { return b.eng.Identity() }
+
+func (b oidcBackend) PeerName(pub string) string {
+	for _, p := range b.eng.Status().Peers {
+		if p.Pub == pub {
+			return p.Name
+		}
+	}
+	return ""
+}
+
+// dbBus adapts *bus.Service to db.Bus. The only wrinkle is Handle: db.Bus
+// uses a plain func type (to stay decoupled from mesh/bus), assignable to
+// bus.HandlerFunc here.
+type dbBus struct{ b *bus.Service }
+
+func (a dbBus) Handle(typ string, fn func(string, []byte) ([]byte, error)) { a.b.Handle(typ, fn) }
+func (a dbBus) Request(ctx context.Context, pub, typ string, payload []byte) ([]byte, error) {
+	return a.b.Request(ctx, pub, typ, payload)
+}
+func (a dbBus) Notify(pub, typ string, payload []byte) error { return a.b.Notify(pub, typ, payload) }
+func (a dbBus) Peers() []string                              { return a.b.Peers() }
+
 type busResolver struct{ eng *engine.Engine }
 
 func (r busResolver) AddrForPub(pub string) string {

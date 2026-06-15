@@ -18,6 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/db"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -30,8 +34,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/messenger"
 	"github.com/vseplet/f2f/source/helper/services/notify"
+	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
@@ -62,20 +66,26 @@ type Server struct {
 	tunnel   *tunnel.Service
 	camp     *camp.Service
 	dns      *dns.Service
-	msg      *messenger.Service
+	db       *db.Service
 	notify   *notify.Service
 	gossip   *gossip.Service
 	shell    *shell.Service
 	vnc      *vnc.Service
+	oidc     *oidc.Service
+	blocks   *blocks.Manager
+	channels *channels.Manager
+	messages *message.Manager
 	addr     string
 	srv      *http.Server
 
 	signals     *signalHub
 	callSignals *signalHub   // SSE hub for SFU signals → local browser
+	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
+	msgEvents  *signalHub    // SSE hub: a new/edited chat message → browser (Message JSON)
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -86,14 +96,20 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		calls:       callsSvc,
 		tunnel:      tunnelSvc,
 		camp:        campSvc,
-		msg:         msgSvc,
+		db:          dbSvc,
 		notify:      notifySvc,
 		gossip:      gossipSvc,
 		shell:       shellSvc,
 		vnc:         vncSvc,
+		oidc:        oidcSvc,
+		blocks:      blocksMgr,
+		channels:    channelsMgr,
+		messages:    messagesMgr,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
+		blockEvents: newSignalHub(),
+		msgEvents:  newSignalHub(),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -219,19 +235,30 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/peers/{pub}", s.handleForgetPeer)
 	mux.HandleFunc("GET /api/topology", s.handleTopology)
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
-	mux.HandleFunc("GET /api/chat/channels", s.handleChatChannels)
-	mux.HandleFunc("POST /api/chat/channels", s.handleChatCreateChannel)
-	mux.HandleFunc("POST /api/chat/members", s.handleChatMembers)
-	mux.HandleFunc("POST /api/chat/channels/delete", s.handleChatDeleteChannel)
-	mux.HandleFunc("POST /api/chat/channels/leave", s.handleChatLeaveChannel)
-	mux.HandleFunc("GET /api/chat/messages", s.handleChatMessages)
-	mux.HandleFunc("POST /api/chat/clear", s.handleChatClear)
-	mux.HandleFunc("POST /api/chat/query", s.handleChatQuery)
-	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
-	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
-	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)
-	mux.HandleFunc("POST /api/chat/share", s.handleChatShare)
-	mux.HandleFunc("GET /api/chat/stream", s.handleChatStream)
+	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
+	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
+	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
+	// Notes are generic blocks (text) in a "note:<conv>" scope — the block
+	// engine surfaced under a meaningful entity name. No public /api/blocks.
+	mux.HandleFunc("GET /api/notes", s.handleNotesList)
+	mux.HandleFunc("POST /api/notes", s.handleNotesCreate)
+	mux.HandleFunc("POST /api/notes/update", s.handleNotesUpdate)
+	mux.HandleFunc("POST /api/notes/move", s.handleNotesMove)
+	mux.HandleFunc("POST /api/notes/delete", s.handleNotesDelete)
+	mux.HandleFunc("POST /api/notes/merge", s.handleNotesMerge)
+	// Channels (channel blocks) and messages (message blocks) — per-entity API.
+	mux.HandleFunc("GET /api/channels", s.handleChannelsList)
+	mux.HandleFunc("POST /api/channels", s.handleChannelsCreate)
+	mux.HandleFunc("POST /api/channels/rename", s.handleChannelsRename)
+	mux.HandleFunc("POST /api/channels/members", s.handleChannelsMembers)
+	mux.HandleFunc("POST /api/channels/delete", s.handleChannelsDelete)
+	mux.HandleFunc("POST /api/channels/dm", s.handleChannelsDM)
+	mux.HandleFunc("GET /api/messages", s.handleMessagesList)
+	mux.HandleFunc("POST /api/messages", s.handleMessagesPost)
+	mux.HandleFunc("POST /api/messages/share", s.handleMessagesShare)
+	mux.HandleFunc("POST /api/messages/clear", s.handleMessagesClear)
+	mux.HandleFunc("GET /api/events", s.handleEventStream)
+	mux.HandleFunc("POST /api/db/query", s.handleDBQuery)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// Remote terminal (services/shell over the bus). /peers lists camp peers

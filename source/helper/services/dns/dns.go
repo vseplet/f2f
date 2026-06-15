@@ -34,6 +34,7 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
+	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	"github.com/vseplet/f2f/source/helper/platform"
@@ -377,11 +378,36 @@ const (
 	portalPort = 2202 // default web-UI bind; see main.go defaultBind
 )
 
-// LocalRoutes is MyDomains plus the built-in portal entry — the set the
-// LOCAL reverse-proxy (loopback listener) and the resolver should
-// honour. Kept separate from MyDomains so portal never leaks to peers.
+// oidcPort is the loopback port the built-in OIDC provider listens on
+// (mirrors main.go). The provider is reached at its per-peer issuer host,
+// OIDCLabel().<zone>.f2f.
+const oidcPort = 2203
+
+// OIDCLabel is this peer's dedicated OIDC issuer host label,
+// "auth-<fp8>". The fingerprint makes it unique per peer, so it never
+// collides in the camp-global zone (unlike a bare "auth"/"id"). Empty
+// outside a camp.
+func (s *Service) OIDCLabel() string {
+	pub := s.eng.IdentityPub()
+	if pub == "" {
+		return ""
+	}
+	fp := identity.FingerprintHex(pub)
+	if len(fp) < 8 {
+		return ""
+	}
+	return "auth-" + fp[:8]
+}
+
+// LocalRoutes is MyDomains plus the built-in portal + OIDC entries — the
+// set the LOCAL reverse-proxy (loopback listener) and the resolver should
+// honour. Kept separate from MyDomains so these never leak to peers.
 func (s *Service) LocalRoutes() []Entry {
-	return append(s.MyDomains(), Entry{Name: portalName, Host: "127.0.0.1", Port: portalPort})
+	routes := append(s.MyDomains(), Entry{Name: portalName, Host: "127.0.0.1", Port: portalPort})
+	if label := s.OIDCLabel(); label != "" {
+		routes = append(routes, Entry{Name: label, Host: "127.0.0.1", Port: oidcPort})
+	}
+	return routes
 }
 
 // PeerDomains returns the in-memory mirror of one peer's published

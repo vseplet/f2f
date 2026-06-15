@@ -1173,14 +1173,8 @@
                 <div class="ax-frame ax-note">
                     <div class="ax-section-title ax-note-header">
                         <span id="note-title">— notes</span>
+                        <span id="note-crumbs" class="ax-nb-crumbs"></span>
                         <span class="ax-meta" id="note-status"></span>
-                        <button
-                            type="button"
-                            id="note-mode"
-                            class="ax-engine-btn ax-chat-call"
-                            title="preview"
-                            aria-label="toggle preview"
-                        ><i class="bi bi-eye-fill"></i></button>
                         <button
                             type="button"
                             id="note-back"
@@ -1189,13 +1183,7 @@
                             aria-label="back to conversation"
                         ><i class="bi bi-box-arrow-left"></i></button>
                     </div>
-                    <textarea
-                        id="note-text"
-                        class="ax-note-text"
-                        spellcheck="false"
-                        placeholder="shared notes — markdown, editable by any member…"
-                    ></textarea>
-                    <div id="note-preview" class="ax-note-preview ax-md hidden"></div>
+                    <div id="note-blocks" class="ax-note-blocks"></div>
                 </div>
             </div>
             <!-- /#tab-note -->
@@ -1220,6 +1208,49 @@
                 </div>
             </div>
             <!-- /#tab-query -->
+
+            <!-- OIDC provider admin: this peer's issuer + registered apps.
+                 Opened from the "applications" row under the OIDC group. -->
+            <div id="tab-oidc" class="tab-panel hidden">
+                <div class="ax-frame ax-oidc">
+                    <div class="ax-section-title">
+                        <span>OIDC provider</span>
+                        <span class="ax-meta">passkey sign-in</span>
+                    </div>
+                    <div class="ax-oidc-body">
+                        <div class="ax-oidc-issuer">
+                            <div class="ax-oidc-label">Issuer (paste into your app's OIDC config)</div>
+                            <code id="oidc-issuer">—</code>
+                            <button type="button" id="oidc-copy" class="ax-engine-btn">copy</button>
+                            <div class="ax-oidc-disc">discovery: <code id="oidc-discovery">—</code></div>
+                            <div class="ax-oidc-disc">end session (logout): <code id="oidc-endsession">—</code></div>
+                        </div>
+
+                        <div class="ax-oidc-add">
+                            <div class="ax-oidc-label">Add application</div>
+                            <input id="oidc-name" class="ax-oidc-in" placeholder="name (e.g. gitea)">
+                            <textarea id="oidc-redirects" class="ax-oidc-in" rows="2"
+                                placeholder="callback URLs, one per line — https://…​.f2f/callback (wildcards * allowed)"></textarea>
+                            <textarea id="oidc-logout" class="ax-oidc-in" rows="1"
+                                placeholder="logout callback URLs (optional), one per line"></textarea>
+                            <label class="ax-oidc-conf"><input type="checkbox" id="oidc-public">
+                                public client (SPA/native — no secret, PKCE required)</label>
+                            <label class="ax-oidc-conf"><input type="checkbox" id="oidc-pkce">
+                                require PKCE (confidential clients — most server apps don't need it)</label>
+                            <button type="button" id="oidc-create" class="ax-engine-btn">create client</button>
+                            <div id="oidc-new" class="ax-oidc-new hidden"></div>
+                            <div id="oidc-err" class="ax-oidc-err"></div>
+                        </div>
+
+                        <div class="ax-oidc-label">Registered applications</div>
+                        <div id="oidc-clients" class="ax-oidc-clients"></div>
+
+                        <div class="ax-oidc-label">Users (enrolled passkeys)</div>
+                        <div id="oidc-users" class="ax-oidc-clients"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-oidc -->
 
             <!-- Remote terminal (services/shell over the bus), rendered in the
                  main column like the other tabs. Opened from the sidebar
