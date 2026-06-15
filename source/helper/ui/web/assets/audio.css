@@ -2898,6 +2898,35 @@ a.ax-domain-link:hover {
 }
 /* Block (Notion-style) notes editor. */
 .ax-note-blocks { flex: 1; overflow-y: auto; padding: 14px 18px 14px 28px; display: flex; flex-direction: column; gap: 2px; }
+#note-file-input { display: none; }
+/* Drag-a-file-here affordance on the note body. */
+.ax-note-blocks.ax-nb-dragover {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+    border-radius: 8px;
+}
+/* A file block reuses the chat attachment cards (.ax-msg-media/-filecard/-img/
+   -doc/-torrent) for a consistent look; these are just the note-side tweaks. */
+.ax-nb-file { padding: 3px 0; }
+.ax-nb-file .ax-msg-media,
+.ax-nb-file .ax-msg-filecard { max-width: min(100%, 460px); }
+.ax-nb-filecap {
+    padding: 5px 10px;
+    color: var(--text);
+    word-break: break-word;
+}
+/* In-place "uploading…" placeholder shown at the insertion spot. */
+.ax-nb-uploading .ax-msg-filecard { max-width: min(100%, 460px); opacity: .85; }
+.ax-up-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; }
+.ax-up-name { color: var(--text); word-break: break-all; }
+.ax-up-tag { color: var(--muted); font-size: 12px; margin-left: auto; }
+.ax-up-spin {
+    flex: none; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-top-color: var(--accent);
+    animation: ax-spin 0.7s linear infinite;
+}
+@keyframes ax-spin { to { transform: rotate(360deg); } }
 .ax-nb { padding: 1px 0; position: relative; }
 /* Highlight the block (or draft) being edited — a soft filled card with a faint
    ring (box-shadow/bg don't affect layout, so no text shift). focus-within
@@ -2908,6 +2937,15 @@ a.ax-domain-link:hover {
    focused. */
 .ax-nb-editwrap { position: relative; }
 .ax-nb-editwrap:not(:focus-within) .ax-nb-gutter { display: none; }
+/* Per-block attach button — only while the editor/draft is focused, parked in
+   the right margin so it doesn't shift the text. */
+.ax-nb-attach {
+    position: absolute; right: -4px; top: 0;
+    border: none; background: transparent; cursor: pointer;
+    color: var(--muted); font-size: 14px; line-height: 1.6; padding: 0 4px;
+}
+.ax-nb-attach:hover { color: var(--accent); }
+.ax-nb-editwrap:not(:focus-within) .ax-nb-attach { display: none; }
 .ax-nb-gutter {
     position: absolute; left: -28px; top: 0; width: 22px;
     text-align: right; user-select: none; color: var(--muted); opacity: .4;

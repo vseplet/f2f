@@ -20,8 +20,13 @@
   `general` (well-known bid), DM (`dm-<hash(pubs)>`), `IsMember`.
 - **`db/blocks/message`** — `block.message` `{body,file,reply_to,thread}` в scope
   `message:<channelBid>`; правка = новая версия (история бесплатно).
-- **Заметки** — generic `block.text` `{md}` и `block.page` `{title}` в scope
-  `note:<conv>`; вложенность страниц — через `Parent`.
+- **`db/blocks/attach`** — общий примитив вложения `Attachment`
+  `{name,mime,size,data?|info_hash?+magnet?}`: мелкие инлайном (≤8 МиБ), крупные
+  по torrent (drop). Переиспользуют и сообщения (поле), и заметки (блок).
+- **Заметки** — generic `block.text` `{md}`, `block.page` `{title}` и
+  `block.file` `{…attachment, caption?}` в scope `note:<conv>`; вложенность
+  страниц — через `Parent`. Вложение = самостоятельный `block.file` среди
+  текстовых (Notion-стиль), а не поле текстового блока.
 - **Web-API per-entity**: `/api/channels`, `/api/messages`, `/api/notes`,
   единый push-стрим `/api/events`; generic `/api/blocks` — внутренний.
 
@@ -156,11 +161,11 @@ op {                          ← внутри payload, app-уровень
 ```jsonc
 block.text     { "md": "привет **мир**" }                        // ✅ заметки/доки
 block.page     { "title": "Design" }                             // ✅ страница-контейнер; дети по Parent
+block.file     { "name":"spec.pdf", "mime":"…", "size":N, "data"|"info_hash"+"magnet", "caption"? }  // ✅ вложение-блок
 block.channel  { "name": "devs", "members": ["<pub>", …] }       // ✅ канал
 block.message  { "body": "ало", "file": {…}, "reply_to": "<bid>", "thread": "<bid>" }  // ✅ сообщение
 block.todo     { "text": "купить молоко", "done": false }        // 📐
 block.table    { "cols": [...], "rows": [[...]] }                // 📐
-block.media    { "kind":"image", "ref":"magnet:?xt=…", "mime":"image/jpeg" }  // 📐 (пока вложение в message.file)
 ```
 
 **page vs text:** `text` — это контент (несёт markdown). `page` — контейнер:

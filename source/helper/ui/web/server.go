@@ -246,6 +246,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/notes/move", s.handleNotesMove)
 	mux.HandleFunc("POST /api/notes/delete", s.handleNotesDelete)
 	mux.HandleFunc("POST /api/notes/merge", s.handleNotesMerge)
+	mux.HandleFunc("POST /api/notes/attach", s.handleNotesAttach)
+	mux.HandleFunc("POST /api/notes/share", s.handleNotesShare)
 	// Channels (channel blocks) and messages (message blocks) — per-entity API.
 	mux.HandleFunc("GET /api/channels", s.handleChannelsList)
 	mux.HandleFunc("POST /api/channels", s.handleChannelsCreate)

@@ -464,6 +464,11 @@ $(function () {
   // Object URLs minted for the currently-rendered attachments. Revoked and
   // rebuilt on every full chat redraw so they don't leak across conversations.
   let chatBlobUrls = [];
+  let noteBlobUrls = [];
+  // attachUrl pushes minted object URLs into whichever bucket is active so the
+  // right view's redraw can revoke them. Chat sets it in renderChat, notes in
+  // renderNoteBlocks — both views reuse attachHtml.
+  let attachBucket = chatBlobUrls;
   function attachUrl(f) {
     // Decode the base64 the backend sent (Go marshals []byte as std base64)
     // into a Blob and hand back an object URL. Unlike a data: URL, a blob:
@@ -473,7 +478,7 @@ $(function () {
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }));
-    chatBlobUrls.push(url);
+    attachBucket.push(url);
     return url;
   }
 
@@ -547,6 +552,7 @@ $(function () {
     // A full redraw replaces the DOM wholesale, orphaning the previous blobs.
     chatBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
     chatBlobUrls = [];
+    attachBucket = chatBlobUrls;
     const all = msgs || [];
     const edits = editsByRoot(all);
     // Known message ids (roots/normal); thread replies pointing at a known root
@@ -806,6 +812,13 @@ $(function () {
 
   function renderNoteBlocks() {
     const $c = $('#note-blocks');
+    // #note-blocks is the scroll container; emptying it drops scrollTop to 0, so
+    // a rebuild (create/edit/sync) would jump to the top. Keep the position.
+    const prevScroll = $c.scrollTop();
+    // Orphan the previous render's attachment blobs (see attachUrl).
+    noteBlobUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+    noteBlobUrls = [];
+    attachBucket = noteBlobUrls;
     $c.empty();
     renderCrumbs(); // breadcrumbs live in the header (#note-crumbs)
     const kids = pageKids();
@@ -818,6 +831,10 @@ $(function () {
     const $d = $('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-draft').attr('placeholder', ph);
     $c.append(editorWrap($d));
     $c.find('textarea').each(function () { autogrow(this); });
+    if (window.f2fRich) f2fRich.renderDiagrams($c[0]);
+    $c.scrollTop(prevScroll); // restore scroll after the full rebuild
+    updateTorrentChips(); // paint torrent file-block status, then refresh
+    pollTorrents();
   }
 
   // renderCrumbs fills the header breadcrumb slot (root › page › …) — the note's
@@ -854,10 +871,21 @@ $(function () {
     const head = (b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
     const content = (head && head.content) || {};
     const $row = $('<div class="ax-nb"></div>').attr('data-bid', b.bid);
-    // Every block is markdown: rendered by default, click → raw-markdown edit.
-    const $ed = $('<div class="ax-nb-body"></div>');
-    renderView($ed, content);
+    const isFile = blockType(b) === 'file';
+    // Text/heading blocks are markdown (rendered by default, click → edit). A
+    // file block renders its attachment (image/video/chip) + optional caption,
+    // not an editor.
+    let $ed;
+    if (isFile) {
+      $ed = fileBlockBody(content);
+    } else {
+      $ed = $('<div class="ax-nb-body"></div>');
+      renderView($ed, content);
+    }
     const hist = b.history || [];
+    if (isFile && hist.length && selfPubHex() && hist[0].author === selfPubHex()) {
+      $row.attr('data-mine', '1'); // I shared this file → I'm the seeder
+    }
     const creator = hist.length ? nameForPub(hist[0].author) : (head ? nameForPub(head.author) : '?');
     const editor = head ? nameForPub(head.author) : (hist.length ? nameForPub(hist[hist.length - 1].author) : '?');
     const nver = hist.length || (head ? 1 : 0);
@@ -868,10 +896,11 @@ $(function () {
       ? '<span class="ax-nb-editor" title="last edited by">✎ ' + esc(editor) + '</span>' : '';
     const variants = (b.heads && b.heads.length > 1)
       ? '<span class="ax-nb-variants" title="concurrent versions">' + b.heads.length + ' variants</span>' : '';
+    const vbtn = isFile ? '' : '<span class="ax-nb-vbtn" title="version history">v' + nver + '</span>';
     const $meta = $(
       '<div class="ax-nb-meta">' +
         '<span class="ax-nb-author" title="created by">' + esc(creator) + '</span>' +
-        '<span class="ax-nb-vbtn" title="version history">v' + nver + '</span>' +
+        vbtn +
         editedBy +
         '<span class="ax-nb-time" title="last edited">' + esc(editedTs ? notifWhen(editedTs) : '') + '</span>' +
         variants +
@@ -881,6 +910,94 @@ $(function () {
           '<button class="ax-nb-del" title="delete">✕</button>' +
         '</span></div>');
     return $row.append($ed, $meta);
+  }
+
+  function selfPubHex() { return (lastStatus && lastStatus.identity_pub) || ''; }
+
+  // fileBlockBody renders a block.file: the attachment (image/video preview or
+  // download chip, via the shared attachHtml) plus an optional markdown caption.
+  function fileBlockBody(content) {
+    const f = content || {};
+    const $body = $('<div class="ax-nb-body ax-nb-file"></div>');
+    const mime = f.mime || '';
+    const previewable = mime.indexOf('image/') === 0 || mime.indexOf('video/') === 0;
+    const cap = f.caption
+      ? '<div class="ax-nb-filecap ax-md">' + (window.f2fRich ? f2fRich.markdown(f.caption) : esc(f.caption)) + '</div>'
+      : '';
+    const cls = previewable ? 'ax-msg-media' : 'ax-msg-filecard';
+    $body.html('<div class="' + cls + '">' + attachHtml(f) + cap + '</div>');
+    return $body;
+  }
+
+  // uploadNoteFile attaches a file to the open note as a block.file: small files
+  // inline (base64), large ones seeded over torrent (multipart). Appended at the
+  // end of the current page.
+  // uploadingPlaceholder is a transient in-place card shown at the insertion
+  // spot while a file uploads, so it's clear both THAT something is happening
+  // and WHERE the file will land. Replaced by the real block on completion.
+  function uploadingPlaceholder(name) {
+    return $('<div class="ax-nb ax-nb-uploading"><div class="ax-nb-body">' +
+      '<div class="ax-msg-filecard"><div class="ax-up-row">' +
+      '<span class="ax-up-spin"></span><span class="ax-up-name"></span>' +
+      '<span class="ax-up-tag">uploading…</span></div></div></div></div>')
+      .find('.ax-up-name').text(name).end();
+  }
+  // placeUpload drops the placeholder at the chosen spot: after a block, before
+  // a draft, or (fallback) before the trailing draft line.
+  function placeUpload($ph, place) {
+    if (place && place.after && place.after.length) place.after.after($ph);
+    else if (place && place.before && place.before.length) place.before.before($ph);
+    else $('#note-blocks .ax-nb-draft').last().closest('.ax-nb-editwrap').before($ph);
+  }
+
+  // postNoteFile uploads the bytes and creates the block.file, returning a
+  // promise. Small files go inline (base64), large ones over torrent.
+  function postNoteFile(conv, parent, pos, file) {
+    if (file.size > (8 << 20)) {
+      const fd = new FormData();
+      fd.append('channel', noteScopeOf(conv));
+      fd.append('parent', parent);
+      fd.append('pos', pos);
+      fd.append('file', file);
+      return $.ajax({ url: '/api/notes/share', method: 'POST', data: fd, processData: false, contentType: false });
+    }
+    const d = $.Deferred();
+    const reader = new FileReader();
+    reader.onload = () => {
+      const b64 = String(reader.result).split(',')[1] || '';
+      $.ajax({
+        url: '/api/notes/attach', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ channel: noteScopeOf(conv), parent, pos, file: { name: file.name, mime: file.type, data: b64 } }),
+      }).done(d.resolve).fail(d.reject);
+    };
+    reader.onerror = () => d.reject(reader.error);
+    reader.readAsDataURL(file);
+    return d.promise();
+  }
+
+  function uploadNoteFile(file, opts) {
+    if (!noteConv || !file) return;
+    const conv = noteConv;
+    const parent = (opts && opts.parent != null) ? opts.parent : notePage;
+    const pos = (opts && opts.pos) ? opts.pos : posEnd();
+    const draftText = (opts && opts.draftText) ? opts.draftText : '';
+    const $ph = uploadingPlaceholder(file.name);
+    placeUpload($ph, opts && opts.place);
+    $('#note-status').text('attaching ' + file.name + '…');
+    // Attaching must not discard what's typed: the reload would wipe the draft
+    // textarea, so put the unsaved text back into it afterwards. It still only
+    // becomes a block on Enter.
+    const done = () => loadNoteBlocks(() => {
+      $('#note-status').text('');
+      if (!draftText.trim()) return;
+      const $d = $('#note-blocks .ax-nb-draft').last();
+      if ($d.length) { $d.val(draftText); autogrow($d[0]); $d.focus(); placeCaretEnd($d[0]); updateGutter($d[0]); }
+    });
+    const fail = (x) => { $ph.remove(); $('#note-status').text('attach failed: ' + errorOf(x)); };
+    // Flush pending edits to existing blocks so the reload doesn't drop them.
+    flushNoteSaves()
+      .then(() => postNoteFile(conv, parent, pos, file))
+      .done(done).fail(fail);
   }
 
   // renderView paints a text/heading block as RENDERED markdown (full
@@ -913,7 +1030,12 @@ $(function () {
   // is hidden by CSS until the textarea is focused). Used for both editing an
   // existing block and typing a new one (draft), so the experience matches.
   function editorWrap($ta) {
-    return $('<div class="ax-nb-editwrap"><div class="ax-nb-gutter"></div></div>').append($ta);
+    return $('<div class="ax-nb-editwrap"><div class="ax-nb-gutter"></div></div>')
+      .append($ta)
+      // Attach affordance for THIS block/draft — shown on focus (like the
+      // gutter). tabindex=-1 + mousedown-preventDefault keep the editor focused
+      // so the file lands at this position, not at the end of the page.
+      .append('<button type="button" class="ax-nb-attach" tabindex="-1" title="attach file"><i class="bi bi-paperclip"></i></button>');
   }
 
   // Line-number gutter for the editing textarea. A hidden mirror (same width +
@@ -1078,6 +1200,9 @@ $(function () {
     $d[0].focus();
     autogrow($d[0]);
     updateGutter($d[0]);
+    // Bring the new line into view (renderNoteBlocks restored the old scroll;
+    // a freshly-created block may sit just outside it). 'nearest' = minimal move.
+    $d[0].scrollIntoView({ block: 'nearest' });
   }
 
   // insertDraftAtPos re-inserts an inline draft at a fractional pos after a
@@ -1279,6 +1404,42 @@ $(function () {
   $('#note-back').on('click', function () {
     if (noteConv) location.hash = convRoute(noteConv);
   });
+
+  // Attach a file at a specific spot: the per-block/draft paperclip inserts
+  // right after that block (or at the draft's pos); drag-drop inserts after the
+  // block dropped on. The header has no global button — attaching is positional.
+  let pendingAttach = null;
+  // attachTargetFor resolves where a file goes from the editor it was triggered
+  // on: after an existing block, or at a draft's stashed pos (placeholder shown
+  // right there so it's clear where it lands).
+  function attachTargetFor($wrap) {
+    const $row = $wrap.closest('.ax-nb');
+    if ($row.length && $row.attr('data-bid')) {
+      return { parent: notePage, pos: posAfter($row.attr('data-bid')), place: { after: $row } };
+    }
+    const $d = $wrap.find('.ax-nb-draft'); // a draft line stashes its target pos
+    return { parent: notePage, pos: ($d.attr('data-pos')) || posEnd(), place: { before: $wrap }, draftText: $d.val() };
+  }
+  $('#note-blocks').on('mousedown', '.ax-nb-attach', function (e) {
+    e.preventDefault(); // keep the editor focused so focus-within stays open
+    pendingAttach = attachTargetFor($(this).closest('.ax-nb-editwrap'));
+    $('#note-file-input').val('').click();
+  });
+  $('#note-file-input').on('change', function () {
+    if (this.files && this.files[0]) uploadNoteFile(this.files[0], pendingAttach);
+    pendingAttach = null;
+  });
+  $('#note-blocks').on('dragover', function (e) { e.preventDefault(); $(this).addClass('ax-nb-dragover'); })
+    .on('dragleave drop', function () { $(this).removeClass('ax-nb-dragover'); })
+    .on('drop', function (e) {
+      e.preventDefault();
+      const dt = e.originalEvent && e.originalEvent.dataTransfer;
+      if (!dt || !dt.files || !dt.files.length) return;
+      const $row = $(e.target).closest('.ax-nb');
+      const inBlock = $row.length && $row.attr('data-bid');
+      const pos = inBlock ? posAfter($row.attr('data-bid')) : posEnd();
+      uploadNoteFile(dt.files[0], { parent: notePage, pos, place: inBlock ? { after: $row } : null });
+    });
 
   // Toggle the members panel.
   $('#chat-members').on('click', function () {
@@ -2064,6 +2225,12 @@ $(function () {
     const ips = [];
     const add = (pub) => { const ip = overlayForPub(pub); if (ip && ips.indexOf(ip) === -1) ips.push(ip); };
     add($chip.closest('.ax-msg').data('author'));
+    // Note file-block: the seeder is the block's creator (first version author).
+    const $nb = $chip.closest('.ax-nb');
+    if ($nb.length) {
+      const b = noteBlocks.find((x) => x.bid === $nb.attr('data-bid'));
+      if (b && b.history && b.history.length) add(b.history[0].author);
+    }
     if (chatConv && chatConv.kind === 'channel') {
       const ch = chatChannels.find((c) => c.id === chatConv.key);
       ((ch && ch.members) || []).forEach(add);
@@ -2071,9 +2238,10 @@ $(function () {
     return ips;
   }
   function updateTorrentChips() {
-    $('.ax-chat-messages .ax-msg-torrent').each(function () {
+    // Torrent chips live in chat messages and in note file-blocks alike.
+    $('.ax-msg-torrent').each(function () {
       const $c = $(this);
-      const mine = $c.closest('.ax-msg').hasClass('is-mine');
+      const mine = $c.closest('.ax-msg').hasClass('is-mine') || $c.closest('[data-mine="1"]').length > 0;
       const st = torrentStatus[$c.attr('data-infohash')];
       let html;
       if (mine) {
@@ -2094,7 +2262,7 @@ $(function () {
     });
   }
   function pollTorrents() {
-    if (!$('.ax-chat-messages .ax-msg-torrent').length) return;
+    if (!$('.ax-msg-torrent').length) return;
     $.getJSON('/api/files/downloads', function (list) {
       const m = {};
       (Array.isArray(list) ? list : []).forEach((d) => { m[d.info_hash] = d; });
@@ -2102,7 +2270,7 @@ $(function () {
       updateTorrentChips();
     });
   }
-  $('#tab-chat').on('click', '.ax-msg-torrent-dl', function () {
+  $('#tab-chat, #tab-note').on('click', '.ax-msg-torrent-dl', function () {
     const $c = $(this).closest('.ax-msg-torrent');
     const magnet = $c.attr('data-magnet');
     if (!magnet) return;
@@ -2112,7 +2280,7 @@ $(function () {
       data: JSON.stringify({ magnet: magnet, peers: torrentPeers($c) }),
     }).done(pollTorrents).fail((xhr) => alert('download: ' + errorOf(xhr)));
   });
-  $('#tab-chat').on('click', '.ax-msg-torrent-open', function () {
+  $('#tab-chat, #tab-note').on('click', '.ax-msg-torrent-open', function () {
     const st = torrentStatus[$(this).closest('.ax-msg-torrent').attr('data-infohash')];
     if (st && st.path) {
       $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });
