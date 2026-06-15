@@ -58,6 +58,15 @@
 - Privilege elevation: app (user) поднимает engine (root) через системный
   диалог, общение по localhost (macOS — `osascript`, позже `SMAppService`).
 
+### Сеть / NAT
+- **Hairpin / same-NAT и симметричный NAT** — LAN host-кандидаты + релей-фоллбэк,
+  когда прямой punch невозможен. См. [NAT.md](NAT.md).
+- **Живучесть хоста** — восстановление после сна (скачок часов) и после потери
+  маршрута на ходу (network-down errno) теперь оба дёргают `restartOnEphemeralPort`
+  ✅. Остаётся: фиксированный listen-порт при рестарте (стабильный reflex) вместо
+  ephemeral — чтобы при флаппинге сна пиры восстанавливались быстрее.
+  См. [NAT.md](NAT.md) (разбор инцидента).
+
 ### Инженерные улучшения
 - Structured logging на `log/slog` (уровни, `--verbose`/`LOG_LEVEL`).
 - Тесты engine lifecycle, config round-trip, intercept matching, SFU

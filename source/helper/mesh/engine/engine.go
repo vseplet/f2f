@@ -16,6 +16,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/vseplet/f2f/source/helper/clog"
@@ -361,6 +362,14 @@ type Engine struct {
 	// should use the peers map.
 	staticPeer       atomic.Pointer[net.UDPAddr]
 	lastStaticPingMs atomic.Int64
+
+	// netDownSinceMs is epoch ms of when our UDP socket first started
+	// returning ENETUNREACH/-DOWN errors on every send (local route
+	// vanished while awake — Wi-Fi reassociation, network switch,
+	// interface flap). 0 = sends are working. holePunchLoop watches this
+	// to trigger the same restart-on-ephemeral-port cure as wake-from-sleep
+	// once the outage persists past a threshold.
+	netDownSinceMs atomic.Int64
 
 	// awgAllowedHook lets services/tunnel inject extra allowed_ips
 	// (intercept prefixes) into AWG peer sync without engine owning
@@ -1166,6 +1175,24 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 	}
 }
 
+// isNetDownErr reports whether err from a UDP send means the local
+// network path is gone — the kernel has no route to send on. This is the
+// awake-network-change case (Wi-Fi reassoc, network switch, interface
+// flap): the socket is bound to a stale route and every send fails until
+// it's recreated. Distinct from a peer being unreachable (that just times
+// out, no errno). Matches on darwin and linux.
+func isNetDownErr(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case syscall.ENETUNREACH, syscall.ENETDOWN, syscall.EHOSTUNREACH, syscall.EADDRNOTAVAIL:
+		return true
+	}
+	return false
+}
+
 func (e *Engine) holePunchLoop(ctx context.Context) {
 	defer e.workers.Done()
 	ticker := time.NewTicker(1 * time.Second)
@@ -1178,6 +1205,12 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 		// assume the host slept. Real ticks land at ~1s; anything past
 		// 30s only happens after suspend/resume.
 		wakeJumpMs = 30000
+		// netDownGraceMs is how long every UDP send may keep failing with
+		// a network-down errno before we recreate the socket. Long enough
+		// to ride out a brief Wi-Fi reassociation without a restart, short
+		// enough that a real route change recovers in seconds instead of
+		// hanging until the next sleep happens to trigger wake-recovery.
+		netDownGraceMs = 15000
 	)
 	var prevTickMs int64
 	for {
@@ -1213,6 +1246,10 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				targets = append(targets, p)
 			}
 			e.mu.Unlock()
+			// Tick-level send health: did anything go out, and did every
+			// failure look like the local route is gone? Drives the
+			// awake-network-change recovery below.
+			var sentOK, netDown bool
 			for _, p := range targets {
 				seen := p.LastSeenMs.Load()
 				lastSent := p.LastPingMs.Load()
@@ -1247,13 +1284,41 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					continue
 				}
 				if _, err := e.udp.WriteToUDP(reqPkt, p.UDPAddr); err != nil {
+					if isNetDownErr(err) {
+						netDown = true
+					}
 					if ctx.Err() == nil {
 						clog.Warn("pair", "send req %s: %v", p.label(), err)
 					}
 					continue
 				}
+				sentOK = true
 				p.LastPingMs.Store(now)
 				p.LastSentReqMs.Store(now)
+			}
+			// Awake-network-change recovery. When every send fails with a
+			// network-down errno and none succeed, the local route is gone
+			// (Wi-Fi reassoc, network switch, interface flap) — the socket
+			// is bound to a dead path and won't recover on its own. Past the
+			// grace window, recreate it via the same ephemeral-port restart
+			// wake-from-sleep uses. A tick with no sends due leaves the
+			// state untouched; only a real success clears it.
+			switch {
+			case sentOK:
+				if e.netDownSinceMs.Swap(0) != 0 {
+					clog.Info("net", "UDP send recovered")
+				}
+			case netDown:
+				since := e.netDownSinceMs.Load()
+				if since == 0 {
+					e.netDownSinceMs.Store(now)
+					clog.Warn("net", "UDP send failing — local route gone? watching")
+				} else if now-since >= netDownGraceMs {
+					clog.Info("net", "local route down %ds, restarting on a fresh ephemeral port", (now-since)/1000)
+					e.netDownSinceMs.Store(0)
+					go e.restartOnEphemeralPort()
+					return
+				}
 			}
 			// Static --peer mode (legacy): single keepalive every 25s
 			// to the configured static endpoint, no peer-state tracking.
