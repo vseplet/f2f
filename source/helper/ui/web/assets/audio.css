@@ -2514,11 +2514,29 @@ a.ax-domain-link:hover {
 .ax-msg-text h2 { font-size: 1.3em; }
 .ax-msg-text h3 { font-size: 1.15em; }
 .ax-msg-text h4, .ax-msg-text h5, .ax-msg-text h6 { font-size: 1em; }
-.ax-msg-text h1, .ax-msg-text h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.15em; }
 .ax-msg-text hr { border: none; border-top: 1px solid var(--border); margin: 0.5em 0; }
 .ax-msg-text blockquote { margin: 0.3em 0; padding-left: 8px; border-left: 2px solid var(--border); color: var(--muted); }
 .ax-msg-text table { border-collapse: collapse; margin: 0.3em 0; }
 .ax-msg-text th, .ax-msg-text td { border: 1px solid var(--border); padding: 2px 6px; }
+/* A caption (text under an attachment) renders the SAME markdown as a text
+   bubble — mirror the block-level styling so headings/lists/etc. aren't flat. */
+.ax-msg-caption a { color: var(--accent); text-decoration: underline; }
+.ax-msg-caption strong { font-weight: 600; }
+.ax-msg-caption em { font-style: italic; }
+.ax-msg-caption > :first-child { margin-top: 0; }
+.ax-msg-caption > :last-child { margin-bottom: 0; }
+.ax-msg-caption p { margin: 0.3em 0; }
+.ax-msg-caption ul, .ax-msg-caption ol { margin: 0.3em 0; padding-left: 1.4em; }
+.ax-msg-caption li { margin: 0.1em 0; }
+.ax-msg-caption h1, .ax-msg-caption h2, .ax-msg-caption h3,
+.ax-msg-caption h4, .ax-msg-caption h5, .ax-msg-caption h6 {
+    margin: 0.5em 0 0.25em; font-weight: 700; line-height: 1.25;
+}
+.ax-msg-caption h1 { font-size: 1.5em; }
+.ax-msg-caption h2 { font-size: 1.3em; }
+.ax-msg-caption h3 { font-size: 1.15em; }
+.ax-msg-caption h4, .ax-msg-caption h5, .ax-msg-caption h6 { font-size: 1em; }
+.ax-msg-caption blockquote { margin: 0.3em 0; padding-left: 8px; border-left: 2px solid var(--border); color: var(--muted); }
 
 /* ```lang code block. The github-dark theme colours .hljs; we add the frame
    and a small language label. Nested in the bubble, so it fills its width. */
@@ -2946,10 +2964,6 @@ a.ax-domain-link:hover {
 .ax-md h1 { font-size: 1.7em; }
 .ax-md h2 { font-size: 1.4em; }
 .ax-md h3 { font-size: 1.2em; }
-.ax-md h1, .ax-md h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
-/* Note blocks: each heading is its own block, so the GitHub-style underline
-   reads as a divider between blocks — drop it there (keep it in chat). */
-.ax-note-blocks .ax-md h1, .ax-note-blocks .ax-md h2 { border-bottom: none; padding-bottom: 0; }
 .ax-md blockquote { margin: 0.5em 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .ax-md hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
 .ax-md table { border-collapse: collapse; margin: 0.5em 0; }

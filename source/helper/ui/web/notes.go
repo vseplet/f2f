@@ -35,8 +35,8 @@ func (s *Server) blockSigner(w http.ResponseWriter) (signer interface {
 	return id, true
 }
 
-// GET /api/blocks?channel=<scope> → folded blocks (with heads/author/version).
-func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
+// GET /api/notes?channel=<scope> → folded blocks (with heads/author/version).
+func (s *Server) handleNotesList(w http.ResponseWriter, r *http.Request) {
 	ch := r.URL.Query().Get("channel")
 	if ch == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("channel required"))
@@ -45,8 +45,8 @@ func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.blocks.Blocks(ch))
 }
 
-// POST /api/blocks {channel,type,content,parent,pos} → {bid}
-func (s *Server) handleBlocksCreate(w http.ResponseWriter, r *http.Request) {
+// POST /api/notes {channel,type,content,parent,pos} → {bid}
+func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string          `json:"channel"`
 		Type    string          `json:"type"`
@@ -74,8 +74,8 @@ func (s *Server) handleBlocksCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"bid": bid})
 }
 
-// POST /api/blocks/update {channel,bid,content}
-func (s *Server) handleBlocksUpdate(w http.ResponseWriter, r *http.Request) {
+// POST /api/notes/update {channel,bid,content}
+func (s *Server) handleNotesUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string          `json:"channel"`
 		BID     string          `json:"bid"`
@@ -103,8 +103,8 @@ func (s *Server) handleBlocksUpdate(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// POST /api/blocks/move {channel,bid,pos}
-func (s *Server) handleBlocksMove(w http.ResponseWriter, r *http.Request) {
+// POST /api/notes/move {channel,bid,pos}
+func (s *Server) handleNotesMove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string `json:"channel"`
 		BID     string `json:"bid"`
@@ -125,8 +125,8 @@ func (s *Server) handleBlocksMove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// POST /api/blocks/delete {channel,bid}
-func (s *Server) handleBlocksDelete(w http.ResponseWriter, r *http.Request) {
+// POST /api/notes/delete {channel,bid}
+func (s *Server) handleNotesDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string `json:"channel"`
 		BID     string `json:"bid"`
@@ -146,8 +146,8 @@ func (s *Server) handleBlocksDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// POST /api/blocks/merge {channel,bid,content}
-func (s *Server) handleBlocksMerge(w http.ResponseWriter, r *http.Request) {
+// POST /api/notes/merge {channel,bid,content}
+func (s *Server) handleNotesMerge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string          `json:"channel"`
 		BID     string          `json:"bid"`

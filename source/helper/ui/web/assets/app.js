@@ -317,7 +317,7 @@ $(function () {
 
 
   // --- messaging (services/messenger over the bus) ---
-  const GENERAL_ID = '*/general'; // camp-wide channel everyone is in (no leave)
+  const GENERAL_ID = 'general'; // camp-wide channel everyone is in (no leave)
   // URL routes: a conversation is "channel:<key>" — there's no separate "dm:"
   // because a DM is just the degenerate channel. The key's SHAPE tells them
   // apart: a bare peer pub is a DM, while "general" or an "<owner>/<name>" id
@@ -326,8 +326,10 @@ $(function () {
   function convKey(id) { return id === GENERAL_ID ? 'general' : id; }
   function convRoute(id) { return 'channel:' + convKey(id); }
   function noteRoute(id) { return 'note:' + convKey(id); }
-  // convKind infers a conversation's kind from a (de-aliased) key.
-  function convKind(key) { return (key === GENERAL_ID || key.includes('/')) ? 'channel' : 'dm'; }
+  // convKind infers a conversation's kind from its key: a channel key is the
+  // channel block bid ("general" or "<fp16>-<rand>"), a DM key is the peer's
+  // pub (64 hex, no dash). So a dash (or the general id) ⇒ channel.
+  function convKind(key) { return (key === GENERAL_ID || key.includes('-')) ? 'channel' : 'dm'; }
   let chatChannels = [];      // /api/chat/channels — channels we belong to
   let chatConv = null;        // { kind:'dm'|'channel', key } currently open
   let replyTarget = null;     // message the next send will quote, or null
@@ -586,7 +588,7 @@ $(function () {
   function loadConversation() {
     if (!chatConv) return;
     chatUnread[chatConv.key] = 0;
-    $.getJSON('/api/chat/messages?kind=' + encodeURIComponent(chatConv.kind)
+    $.getJSON('/api/messages?kind=' + encodeURIComponent(chatConv.kind)
       + '&key=' + encodeURIComponent(chatConv.key), (msgs) => {
       if (!chatConv) return;
       chatMsgs = msgs || [];
@@ -601,7 +603,7 @@ $(function () {
   // fetchChannels refreshes the channel list, then rebuilds the sidebar and
   // (if open) the members panel.
   function fetchChannels() {
-    $.getJSON('/api/chat/channels', (list) => {
+    $.getJSON('/api/channels', (list) => {
       chatChannels = Array.isArray(list) ? list : [];
       if (lastStatus && typeof renderSidebarTree === 'function') renderSidebarTree(lastStatus);
       if (!$('#chat-members-panel').hasClass('hidden')) renderMembersPanel();
@@ -656,16 +658,17 @@ $(function () {
   }
 
   // Delete (owner) / leave (member) the open channel.
-  function chatChannelAction(path, verb) {
+  function chatChannelAction(path, verb, body) {
     if (!chatConv || !confirm(verb + ' channel?')) return;
     $.ajax({
       url: path, method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ channel: chatConv.key }),
+      data: JSON.stringify(body),
     }).done(() => { location.hash = ''; fetchChannels(); })
       .fail((xhr) => alert(verb + ': ' + errorOf(xhr)));
   }
-  $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/chat/channels/delete', 'delete'));
-  $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/chat/channels/leave', 'leave'));
+  $('#chat-members-panel').on('click', '#chat-delete-channel', () => chatChannelAction('/api/channels/delete', 'delete', { bid: chatConv.key }));
+  // Leaving a channel = removing ourselves from its member list.
+  $('#chat-members-panel').on('click', '#chat-leave-channel', () => chatChannelAction('/api/channels/members', 'leave', { bid: chatConv.key, remove: [lastStatus && lastStatus.identity_pub] }));
 
   // --- channel notes (the shared doc, opened in the main pane) ---
   //
@@ -687,9 +690,9 @@ $(function () {
   // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
   // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
   function noteTitle(scope) {
-    if (scope === GENERAL_ID || scope.includes('/')) {
+    if (scope === GENERAL_ID || scope.includes('-')) {
       const ch = chatChannels.find((c) => c.id === scope);
-      return '# ' + ((ch && ch.name) || scope.split('/').pop()) + ' · notes';
+      return '# ' + ((ch && ch.name) || scope) + ' · notes';
     }
     return nameForPub(scope) + ' · notes';
   }
@@ -711,7 +714,7 @@ $(function () {
   function loadNoteBlocks(cb) {
     if (!noteConv) return;
     const conv = noteConv;
-    $.getJSON('/api/blocks?channel=' + encodeURIComponent(noteScopeOf(conv)), (list) => {
+    $.getJSON('/api/notes?channel=' + encodeURIComponent(noteScopeOf(conv)), (list) => {
       if (noteConv !== conv) return; // navigated away
       noteBlocks = (list || []).filter((b) => !b.deleted);
       renderNoteBlocks();
@@ -894,7 +897,7 @@ $(function () {
     const v = b && (b.history || []).find((x) => x.entry_id === entryId);
     if (!v) return;
     $.ajax({
-      url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+      url: '/api/notes/update', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: v.content || {} }),
     }).done(() => loadNoteBlocks());
   }
@@ -916,7 +919,7 @@ $(function () {
     noteSaveTimers[bid] = setTimeout(() => {
       delete noteSaveTimers[bid];
       $.ajax({
-        url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+        url: '/api/notes/update', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({ channel: noteScopeOf(conv), bid, content }),
       });
     }, 500);
@@ -948,7 +951,7 @@ $(function () {
       const $ta = $('#note-blocks .ax-nb[data-bid="' + bid + '"] .ax-nb-text');
       if (!$ta.length) continue;
       reqs.push($.ajax({
-        url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+        url: '/api/notes/update', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md: $ta.val() } }),
       }));
     }
@@ -992,7 +995,7 @@ $(function () {
     const conv = noteConv;
     flushNoteSaves().always(() => {
       $.ajax({
-        url: '/api/blocks', method: 'POST', contentType: 'application/json',
+        url: '/api/notes', method: 'POST', contentType: 'application/json',
         data: JSON.stringify({ channel: noteScopeOf(conv), type: 'text', content, pos }),
       }).done((r) => {
         const bid = r && r.bid;
@@ -1020,7 +1023,7 @@ $(function () {
       if (!fromRedo) noteRedo = [];
     }
     $.ajax({
-      url: '/api/blocks/delete', method: 'POST', contentType: 'application/json',
+      url: '/api/notes/delete', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ channel: noteScopeOf(noteConv), bid }),
     }).done(() => loadNoteBlocks(() => { delete noteDeleting[bid]; }))
       .fail(() => { delete noteDeleting[bid]; });
@@ -1033,7 +1036,7 @@ $(function () {
     if (!e) { $('#note-status').text('nothing to undo'); return; }
     noteRedo.push(e);
     $.ajax({
-      url: '/api/blocks/update', method: 'POST', contentType: 'application/json',
+      url: '/api/notes/update', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ channel: noteScopeOf(noteConv), bid: e.bid, content: e.content }),
     }).done(() => loadNoteBlocks());
   }
@@ -1050,7 +1053,7 @@ $(function () {
     const j = dir < 0 ? i - 1 : i + 1;
     if (j < 0 || j >= noteBlocks.length) return;
     const conv = noteConv, a = noteBlocks[i], b = noteBlocks[j];
-    const mv = (id, pos) => $.ajax({ url: '/api/blocks/move', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(conv), bid: id, pos }) });
+    const mv = (id, pos) => $.ajax({ url: '/api/notes/move', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(conv), bid: id, pos }) });
     $.when(mv(a.bid, b.pos), mv(b.bid, a.pos)).always(loadNoteBlocks);
   }
 
@@ -1082,7 +1085,7 @@ $(function () {
     if (pending) { clearTimeout(noteSaveTimers[bid]); delete noteSaveTimers[bid]; }
     if (!md.trim()) { delNoteBlock(bid); return; } // empty block vanishes on blur
     if (pending) { // flush a pending debounced save now
-      $.ajax({ url: '/api/blocks/update', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md } }) });
+      $.ajax({ url: '/api/notes/update', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(noteConv), bid, content: { md } }) });
     }
     renderView($row.find('.ax-nb-body'), { md });
   });
@@ -1172,8 +1175,8 @@ $(function () {
     const pub = $(this).attr('data-rm');
     if (!pub || !chatConv) return;
     $.ajax({
-      url: '/api/chat/members', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ channel: chatConv.key, remove: [pub] }),
+      url: '/api/channels/members', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ bid: chatConv.key, remove: [pub] }),
     }).done(fetchChannels).fail((xhr) => alert('remove member: ' + errorOf(xhr)));
   });
   // Add a member (owner only).
@@ -1181,19 +1184,21 @@ $(function () {
     const pub = $(this).val();
     if (!pub || !chatConv) return;
     $.ajax({
-      url: '/api/chat/members', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ channel: chatConv.key, add: [pub] }),
+      url: '/api/channels/members', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ bid: chatConv.key, add: [pub] }),
     }).done(fetchChannels).fail((xhr) => alert('add member: ' + errorOf(xhr)));
   });
 
   // Live message stream: append to the open conversation, else bump unread.
   function openChatStream() {
-    const es = new EventSource('/api/chat/stream');
+    const es = new EventSource('/api/events');
     es.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
-      // Block-change event (remote db sync) rides this stream — live-refresh the
-      // open note, preserving the block under the caret. Not a chat message.
+      // Block-change event (remote db sync) rides this stream.
       if (m.type === 'blocks') {
+        // A channels-scope change → refresh the sidebar channel list.
+        if (m.scope === 'channels') { fetchChannels(); return; }
+        // Otherwise it's a note scope — live-refresh the open note editor.
         if (m.scope && noteConv && !$('#tab-note').hasClass('hidden') && m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
         return;
       }
@@ -1206,10 +1211,8 @@ $(function () {
         osNotify(n);
         return;
       }
-      const key = m.kind === 'channel' ? m.peer : (m.mine ? m.to : m.from);
-      // A channel lifecycle event may have created/changed/removed a channel
-      // — refresh the list so it (dis)appears.
-      if (m.kind === 'channel' && m.type && m.type !== 'text') fetchChannels();
+      // peer is the conversation key for both kinds (channel bid / DM peer pub).
+      const key = m.peer;
       // Legacy notes-over-bus messages (notes are now blocks synced via db):
       // never render them as a chat line; refresh the block editor if open.
       if (m.type === 'notes') {
@@ -1291,9 +1294,14 @@ $(function () {
     // surprise "everyone's already in".
     if (h === 'channel:new') {
       const name = (prompt('channel name (use / for hierarchy, e.g. dev/backend)') || '').trim();
+      if (name === GENERAL_ID || name.startsWith(GENERAL_ID + '/')) {
+        alert('"' + GENERAL_ID + '" is reserved — you can’t nest channels under it.');
+        location.hash = '';
+        return;
+      }
       if (name) {
         $.ajax({
-          url: '/api/chat/channels', method: 'POST', contentType: 'application/json',
+          url: '/api/channels', method: 'POST', contentType: 'application/json',
           data: JSON.stringify({ name, members: [] }),
         }).done((ch) => {
           fetchChannels();
@@ -1324,10 +1332,8 @@ $(function () {
     const m = h.match(/^channel:(.+)$/);
     if (!m) return;
     let key = m[1], thread = '';
-    const tt = key.match(/^(.+):thread:([0-9a-zA-Z]+)$/);
+    const tt = key.match(/^(.+):thread:([0-9a-zA-Z-]+)$/); // ids contain '-' (fp16-rand)
     if (tt) { key = tt[1]; thread = tt[2]; }
-    if (key === GENERAL_ID) { location.hash = convRoute(GENERAL_ID) + (thread ? ':thread:' + thread : ''); return; }
-    if (key === 'general') key = GENERAL_ID;
     const kind = convKind(key);
     // Always switch to the chat tab (we may be coming back from the notes
     // view). Only RELOAD the conversation when it actually changed — toggling
@@ -1355,7 +1361,7 @@ $(function () {
   function highlightActiveRoute() {
     let route = decodeURIComponent((location.hash || '').replace(/^#/, ''));
     // An open thread keeps its conversation row highlighted — drop the suffix.
-    route = route.replace(/:thread:[0-9a-zA-Z]+$/, '');
+    route = route.replace(/:thread:[0-9a-zA-Z-]+$/, '');
     // A note view keeps its channel's row highlighted — drop the ":preview"
     // mode suffix and map note:<id> to the channel's own route so the row matches.
     const noteM = route.replace(/:preview$/, '').match(/^note:(.+)$/);
@@ -1771,7 +1777,7 @@ $(function () {
     if (!text) return;
     $in.val(''); $in.css('height', 'auto');
     $.ajax({
-      url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+      url: '/api/messages', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, thread: threadRoot }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
@@ -1805,7 +1811,7 @@ $(function () {
     const reply_to = replyId(), thread = threadId(), edit_id = editId();
     clearReplyTarget();
     $.ajax({
-      url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+      url: '/api/messages', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ kind: chatConv.kind, key: chatConv.key, body: text, reply_to, thread, edit_id }),
     }).fail((xhr) => alert('send: ' + errorOf(xhr)));
   });
@@ -1852,7 +1858,7 @@ $(function () {
       // Go decodes the []byte field straight from that base64 string.
       const b64 = String(reader.result).split(',', 2)[1] || '';
       $.ajax({
-        url: '/api/chat/send', method: 'POST', contentType: 'application/json',
+        url: '/api/messages', method: 'POST', contentType: 'application/json',
         data: JSON.stringify(Object.assign({
           kind: chatConv.kind, key: chatConv.key, body: caption,
           file: { name: file.name, mime: file.type || 'application/octet-stream', data: b64 },
@@ -1874,7 +1880,7 @@ $(function () {
     if (ctx.reply_to) fd.append('reply_to', ctx.reply_to);
     if (ctx.thread) fd.append('thread', ctx.thread);
     if (ctx.edit_id) fd.append('edit_id', ctx.edit_id);
-    $.ajax({ url: '/api/chat/share', method: 'POST', data: fd, processData: false, contentType: false })
+    $.ajax({ url: '/api/messages/share', method: 'POST', data: fd, processData: false, contentType: false })
       .fail((xhr) => alert('share: ' + errorOf(xhr)));
   }
   function attachFrom(file, caption, ctx) {

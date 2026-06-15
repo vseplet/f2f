@@ -12,8 +12,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"strings"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
 )
 
 // Scope is the camp-wide registry every channel block lives in.
@@ -49,8 +51,9 @@ type Channel struct {
 	Name    string   `json:"name"`
 	Parent  string   `json:"parent,omitempty"` // parent channel bid ("" = root)
 	Pos     string   `json:"pos,omitempty"`
-	Owner   string   `json:"owner"`   // creator pub
-	Members []string `json:"members"` // explicit members (excludes the owner)
+	Owner     string   `json:"owner"`      // creator pub
+	Members   []string `json:"members"`    // explicit members (excludes the owner)
+	CreatedAt int64    `json:"created_at"` // first version's timestamp
 }
 
 // Manager is the channel registry over the block engine.
@@ -61,6 +64,12 @@ func New(b *blocks.Manager) *Manager { return &Manager{blocks: b} }
 // Create makes a new channel owned by s. parent is the containing channel's
 // bid ("" = top level); pos orders it among siblings ("" = unordered).
 func (m *Manager) Create(s blocks.Signer, name, parent, pos string) (string, error) {
+	// general is the well-known camp-wide channel — you can't recreate it or
+	// nest channels under it (its name is also its bid; "general/…" names would
+	// build a bogus sidebar tree next to the real # general).
+	if name == GeneralBID || strings.HasPrefix(name, GeneralBID+"/") {
+		return "", fmt.Errorf("channels: %q is reserved", GeneralBID)
+	}
 	c, err := json.Marshal(meta{Name: name})
 	if err != nil {
 		return "", err
@@ -165,6 +174,9 @@ func (m *Manager) List() []*Channel {
 
 // IsMember reports whether pub may access the channel (owner or listed member).
 func (m *Manager) IsMember(bid, pub string) bool {
+	if bid == GeneralBID {
+		return true // everyone in the camp is in general
+	}
 	c := m.Get(bid)
 	if c == nil {
 		return false
@@ -196,13 +208,13 @@ func toChannel(b *blocks.Block) *Channel {
 	if n := len(b.Heads); n > 0 {
 		_ = json.Unmarshal(b.Heads[n-1].Content, &md)
 	}
-	owner := ""
+	owner, created := "", int64(0)
 	if len(b.History) > 0 {
-		owner = b.History[0].Author
+		owner, created = b.History[0].Author, b.History[0].TS
 	}
 	return &Channel{
 		BID: b.BID, Name: md.Name, Members: md.Members,
-		Parent: b.Parent, Pos: b.Pos, Owner: owner,
+		Parent: b.Parent, Pos: b.Pos, Owner: owner, CreatedAt: created,
 	}
 }
 

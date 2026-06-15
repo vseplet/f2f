@@ -20,8 +20,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
-	"github.com/vseplet/f2f/source/helper/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
@@ -172,6 +173,7 @@ func run(bind string, console bool, autostart bool) error {
 	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
 	blocksMgr := blocks.New(dbSvc)
 	channelsMgr := channels.New(blocksMgr) // channels are blocks in the "channels" scope
+	msgMgr := message.New(blocksMgr)       // messages are blocks in "message:<channelBid>"
 	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
 	dbSync.Register()
 	dbSvc.OnCommit(dbSync.Push)
@@ -198,7 +200,7 @@ func run(bind string, console bool, autostart bool) error {
 	msgSvc.Register()
 	// Scoped (channel/DM) files are served over torrent only to members of
 	// that conversation — the drop catalog asks the messenger who's in.
-	dropSvc.SetMembershipCheck(msgSvc.IsMember)
+	dropSvc.SetMembershipCheck(channelsMgr.IsMember)
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); we also surface peer
@@ -338,10 +340,10 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, msgSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, channelsMgr, msgMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
-	dbSvc.OnApply(func(e *db.Frame) { srv.NotifyBlockChange(e.Scope) })
+	dbSvc.OnApply(srv.OnFrameApplied)
 
 	// Service registry. Start order top-to-bottom, Stop reverse.
 	// Workers are spawned once and live for the whole process.

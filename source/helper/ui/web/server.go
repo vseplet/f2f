@@ -18,7 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -71,16 +73,19 @@ type Server struct {
 	vnc      *vnc.Service
 	oidc     *oidc.Service
 	blocks   *blocks.Manager
+	channels *channels.Manager
+	messages *message.Manager
 	addr     string
 	srv      *http.Server
 
 	signals     *signalHub
 	callSignals *signalHub   // SSE hub for SFU signals → local browser
 	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
+	msgEvents  *signalHub    // SSE hub: a new/edited chat message → browser (Message JSON)
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, msgSvc *messenger.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -98,10 +103,13 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		vnc:         vncSvc,
 		oidc:        oidcSvc,
 		blocks:      blocksMgr,
+		channels:    channelsMgr,
+		messages:    messagesMgr,
 		addr:        addr,
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
 		blockEvents: newSignalHub(),
+		msgEvents:  newSignalHub(),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -238,12 +246,25 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
 	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
 	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
-	mux.HandleFunc("GET /api/blocks", s.handleBlocksList)
-	mux.HandleFunc("POST /api/blocks", s.handleBlocksCreate)
-	mux.HandleFunc("POST /api/blocks/update", s.handleBlocksUpdate)
-	mux.HandleFunc("POST /api/blocks/move", s.handleBlocksMove)
-	mux.HandleFunc("POST /api/blocks/delete", s.handleBlocksDelete)
-	mux.HandleFunc("POST /api/blocks/merge", s.handleBlocksMerge)
+	// Notes are generic blocks (text) in a "note:<conv>" scope — the block
+	// engine surfaced under a meaningful entity name. No public /api/blocks.
+	mux.HandleFunc("GET /api/notes", s.handleNotesList)
+	mux.HandleFunc("POST /api/notes", s.handleNotesCreate)
+	mux.HandleFunc("POST /api/notes/update", s.handleNotesUpdate)
+	mux.HandleFunc("POST /api/notes/move", s.handleNotesMove)
+	mux.HandleFunc("POST /api/notes/delete", s.handleNotesDelete)
+	mux.HandleFunc("POST /api/notes/merge", s.handleNotesMerge)
+	// Channels (channel blocks) and messages (message blocks) — per-entity API.
+	mux.HandleFunc("GET /api/channels", s.handleChannelsList)
+	mux.HandleFunc("POST /api/channels", s.handleChannelsCreate)
+	mux.HandleFunc("POST /api/channels/rename", s.handleChannelsRename)
+	mux.HandleFunc("POST /api/channels/members", s.handleChannelsMembers)
+	mux.HandleFunc("POST /api/channels/delete", s.handleChannelsDelete)
+	mux.HandleFunc("POST /api/channels/dm", s.handleChannelsDM)
+	mux.HandleFunc("GET /api/messages", s.handleMessagesList)
+	mux.HandleFunc("POST /api/messages", s.handleMessagesPost)
+	mux.HandleFunc("POST /api/messages/share", s.handleMessagesShare)
+	mux.HandleFunc("GET /api/events", s.handleEventStream)
 	mux.HandleFunc("GET /api/chat/notes", s.handleChatGetNotes)
 	mux.HandleFunc("POST /api/chat/notes", s.handleChatNotes)
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)

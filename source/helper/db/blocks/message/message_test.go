@@ -1,9 +1,9 @@
-package chat
+package message
 
 import (
 	"testing"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
 	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/identity"
 )
@@ -67,14 +67,14 @@ func TestReplyThreadDelete(t *testing.T) {
 	ch := "chan1"
 	root, _ := m.Post(a, ch, "root", nil, "", "")
 	reply, _ := m.Post(a, ch, "re", nil, root, root)
-	if got := m.message(ch, reply); got.ReplyTo != root || got.Thread != root {
+	if got := m.Get(ch, reply); got.ReplyTo != root || got.Thread != root {
 		t.Fatalf("reply/thread lost: %+v", got)
 	}
 	// edit preserves reply/thread links
 	if err := m.Edit(a, ch, reply, "re!", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.message(ch, reply); got.ReplyTo != root || got.Thread != root {
+	if got := m.Get(ch, reply); got.ReplyTo != root || got.Thread != root {
 		t.Fatalf("edit dropped links: %+v", got)
 	}
 	// delete removes it

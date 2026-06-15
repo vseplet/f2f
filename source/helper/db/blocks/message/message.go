@@ -1,23 +1,27 @@
-// Package chat is messaging over the block engine: a message is a block in
-// the per-channel scope "msg:<channelBid>". Posting creates a block; editing
-// writes a new version of it (so edit history is free); deleting tombstones
-// it. Delivery, offline catch-up and convergence come from db sync — there's
-// no separate outbox. Membership/identity of the channel live in its channel
-// block (see package channels).
-package chat
+// Package message is messaging over the block engine: a message is a block in
+// the per-channel scope "message:<channelBid>". Posting creates a block;
+// editing writes a new version of it (so edit history is free); deleting
+// tombstones it. Delivery, offline catch-up and convergence come from db sync —
+// there's no separate outbox. Membership/identity of the channel live in its
+// channel block (see package channels).
+package message
 
 import (
 	"encoding/json"
 	"sort"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
 )
 
 // ScopePrefix namespaces a channel's message log.
-const ScopePrefix = "msg:"
+const ScopePrefix = "message:"
 
-// blockType marks message blocks (Type = "block.msg").
-const blockType = "msg"
+// blockType marks message blocks (Type = "block.message").
+const blockType = "message"
+
+// MaxAttachment caps an inline attachment's raw size (bigger files ride the
+// torrent transport via the drop). Mirrors the bus frame budget.
+const MaxAttachment = 8 << 20 // 8 MiB
 
 // Scope returns the message scope for a channel bid.
 func Scope(channelBID string) string { return ScopePrefix + channelBID }
@@ -71,7 +75,7 @@ func (m *Manager) Post(s blocks.Signer, channelBID, body string, file *Attachmen
 // Edit replaces a message's text/file with a new version (same id).
 func (m *Manager) Edit(s blocks.Signer, channelBID, msgBID, body string, file *Attachment) error {
 	// Preserve reply/thread links from the current head.
-	cur := m.message(channelBID, msgBID)
+	cur := m.Get(channelBID, msgBID)
 	var reply, thread string
 	if cur != nil {
 		reply, thread = cur.ReplyTo, cur.Thread
@@ -88,27 +92,41 @@ func (m *Manager) Delete(s blocks.Signer, channelBID, msgBID string) error {
 	return m.blocks.Delete(s, Scope(channelBID), msgBID, nil)
 }
 
-// Messages folds a channel's live messages, oldest first (by original post
-// time, so edits don't reorder).
+// Messages folds a channel's live messages, oldest first. Order is by the
+// create version's Lamport (logical clock, monotonic) then id — wall-clock TS
+// ties when two posts land in the same millisecond, so it can't be the key.
+// Edits don't reorder (they keep the original create version's order).
 func (m *Manager) Messages(channelBID string) []Message {
-	var out []Message
+	type ordered struct {
+		msg     Message
+		lamport uint64
+	}
+	var tmp []ordered
 	for _, b := range m.blocks.Blocks(Scope(channelBID)) {
 		if b.Deleted {
 			continue
 		}
-		out = append(out, toMessage(channelBID, b))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].TS != out[j].TS {
-			return out[i].TS < out[j].TS
+		var lp uint64
+		if len(b.History) > 0 {
+			lp = b.History[0].Lamport
 		}
-		return out[i].ID < out[j].ID
+		tmp = append(tmp, ordered{toMessage(channelBID, b), lp})
+	}
+	sort.Slice(tmp, func(i, j int) bool {
+		if tmp[i].lamport != tmp[j].lamport {
+			return tmp[i].lamport < tmp[j].lamport
+		}
+		return tmp[i].msg.ID < tmp[j].msg.ID
 	})
+	out := make([]Message, len(tmp))
+	for i := range tmp {
+		out[i] = tmp[i].msg
+	}
 	return out
 }
 
-// message folds a single message (nil if unknown/deleted).
-func (m *Manager) message(channelBID, msgBID string) *Message {
+// Get folds a single message (nil if unknown/deleted).
+func (m *Manager) Get(channelBID, msgBID string) *Message {
 	b := m.blocks.Block(Scope(channelBID), msgBID)
 	if b == nil || b.Deleted {
 		return nil

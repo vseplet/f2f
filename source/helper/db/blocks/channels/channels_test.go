@@ -3,7 +3,7 @@ package channels
 import (
 	"testing"
 
-	"github.com/vseplet/f2f/source/helper/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
 	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/identity"
 )
@@ -25,16 +25,28 @@ func id(t *testing.T) *identity.Identity {
 func TestCreateListOwner(t *testing.T) {
 	m := newMgr(t)
 	owner := id(t)
-	bid, err := m.Create(owner, "general", "", "")
+	bid, err := m.Create(owner, "lobby", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := m.Get(bid)
-	if c == nil || c.Name != "general" || c.Owner != owner.PubHex() {
+	if c == nil || c.Name != "lobby" || c.Owner != owner.PubHex() {
 		t.Fatalf("channel wrong: %+v", c)
 	}
 	if len(m.List()) != 1 {
 		t.Fatalf("list = %d, want 1", len(m.List()))
+	}
+}
+
+// TestGeneralReserved: general can't be recreated nor sub-channeled.
+func TestGeneralReserved(t *testing.T) {
+	m := newMgr(t)
+	owner := id(t)
+	if _, err := m.Create(owner, "general", "", ""); err == nil {
+		t.Fatal("creating a channel named general should be rejected")
+	}
+	if _, err := m.Create(owner, "general/rules", "", ""); err == nil {
+		t.Fatal("creating a sub-channel under general should be rejected")
 	}
 }
 
