@@ -815,7 +815,8 @@ $(function () {
     for (const b of texts) $c.append(noteBlockRow(b));
     // Trailing draft line — type + Enter to add a text block (Notion-style).
     const ph = texts.length ? 'type to add a block…' : 'empty — type to start…';
-    $c.append($('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-draft').attr('placeholder', ph));
+    const $d = $('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-draft').attr('placeholder', ph);
+    $c.append(editorWrap($d));
     $c.find('textarea').each(function () { autogrow(this); });
   }
 
@@ -895,15 +896,52 @@ $(function () {
     if (window.f2fRich && f2fRich.renderDiagrams) f2fRich.renderDiagrams($body[0]); // code + mermaid
   }
 
-  // editBlock swaps a rendered block to a raw-markdown textarea, focused.
+  // editBlock swaps a rendered block to a raw-markdown textarea (with a line-
+  // number gutter, code-editor style), focused.
   function editBlock($row) {
     const $body = $row.find('.ax-nb-body');
     const md = $body.attr('data-md') || '';
     const $ta = $('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-text').val(md);
-    $body.empty().append($ta);
+    $body.empty().append(editorWrap($ta));
     $ta.focus();
     autogrow($ta[0]);
     placeCaretEnd($ta[0]);
+    updateGutter($ta[0]);
+  }
+
+  // editorWrap wraps an editing textarea with a line-number gutter (the gutter
+  // is hidden by CSS until the textarea is focused). Used for both editing an
+  // existing block and typing a new one (draft), so the experience matches.
+  function editorWrap($ta) {
+    return $('<div class="ax-nb-editwrap"><div class="ax-nb-gutter"></div></div>').append($ta);
+  }
+
+  // Line-number gutter for the editing textarea. A hidden mirror (same width +
+  // font) measures each logical line's wrapped height so numbers align even when
+  // lines soft-wrap (one number per logical line).
+  let noteMirror = null;
+  function updateGutter(ta) {
+    const wrap = ta.closest && ta.closest('.ax-nb-editwrap');
+    if (!wrap) return;
+    const gut = wrap.querySelector('.ax-nb-gutter');
+    if (!gut) return;
+    if (!noteMirror) {
+      noteMirror = document.createElement('div');
+      noteMirror.style.cssText = 'position:absolute;left:-9999px;top:-9999px;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;';
+      document.body.appendChild(noteMirror);
+    }
+    const cs = getComputedStyle(ta);
+    noteMirror.style.fontFamily = cs.fontFamily;
+    noteMirror.style.fontSize = cs.fontSize;
+    noteMirror.style.lineHeight = cs.lineHeight;
+    noteMirror.style.width = ta.clientWidth + 'px';
+    const lines = ta.value.split('\n');
+    let html = '';
+    for (let i = 0; i < lines.length; i++) {
+      noteMirror.textContent = lines[i] || ' ';
+      html += '<div class="ax-nb-lnum" style="height:' + noteMirror.offsetHeight + 'px">' + (i + 1) + '</div>';
+    }
+    gut.innerHTML = html;
   }
 
   // toggleHistory shows/hides a block's version list under its meta line. Each
@@ -1030,14 +1068,16 @@ $(function () {
   // when the draft gets text + Enter does a real block get created at its pos.
   // The pos is stashed on the element so the eventual create lands in place.
   function insertDraftAfter($afterRow, pos) {
-    $('#note-blocks .ax-nb-idraft').remove(); // at most one inline draft
+    $('#note-blocks .ax-nb-idraft').closest('.ax-nb-editwrap').remove(); // at most one inline draft
     const $d = $('<textarea rows="1" spellcheck="false"></textarea>')
       .addClass('ax-nb-in ax-nb-draft ax-nb-idraft')
       .attr('placeholder', 'type…').attr('data-pos', pos);
-    if ($afterRow && $afterRow.length) $afterRow.after($d);
-    else $('#note-blocks').prepend($d);
+    const $wrap = editorWrap($d);
+    if ($afterRow && $afterRow.length) $afterRow.after($wrap);
+    else $('#note-blocks').prepend($wrap);
     $d[0].focus();
     autogrow($d[0]);
+    updateGutter($d[0]);
   }
 
   // insertDraftAtPos re-inserts an inline draft at a fractional pos after a
@@ -1144,9 +1184,12 @@ $(function () {
   // Every block is markdown text (types come later). Edit → debounce-save.
   $('#note-blocks').on('input', '.ax-nb-text', function () {
     autogrow(this);
+    updateGutter(this);
     saveBlock($(this).closest('.ax-nb').attr('data-bid'), { md: $(this).val() });
   });
-  $('#note-blocks').on('input', '.ax-nb-draft', function () { autogrow(this); });
+  $('#note-blocks').on('input', '.ax-nb-draft', function () { autogrow(this); updateGutter(this); });
+  // Populate the gutter when an editor/draft gains focus (it's hidden until then).
+  $('#note-blocks').on('focusin', '.ax-nb-in', function () { updateGutter(this); });
   // Click a rendered block → edit it; blur → flush save + render back. Don't
   // open the editor while previewing a historical version (banner buttons act).
   $('#note-blocks').on('click', '.ax-nb-view', function (e) {
@@ -1204,7 +1247,7 @@ $(function () {
   });
   // An inline draft left empty just vanishes — nothing is written to the log.
   $('#note-blocks').on('blur', '.ax-nb-idraft', function () {
-    if (!$(this).val().trim()) $(this).remove();
+    if (!$(this).val().trim()) $(this).closest('.ax-nb-editwrap').remove();
   });
   $('#note-blocks').on('click', '.ax-nb-del', function () { delNoteBlock($(this).closest('.ax-nb').attr('data-bid')); });
   // Undo/redo for deletions while the notes view is open.
