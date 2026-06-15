@@ -2887,7 +2887,10 @@ a.ax-domain-link:hover {
     gap: 8px;
 }
 .ax-note-header #note-title {
-    flex: 1;
+    flex: 0 0 auto;
+}
+.ax-note-header #note-crumbs {
+    flex: 1; /* take the middle so crumbs sit next to "notes", status goes right */
 }
 .ax-note-header #note-status {
     color: var(--muted);
@@ -2925,6 +2928,25 @@ a.ax-domain-link:hover {
 .ax-nb-ctl { margin-left: auto; display: flex; gap: 2px; }
 .ax-nb-ctl button { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 3px; }
 .ax-nb-ctl button:hover { color: var(--accent); }
+/* Note pages: breadcrumb trail, sub-page links, add-page button. */
+.ax-nb-crumbs { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); margin-left: 10px; }
+.ax-nb-crumb { cursor: pointer; }
+.ax-nb-crumb:hover { color: var(--accent); text-decoration: underline; }
+.ax-nb-crumb-sep { opacity: .5; }
+.ax-nb-pagelink { cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 15px; padding: 3px 6px; border-radius: 5px; }
+.ax-nb-pagelink:hover { background: rgba(255,255,255,.05); }
+.ax-nb-pageicon { opacity: .7; }
+/* + at the end of the breadcrumb row — creates a sub-page here. */
+.ax-nb-crumb-add { margin-left: 4px; background: transparent; border: 1px dashed var(--border); color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 1px 7px; border-radius: 5px; }
+.ax-nb-crumb-add:hover { color: var(--accent); border-color: var(--accent); }
+/* Auto table of contents — sub-pages of the open page, compact one-line rows. */
+.ax-nb-toc { margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.ax-nb-toc-head { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 2px; }
+.ax-nb-tocrow { display: flex; align-items: center; gap: 6px; padding: 0; }
+.ax-nb-tocrow .ax-nb-pagelink { flex: 1; }
+.ax-nb-tocrow .ax-nb-del { visibility: hidden; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 6px; }
+.ax-nb-tocrow:hover .ax-nb-del { visibility: visible; }
+.ax-nb-tocrow .ax-nb-del:hover { color: var(--accent); }
 .ax-nb-vbtn { cursor: pointer; padding: 0 3px; border-radius: 3px; }
 .ax-nb-vbtn:hover { color: var(--accent); background: rgba(255,255,255,.06); }
 /* Version history panel — one row per immutable version, newest first. */

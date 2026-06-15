@@ -685,7 +685,36 @@ $(function () {
   // Each entry: {bid, content}. Cleared when switching conversations.
   let noteUndo = [];
   let noteRedo = [];
+  let notePage = '';              // bid of the open page within the note ('' = root)
   function noteScopeOf(conv) { return 'note:' + conv; } // db scope for a conversation's notes
+
+  // A note is a tree of blocks (Notion-style): text blocks are content, `page`
+  // blocks are containers; both nest via the block's parent. The open page shows
+  // only its direct children; sub-pages render as links you drill into.
+  function pageKids() { return noteBlocks.filter((b) => (b.parent || '') === notePage); }
+  function noteBlockOf(bid) { return noteBlocks.find((b) => b.bid === bid); }
+  function blockType(b) { return b.type || 'text'; }
+  // pageTitle reads a page block's {title} (latest head).
+  function pageTitle(b) {
+    const head = (b && b.heads && b.heads.length) ? b.heads[b.heads.length - 1] : null;
+    return (head && head.content && head.content.title) || 'untitled';
+  }
+  // notePageRoute builds the hash for a page within a conversation.
+  function notePageRoute(conv, page) {
+    return 'note:' + convKey(conv) + (page ? ':page:' + page : '');
+  }
+  // breadcrumb chain from the root down to the open page (array of page blocks).
+  function pageTrail() {
+    const trail = [];
+    let p = notePage;
+    while (p) {
+      const b = noteBlockOf(p);
+      if (!b) break;
+      trail.unshift(b);
+      p = b.parent || '';
+    }
+    return trail;
+  }
 
   // noteTitle resolves a scope to a header: a channel's name (# foo) or, for a
   // DM, the peer's nickname. Falls back to the scope's leaf if names aren't in.
@@ -697,15 +726,17 @@ $(function () {
     return nameForPub(scope) + ' · notes';
   }
 
-  function openNote(scope) {
+  function openNote(scope, page) {
     noteConv = scope;
+    notePage = page || '';
     noteBlocks = [];
     noteUndo = []; noteRedo = [];
     $('.ax-tab').removeClass('ax-tab-active');
     $('.tab-panel').addClass('hidden');
     $('#tab-note').removeClass('hidden');
-    $('#note-title').text(noteTitle(scope));
+    $('#note-title').text('notes'); // location is shown by the breadcrumbs
     $('#note-status').text('loading…');
+    $('#note-crumbs').empty();
     $('#note-blocks').empty();
     loadNoteBlocks();
   }
@@ -776,11 +807,44 @@ $(function () {
   function renderNoteBlocks() {
     const $c = $('#note-blocks');
     $c.empty();
-    for (const b of noteBlocks) $c.append(noteBlockRow(b));
-    // Trailing draft line — type + Enter to add a block (Notion-style, no buttons).
-    const ph = noteBlocks.length ? 'type to add a block…' : 'empty — type to start…';
+    renderCrumbs(); // breadcrumbs live in the header (#note-crumbs)
+    const kids = pageKids();
+    const pages = kids.filter((b) => blockType(b) === 'page');
+    const texts = kids.filter((b) => blockType(b) !== 'page');
+    if (pages.length) $c.append(renderToC(pages)); // auto table of contents
+    for (const b of texts) $c.append(noteBlockRow(b));
+    // Trailing draft line — type + Enter to add a text block (Notion-style).
+    const ph = texts.length ? 'type to add a block…' : 'empty — type to start…';
     $c.append($('<textarea rows="1" spellcheck="false"></textarea>').addClass('ax-nb-in ax-nb-draft').attr('placeholder', ph));
     $c.find('textarea').each(function () { autogrow(this); });
+  }
+
+  // renderCrumbs fills the header breadcrumb slot (root › page › …) — the note's
+  // only location indicator — with a trailing + that creates a sub-page here.
+  function renderCrumbs() {
+    const $c = $('#note-crumbs').empty();
+    const root = noteTitle(noteConv).replace(/ · notes$/, '');
+    $c.append($('<a class="ax-nb-crumb"></a>').text(root).attr('data-page', ''));
+    for (const b of pageTrail()) {
+      $c.append('<span class="ax-nb-crumb-sep">›</span>');
+      $c.append($('<a class="ax-nb-crumb"></a>').text(pageTitle(b)).attr('data-page', b.bid));
+    }
+    $c.append('<button class="ax-nb-crumb-add" title="new sub-page">+</button>');
+  }
+
+  // renderToC builds the automatic table of contents — every sub-page of the
+  // open page as a link (drill in). Sub-pages live here, not inline among text.
+  function renderToC(pages) {
+    const $toc = $('<div class="ax-nb-toc"></div>');
+    $toc.append('<div class="ax-nb-toc-head">Pages</div>');
+    for (const b of pages) {
+      const $row = $('<div class="ax-nb ax-nb-tocrow"></div>').attr('data-bid', b.bid);
+      const $link = $('<div class="ax-nb-pagelink"></div>').attr('data-page', b.bid)
+        .html('<span class="ax-nb-pageicon">▤</span> ' + esc(pageTitle(b)));
+      const $del = $('<button class="ax-nb-del" title="delete">✕</button>');
+      $toc.append($row.append($link, $del));
+    }
+    return $toc;
   }
 
   // noteBlockRow builds one editable block + its meta line (type · author ·
@@ -929,12 +993,15 @@ $(function () {
   // insert between neighbours without re-indexing).
   function posNum(s) { return parseInt(s || '0', 10) || 0; }
   function posPad(n) { return String(n).padStart(8, '0'); }
-  function posEnd() { let m = 0; for (const b of noteBlocks) { const n = posNum(b.pos); if (n > m) m = n; } return posPad(m + 1000); }
+  // pos helpers operate within the OPEN page's siblings (pageKids), so order is
+  // per-page, not across the whole note tree.
+  function posEnd() { let m = 0; for (const b of pageKids()) { const n = posNum(b.pos); if (n > m) m = n; } return posPad(m + 1000); }
   function posAfter(bid) {
-    const i = noteBlocks.findIndex((b) => b.bid === bid);
+    const kids = pageKids();
+    const i = kids.findIndex((b) => b.bid === bid);
     if (i < 0) return posEnd();
-    const a = posNum(noteBlocks[i].pos);
-    const b = i + 1 < noteBlocks.length ? posNum(noteBlocks[i + 1].pos) : a + 2000;
+    const a = posNum(kids[i].pos);
+    const b = i + 1 < kids.length ? posNum(kids[i + 1].pos) : a + 2000;
     return posPad(Math.floor((a + b) / 2));
   }
   function placeCaretEnd(el) { if (el && el.setSelectionRange) { const n = el.value.length; el.setSelectionRange(n, n); } }
@@ -978,7 +1045,7 @@ $(function () {
   // is below the draft's, else at the top.
   function insertDraftAtPos(pos) {
     let $after = null;
-    for (const b of noteBlocks) {
+    for (const b of pageKids()) {
       if (posNum(b.pos) < posNum(pos)) {
         const $r = $('#note-blocks .ax-nb[data-bid="' + b.bid + '"]');
         if ($r.length) $after = $r;
@@ -993,10 +1060,11 @@ $(function () {
   function createNoteBlock(content, pos) {
     if (!noteConv) return;
     const conv = noteConv;
+    const parent = notePage;
     flushNoteSaves().always(() => {
       $.ajax({
         url: '/api/notes', method: 'POST', contentType: 'application/json',
-        data: JSON.stringify({ channel: noteScopeOf(conv), type: 'text', content, pos }),
+        data: JSON.stringify({ channel: noteScopeOf(conv), type: 'text', content, parent, pos }),
       }).done((r) => {
         const bid = r && r.bid;
         loadNoteBlocks(() => {
@@ -1006,6 +1074,20 @@ $(function () {
         });
       }).fail((x) => $('#note-status').text('add failed: ' + errorOf(x)));
     });
+  }
+
+  // createPage adds a sub-page block under the open page, then drills into it.
+  function createPage() {
+    if (!noteConv) return;
+    const title = (prompt('page title') || '').trim();
+    if (!title) return;
+    const conv = noteConv, parent = notePage, pos = posEnd();
+    $.ajax({
+      url: '/api/notes', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ channel: noteScopeOf(conv), type: 'page', content: { title }, parent, pos }),
+    }).done((r) => {
+      if (r && r.bid) location.hash = notePageRoute(conv, r.bid); // open the new page
+    }).fail((x) => $('#note-status').text('add page failed: ' + errorOf(x)));
   }
 
   function delNoteBlock(bid, fromRedo) {
@@ -1048,11 +1130,12 @@ $(function () {
 
   // moveNoteBlock reorders by swapping pos with the neighbour.
   function moveNoteBlock(bid, dir) {
-    const i = noteBlocks.findIndex((b) => b.bid === bid);
+    const kids = pageKids(); // reorder within the open page's siblings only
+    const i = kids.findIndex((b) => b.bid === bid);
     if (i < 0) return;
     const j = dir < 0 ? i - 1 : i + 1;
-    if (j < 0 || j >= noteBlocks.length) return;
-    const conv = noteConv, a = noteBlocks[i], b = noteBlocks[j];
+    if (j < 0 || j >= kids.length) return;
+    const conv = noteConv, a = kids[i], b = kids[j];
     const mv = (id, pos) => $.ajax({ url: '/api/notes/move', method: 'POST', contentType: 'application/json', data: JSON.stringify({ channel: noteScopeOf(conv), bid: id, pos }) });
     $.when(mv(a.bid, b.pos), mv(b.bid, a.pos)).always(loadNoteBlocks);
   }
@@ -1133,6 +1216,15 @@ $(function () {
   });
   $('#note-blocks').on('click', '.ax-nb-up', function () { moveNoteBlock($(this).closest('.ax-nb').attr('data-bid'), -1); });
   $('#note-blocks').on('click', '.ax-nb-down', function () { moveNoteBlock($(this).closest('.ax-nb').attr('data-bid'), 1); });
+  // Pages: drill into a sub-page (ToC link in #note-blocks); hop via a breadcrumb
+  // or create a sub-page (breadcrumb row lives in the header, #note-crumbs).
+  $('#note-blocks').on('click', '.ax-nb-pagelink', function () {
+    location.hash = notePageRoute(noteConv, $(this).attr('data-page'));
+  });
+  $('#note-crumbs').on('click', '.ax-nb-crumb', function () {
+    location.hash = notePageRoute(noteConv, $(this).attr('data-page') || '');
+  });
+  $('#note-crumbs').on('click', '.ax-nb-crumb-add', createPage);
 
   // Open a channel's notes from the hover icon on its sidebar row.
   $('#ax-tree').on('click', '.ax-tree-note', function (e) {
@@ -1318,9 +1410,12 @@ $(function () {
     const nm = h.match(/^note:(.+)$/);
     if (nm) {
       let key = nm[1].replace(/:preview$/, ''); // tolerate old preview links
+      let page = '';
+      const pm = key.match(/^(.+):page:([0-9a-zA-Z-]+)$/); // optional page within the note
+      if (pm) { key = pm[1]; page = pm[2]; }
       if (key === 'general') key = GENERAL_ID;
-      if (noteConv === key && !$('#tab-note').hasClass('hidden')) return; // already open
-      openNote(key);
+      if (noteConv === key && notePage === page && !$('#tab-note').hasClass('hidden')) return; // already open
+      openNote(key, page);
       return;
     }
     // A conversation: channel:<key>, optionally with a thread suffix
@@ -2642,7 +2737,7 @@ $(function () {
       category('peers',     'peers',     peers.length, peersBody)
       + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
-      + category('messages',  'messages',  totalUnread || null, messagingBody)
+      + category('messages',  'channels',  totalUnread || null, messagingBody)
       + category('drop',      'drop',      allFiles.length,
           section('available') + peerFilesBody
           + section('sharing') + addRow('add/remove file', 'drop') + myFilesBody)
