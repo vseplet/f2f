@@ -1331,8 +1331,9 @@ $(function () {
       let m; try { m = JSON.parse(e.data); } catch (_) { return; }
       // Block-change event (remote db sync) rides this stream.
       if (m.type === 'blocks') {
-        // A channels-scope change → refresh the sidebar channel list.
-        if (m.scope === 'channels') { fetchChannels(); return; }
+        // A channel-meta change ("channel:<bid>", e.g. we were just added) →
+        // refresh the sidebar so the channel (dis)appears live.
+        if (m.scope && m.scope.indexOf('channel:') === 0) { fetchChannels(); return; }
         // Otherwise it's a note scope — live-refresh the open note editor.
         if (m.scope && noteConv && !$('#tab-note').hasClass('hidden') && m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
         return;
