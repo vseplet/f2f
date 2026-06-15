@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/vseplet/f2f/source/helper/db/blocks/attach"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 )
 
@@ -220,14 +221,10 @@ type signer interface {
 // checkAttachment validates an inline attachment: drops an empty one, rejects
 // an oversized one, and stamps its size. Returns (file, ok).
 func checkAttachment(w http.ResponseWriter, f *message.Attachment) (*message.Attachment, bool) {
-	if f == nil || len(f.Data) == 0 {
-		return nil, true
-	}
-	if len(f.Data) > message.MaxAttachment {
-		writeError(w, http.StatusRequestEntityTooLarge,
-			fmt.Errorf("attachment too large (max %d MiB)", message.MaxAttachment>>20))
+	f, err := attach.Check(f)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err)
 		return nil, false
 	}
-	f.Size = len(f.Data)
 	return f, true
 }

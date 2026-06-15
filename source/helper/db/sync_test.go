@@ -109,6 +109,36 @@ func TestSyncScopeDiscovery(t *testing.T) {
 	}
 }
 
+// TestSyncMembershipGating: A serves "open" to everyone but withholds "secret"
+// from B (not a member). B's PullAll gets open, never secret.
+func TestSyncMembershipGating(t *testing.T) {
+	net := &fakeNet{nodes: map[string]*fakeNode{}}
+	a, b := net.node("A"), net.node("B")
+	sa, sb := New(NewMemStore()), New(NewMemStore())
+	syncA := NewSync(sa, a)
+	syncA.Register()
+	syncA.SetMemberCheck(func(scope, peer string) bool {
+		return scope != "secret" // B is not a member of "secret"
+	})
+	syncB := NewSync(sb, b)
+	syncB.Register()
+
+	id, _ := identity.Generate()
+	if _, err := sa.Commit(id, "open", "block.text", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sa.Commit(id, "secret", "block.text", []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	syncB.PullAll(context.Background())
+	if got := len(sb.Frames("open")); got != 1 {
+		t.Fatalf("B should have the open scope (%d)", got)
+	}
+	if got := len(sb.Frames("secret")); got != 0 {
+		t.Fatalf("B got %d secret frames despite gating", got)
+	}
+}
+
 func TestSyncPush(t *testing.T) {
 	net := &fakeNet{nodes: map[string]*fakeNode{}}
 	a, b := net.node("A"), net.node("B")

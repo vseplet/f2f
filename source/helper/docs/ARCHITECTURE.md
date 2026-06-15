@@ -122,6 +122,17 @@ source/helper/
 │   └── gossip/                  # репликация NodeState (platform + peer-view) по шине
 │       └── gossip.go              # Service: Announce/Peer/All/OnChange; generic для app, типизир. для fabric
 │
+├── db/                        # РАСПРЕДЕЛЁННАЯ БД (над mesh, под сервисами) — см. DB.md
+│   ├── frame.go                 # Frame: подписанная иммутабельная запись per-(author,scope)
+│   ├── store.go                 # Store интерфейс + MemStore
+│   ├── sqlitestore.go           # SQLiteStore: один файл db.sqlite per-camp (таблица frames)
+│   ├── service.go               # Service: Commit/Apply/Since/Vector/Frames/Query/Dump + OnCommit/OnApply
+│   ├── sync.go                  # Sync поверх mesh/bus: push + pull + db.scopes (обнаружение) + гейтинг по членству (SetMemberCheck)
+│   └── blocks/                  # БЛОК-ДВИЖОК поверх db — см. BLOCKS.md
+│       ├── blocks.go              # Manager: Create/Update/Move/Delete/Merge/Upsert + инкрем. свёртка Blocks(scope)
+│       ├── channels/              # block.channel {name,members} в scope "channels"; general/DM; IsMember
+│       └── message/               # block.message {body,file,reply,thread} в scope "message:<channelBid>"
+│
 ├── services/                  # APPLICATION-LEVEL сервисы поверх engine
 │   ├── dns/                     # DNS-сервер + MyDomains catalog + peer-poll + health
 │   │   ├── dns.go                 # Service: lifecycle, LookupHost (Resolver impl), CRUD
@@ -142,8 +153,6 @@ source/helper/
 │   ├── tunnel/                  # APPLICATION-уровень routing: intercepts + egress
 │   │   ├── tunnel.go              # Service: AddIntercept/RemoveIntercept, RefreshDomainRoutes
 │   │   └── egress.go              # NAT install + ip-forwarding (бывший engine/egress)
-│   ├── messenger/              # пер-камповая SQLite (~/.f2f/<camp_id>/messenger.db)
-│   │   └── messenger.go          # Store: messages/channels, modernc sqlite (no cgo)
 │   ├── notify/                 # хаб уведомлений (in-memory ring + SSE), слушает шину
 │   │   └── notify.go            # Service: Push/Recent/Subscribe, FromBus
 │   ├── shell/                  # remote-terminal (mosh-подобный PTY по шине)
@@ -153,6 +162,10 @@ source/helper/
 │
 └── ui/web/                    # HTTP UI + reverse-proxy
     ├── server.go                # роутер, statusView мерджит engine.Status + service-данные
+    ├── notes.go                 # /api/notes — generic block CRUD (заметки/доки) над db/blocks
+    ├── api_channels.go          # /api/channels — каналы (block.channel)
+    ├── api_messages.go          # /api/messages (+/share,/clear) — сообщения; /api/db/query (SQL-консоль)
+    ├── messenger_bridge.go      # мост db↔браузер: /api/events (push), OnFrameApplied, inbound-тосты
     ├── shell.go                 # /api/shell/peers (discovery по шине) + /api/shell/ws (мост браузер↔bus-стрим к PTY)
     ├── vnc.go                   # /api/vnc/peers + /api/vnc/ws (мост браузер↔bus-стрим к VNC-серверу пира)
     └── assets/                  # SPA (embed'ятся; vendor/xterm — терминал; noVNC завендорен)
@@ -307,7 +320,7 @@ SetAWGAllowedCIDRsHook(fn)                // services/tunnel инжектит in
 | **calls** | Pion SFU + group calls. Hosting peer запускает SFU `sfu.New(...)`, остальные join. Сигналинг и state по шине (`call.signal`/`call.state`/`call.join`/`call.leave`). Remote-call poll каждые 3с. |
 | **tunnel** | Application-уровень routing. **Intercepts**: Add(spec, peer) — resolve spec в prefixes, routes на utun, persist в `c.Intercepts`. DNS-спеки резолвятся **на exit-пире** по шине (`resolve`), ответ пинится в dns. `RefreshDomainRoutes` каждые 60с re-resolve'ит. **Egress**: NAT для overlay subnet на default iface + per-target NAT для целей, уходящих через другой интерфейс (split-tunnel VPN). |
 | **bus** | **QUIC data bus** на `overlay-IP:2203` — единый пир-к-пир транспорт (заменяет HTTP-over-tunnel). Авто-меш: пинг всех достижимых пиров раз в 30с, tie-break (младший pub дозванивается → одно соединение на пару), кэш коннектов (вход/исход переиспользуются — стримы двунаправленные). API: `Request`/`Notify`/`Handle(type, fn)`. TLS — self-signed + skip-verify: **аутентичность/шифрование уже даёт оверлей** (overlay-IP ≡ pub, WireGuard), идентичность пира = overlay-IP входящего коннекта. `Events`-хук отдаёт пинги в notify. |
-| **messenger** | Пер-камповая SQLite `~/.f2f/<camp_id>/messenger.db` (драйвер `modernc.org/sqlite`, без cgo), ленивое открытие + кэш хендлов. Таблицы `messages` (dm/channel) и `channels`. Локальное хранилище чата; обмен — поверх шины. |
+| **~~messenger~~** | Снят. Чат/каналы/заметки теперь на **блоках** (`db/blocks/message`, `db/blocks/channels`) поверх `db`-субстрата (один файл `db.sqlite`, anti-entropy sync). См. [DB.md](DB.md), [BLOCKS.md](BLOCKS.md). |
 | **notify** | Хаб уведомлений: in-memory кольцо (200) + fan-out в UI по SSE. Источники: шина (`Handle("notify")` — пир прислал) и bus-события (пинги). Отдаёт `/api/notifications` + `/api/notifications/stream`. Транспорт-агностичен (локальные сервисы зовут `Push` напрямую). |
 | **shell** | Remote-terminal по шине. `HandleStream("shell.open")` — спавнит PTY (по умолчанию системный `login`; fallback-шелл дропается до `SUDO_USER`), держит **detached-сессии** по `session_id` с ring-буфером (reattach перерисовывает экран — переживает сон/reload). Протокол на стриме: сервер→клиент сырой вывод PTY, клиент→сервер фреймы `d`/`r`/`k` (data/resize/kill). `shell.status` (Request) — discovery (UI-список **sticky**: пир держится ~35с после последнего ответа, чтобы флап шины не выкидывал его). Доступ гейтит `config.Camp.Shell` (enabled + allowlist пабов). Web-слой мостит браузерный xterm.js (WS) в этот стрим. |
 | **vnc** | Remote-desktop по шине — **тонкий TCP-прокси**, не свой захват. `HandleStream("vnc.open")` — переливает RFB между bus-стримом и локальным VNC-сервером ОС (`127.0.0.1:5900`: macOS Screen Sharing / x11vnc / wayvnc). Захват/кодирование/аутентификацию делает сам сервер. `vnc.status` (Request) — dial-тест `:5900` (показываем в списке только машины с живым десктопом). Доступ гейтит `config.Camp.Vnc`. Web-слой мостит браузерный noVNC (WS) в этот стрим; качество (`qualityLevel`/`compressionLevel`) и auth (VNC-пароль / Apple ARD) — на стороне noVNC (завендорен под `/vendor/novnc`). |

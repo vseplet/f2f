@@ -1,11 +1,11 @@
-// Package channels models a camp's channels as blocks. A channel is just a
-// block in the camp-wide "channels" scope: its content carries the name and
-// member list, its block Parent gives nesting, its creator is the owner.
-// Membership and metadata thus replicate and converge through the same db log
-// as everything else — one substrate, one source of truth.
+// Package channels models a camp's channels as blocks. Each channel is a single
+// block in its OWN scope "channel:<bid>": content carries the name + member
+// list, creator is the owner. Per-channel scopes (not one shared registry) let
+// the sync layer gate replication by membership — a non-member never receives
+// the channel's metadata scope at all.
 //
-// Resources of a channel live in their own scopes keyed by the channel
-// (e.g. "note:<channel>"); this package only describes the channel itself.
+// Resources of a channel live in their own scopes keyed by the channel bid
+// ("note:<bid>", "message:<bid>"); this package only describes the channel.
 package channels
 
 import (
@@ -18,8 +18,11 @@ import (
 	"github.com/vseplet/f2f/source/helper/db/blocks"
 )
 
-// Scope is the camp-wide registry every channel block lives in.
-const Scope = "channels"
+// ScopePrefix namespaces each channel's own metadata scope ("channel:<bid>").
+const ScopePrefix = "channel:"
+
+// metaScope is the scope holding one channel's block.
+func metaScope(bid string) string { return ScopePrefix + bid }
 
 // blockType marks channel blocks within the scope (Type = "block.channel").
 const blockType = "channel"
@@ -70,11 +73,13 @@ func (m *Manager) Create(s blocks.Signer, name, parent, pos string) (string, err
 	if name == GeneralBID || strings.HasPrefix(name, GeneralBID+"/") {
 		return "", fmt.Errorf("channels: %q is reserved", GeneralBID)
 	}
+	// Mint the bid first so the channel gets its own scope channel:<bid>.
+	bid := blocks.NewBID(s.PubHex())
 	c, err := json.Marshal(meta{Name: name})
 	if err != nil {
 		return "", err
 	}
-	return m.blocks.Create(s, Scope, blockType, c, parent, pos)
+	return bid, m.blocks.Upsert(s, metaScope(bid), bid, blockType, c)
 }
 
 // EnsureGeneral creates the well-known general channel if it doesn't exist yet
@@ -88,7 +93,7 @@ func (m *Manager) EnsureGeneral(s blocks.Signer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return GeneralBID, m.blocks.Upsert(s, Scope, GeneralBID, blockType, c)
+	return GeneralBID, m.blocks.Upsert(s, metaScope(GeneralBID), GeneralBID, blockType, c)
 }
 
 // EnsureDM creates the direct-message channel between a and b if absent, with
@@ -102,7 +107,7 @@ func (m *Manager) EnsureDM(s blocks.Signer, a, b string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return bid, m.blocks.Upsert(s, Scope, bid, blockType, c)
+	return bid, m.blocks.Upsert(s, metaScope(bid), bid, blockType, c)
 }
 
 // Rename changes the channel's name (a new version authored by s).
@@ -148,26 +153,30 @@ func (m *Manager) RemoveMember(s blocks.Signer, bid, pub string) error {
 
 // Delete tombstones the channel block.
 func (m *Manager) Delete(s blocks.Signer, bid string) error {
-	return m.blocks.Delete(s, Scope, bid, nil)
+	return m.blocks.Delete(s, metaScope(bid), bid, nil)
 }
 
 // Get folds a single channel (nil if unknown/deleted).
 func (m *Manager) Get(bid string) *Channel {
-	b := m.blocks.Block(Scope, bid)
+	b := m.blocks.Block(metaScope(bid), bid)
 	if b == nil || b.Deleted {
 		return nil
 	}
 	return toChannel(b)
 }
 
-// List folds every live channel in the camp.
+// List folds every live channel — one per "channel:<bid>" scope.
 func (m *Manager) List() []*Channel {
 	var out []*Channel
-	for _, b := range m.blocks.Blocks(Scope) {
-		if b.Deleted {
+	for _, sc := range m.blocks.Scopes() {
+		if !strings.HasPrefix(sc, ScopePrefix) {
 			continue
 		}
-		out = append(out, toChannel(b))
+		for _, b := range m.blocks.Blocks(sc) {
+			if !b.Deleted {
+				out = append(out, toChannel(b))
+			}
+		}
 	}
 	return out
 }
@@ -198,7 +207,7 @@ func (m *Manager) write(s blocks.Signer, bid, name string, members []string) err
 	if err != nil {
 		return err
 	}
-	return m.blocks.Update(s, Scope, bid, c, nil)
+	return m.blocks.Update(s, metaScope(bid), bid, c, nil)
 }
 
 // toChannel folds a block into a Channel: name/members from the latest head,

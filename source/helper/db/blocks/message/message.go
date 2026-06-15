@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/attach"
 )
 
 // ScopePrefix namespaces a channel's message log.
@@ -19,23 +20,16 @@ const ScopePrefix = "message:"
 // blockType marks message blocks (Type = "block.message").
 const blockType = "message"
 
-// MaxAttachment caps an inline attachment's raw size (bigger files ride the
-// torrent transport via the drop). Mirrors the bus frame budget.
-const MaxAttachment = 8 << 20 // 8 MiB
+// MaxAttachment caps an inline attachment's raw size. Alias of attach.Max —
+// kept for existing callers.
+const MaxAttachment = attach.Max
 
 // Scope returns the message scope for a channel bid.
 func Scope(channelBID string) string { return ScopePrefix + channelBID }
 
-// Attachment is a file carried by a message: small files inline (Data),
-// large ones by torrent (InfoHash/Magnet via the drop transport).
-type Attachment struct {
-	Name     string `json:"name"`
-	Mime     string `json:"mime"`
-	Size     int    `json:"size"`
-	Data     []byte `json:"data,omitempty"`
-	InfoHash string `json:"info_hash,omitempty"`
-	Magnet   string `json:"magnet,omitempty"`
-}
+// Attachment is the shared attachment primitive (see package attach). A message
+// carries one as a field on its block; notes carry it as a standalone block.file.
+type Attachment = attach.Attachment
 
 // content is the message block's payload.
 type content struct {

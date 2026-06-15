@@ -83,19 +83,14 @@ func TestMembership(t *testing.T) {
 	}
 }
 
-func TestRenameAndNesting(t *testing.T) {
+func TestRename(t *testing.T) {
 	m := newMgr(t)
 	owner := id(t)
-	parent, _ := m.Create(owner, "team", "", "")
-	child, _ := m.Create(owner, "backend", parent, "")
-
-	if c := m.Get(child); c == nil || c.Parent != parent {
-		t.Fatalf("nesting lost: %+v", c)
-	}
-	if err := m.Rename(owner, child, "backend-core"); err != nil {
+	bid, _ := m.Create(owner, "backend", "", "")
+	if err := m.Rename(owner, bid, "backend-core"); err != nil {
 		t.Fatal(err)
 	}
-	if c := m.Get(child); c.Name != "backend-core" {
+	if c := m.Get(bid); c == nil || c.Name != "backend-core" {
 		t.Fatalf("rename failed: %+v", c)
 	}
 }
