@@ -66,7 +66,7 @@ func (svc *Service) Commit(s signer, scope, typ string, payload []byte) (*Frame,
 		TS:      svc.now(),
 	}
 	e.sign(s)
-	if err := svc.store.Append(e); err != nil {
+	if _, err := svc.store.Append(e); err != nil {
 		return nil, err
 	}
 	if svc.onCommit != nil {
@@ -82,10 +82,13 @@ func (svc *Service) Apply(e *Frame) error {
 	if e.Lamport > svc.lamport {
 		svc.lamport = e.Lamport
 	}
-	err := svc.store.Append(e)
+	applied, err := svc.store.Append(e)
 	hook := svc.onApply
 	svc.mu.Unlock()
-	if err == nil && hook != nil {
+	// Fire the hook only for a genuinely NEW frame — a duplicate (same frame
+	// arriving via both push and pull) appends once but must not emit twice,
+	// else the UI/notifications show it doubled (gone after a reload).
+	if err == nil && applied && hook != nil {
 		hook(e) // outside the lock: the hook must not call back into svc
 	}
 	return err

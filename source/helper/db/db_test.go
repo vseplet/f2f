@@ -161,7 +161,7 @@ func TestTamperRejected(t *testing.T) {
 
 	tampered := *e
 	tampered.Payload = []byte("evil") // ID/sig no longer match
-	if err := NewMemStore().Append(&tampered); err == nil {
+	if _, err := NewMemStore().Append(&tampered); err == nil {
 		t.Fatal("tampered entry was accepted")
 	}
 }

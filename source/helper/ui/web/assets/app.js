@@ -999,7 +999,15 @@ $(function () {
     const conv = noteConv;
     const parent = (opts && opts.parent != null) ? opts.parent : notePage;
     const pos = (opts && opts.pos) ? opts.pos : posEnd();
-    const draftText = (opts && opts.draftText) ? opts.draftText : '';
+    // Preserve whatever is typed in the draft across the reload — regardless of
+    // how the attach was triggered (button/paste/drop). Use the explicit value
+    // if a handler captured it, else read the focused/trailing draft from the DOM.
+    let draftText = (opts && opts.draftText != null) ? opts.draftText : '';
+    if (!draftText) {
+      const a = document.activeElement;
+      const $d = (a && $(a).hasClass('ax-nb-draft')) ? $(a) : $('#note-blocks .ax-nb-draft').last();
+      if ($d && $d.length) draftText = $d.val() || '';
+    }
     const $ph = uploadingPlaceholder(file.name);
     placeUpload($ph, opts && opts.place);
     $('#note-status').text('attaching ' + file.name + '…');
@@ -1246,6 +1254,18 @@ $(function () {
     return reqs.length ? $.when.apply($, reqs) : $.Deferred().resolve().promise();
   }
 
+  // keepDraftInView scrolls the draft into view now AND re-does it once any
+  // not-yet-loaded images finish decoding. Inline images start at height ~0 and
+  // grow when decoded, shifting everything above the draft — without this the
+  // view appears to "jump up" after creating a block in an image-heavy note.
+  function keepDraftInView(el) {
+    if (!el) return;
+    const f = () => { try { el.scrollIntoView({ block: 'nearest' }); } catch (_) {} };
+    f();
+    $('#note-blocks img').each(function () {
+      if (!this.complete) this.addEventListener('load', f, { once: true });
+    });
+  }
   // insertDraftAfter drops a TRANSIENT, unsaved editing line right after a row
   // (or at the top if none). Empty blocks are never written to the log — only
   // when the draft gets text + Enter does a real block get created at its pos.
@@ -1258,7 +1278,7 @@ $(function () {
       const $tail = $('#note-blocks .ax-nb-draft').last();
       if ($tail.length) {
         $tail[0].focus(); autogrow($tail[0]); placeCaretEnd($tail[0]);
-        updateGutter($tail[0]); $tail[0].scrollIntoView({ block: 'nearest' });
+        updateGutter($tail[0]); keepDraftInView($tail[0]);
         return;
       }
     }
@@ -1271,9 +1291,7 @@ $(function () {
     $d[0].focus();
     autogrow($d[0]);
     updateGutter($d[0]);
-    // Bring the new line into view (renderNoteBlocks restored the old scroll;
-    // a freshly-created block may sit just outside it). 'nearest' = minimal move.
-    $d[0].scrollIntoView({ block: 'nearest' });
+    keepDraftInView($d[0]);
   }
 
   // insertDraftAtPos re-inserts an inline draft at a fractional pos after a
@@ -2389,6 +2407,29 @@ $(function () {
     if (i >= 0) chatPending.splice(i, 1);
     renderChatPreview();
   });
+
+  // Telegram-style drag-and-drop: drop a file anywhere over the chat frame to
+  // stage it (preview + send on Enter), with an overlay while dragging files.
+  // dragenter/over/leave fire per child element, so count depth to avoid flicker.
+  let chatDragDepth = 0;
+  function dragHasFiles(e) {
+    const t = e.originalEvent && e.originalEvent.dataTransfer && e.originalEvent.dataTransfer.types;
+    return !!t && Array.prototype.indexOf.call(t, 'Files') !== -1;
+  }
+  $('#chat-frame')
+    .on('dragenter', function (e) {
+      if (!chatConv || !dragHasFiles(e)) return;
+      e.preventDefault(); chatDragDepth++; $('#chat-drop-overlay').removeClass('hidden');
+    })
+    .on('dragover', function (e) { if (chatConv && dragHasFiles(e)) e.preventDefault(); })
+    .on('dragleave', function () { if (--chatDragDepth <= 0) { chatDragDepth = 0; $('#chat-drop-overlay').addClass('hidden'); } })
+    .on('drop', function (e) {
+      chatDragDepth = 0; $('#chat-drop-overlay').addClass('hidden');
+      const dt = e.originalEvent && e.originalEvent.dataTransfer;
+      if (!chatConv || !dt || !dt.files || !dt.files.length) return;
+      e.preventDefault();
+      stageChatFiles(Array.from(dt.files));
+    });
 
   // Main composer attach → stage (don't send).
   $('#chat-attach').on('click', function () { if (chatConv) $('#chat-file').trigger('click'); });

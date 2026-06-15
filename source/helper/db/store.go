@@ -15,9 +15,11 @@ type VersionVector map[string]uint64
 // In-memory now; a SQLite-backed Store (one dumpable file) comes next
 // behind the same interface.
 type Store interface {
-	// Append validates and stores e. Idempotent on a known ID. Errors on
-	// a bad signature, a seq gap, or a prev-hash that breaks the chain.
-	Append(e *Frame) error
+	// Append validates and stores e. Idempotent on a known ID — returns
+	// applied=false (no error) when the frame was already present, so callers
+	// can skip side effects (hooks/notifications) on duplicates. Errors on a
+	// bad signature, a seq gap, or a prev-hash that breaks the chain.
+	Append(e *Frame) (applied bool, err error)
 	// Head returns the author's latest entry in scope (nil if none).
 	Head(scope, author string) *Frame
 	// Frames returns every entry in scope in a deterministic total order
@@ -50,9 +52,9 @@ func NewMemStore() *MemStore {
 	return &MemStore{scopes: map[string]*scopeFrames{}}
 }
 
-func (m *MemStore) Append(e *Frame) error {
+func (m *MemStore) Append(e *Frame) (bool, error) {
 	if err := e.verify(); err != nil {
-		return err
+		return false, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -62,7 +64,7 @@ func (m *MemStore) Append(e *Frame) error {
 		m.scopes[e.Scope] = sl
 	}
 	if _, dup := sl.byID[e.ID]; dup {
-		return nil // idempotent
+		return false, nil // idempotent: already have it
 	}
 	chain := sl.byAuthor[e.Author]
 	var wantSeq uint64 = 1
@@ -72,14 +74,14 @@ func (m *MemStore) Append(e *Frame) error {
 		wantPrev = chain[n-1].ID
 	}
 	if e.Seq != wantSeq {
-		return fmt.Errorf("db: seq gap for %s/%s: have %d, got %d", short(e.Author), e.Scope, wantSeq-1, e.Seq)
+		return false, fmt.Errorf("db: seq gap for %s/%s: have %d, got %d", short(e.Author), e.Scope, wantSeq-1, e.Seq)
 	}
 	if e.Prev != wantPrev {
-		return fmt.Errorf("db: broken chain for %s/%s at seq %d", short(e.Author), e.Scope, e.Seq)
+		return false, fmt.Errorf("db: broken chain for %s/%s at seq %d", short(e.Author), e.Scope, e.Seq)
 	}
 	sl.byID[e.ID] = e
 	sl.byAuthor[e.Author] = append(chain, e)
-	return nil
+	return true, nil
 }
 
 func (m *MemStore) Head(scope, author string) *Frame {

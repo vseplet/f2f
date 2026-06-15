@@ -2635,6 +2635,20 @@ a.ax-domain-link:hover {
 .ax-msg-act:hover { color: var(--accent); }
 
 .ax-chat-replybar { flex-shrink: 0; }
+/* Telegram-style drag-and-drop overlay over the chat frame. */
+.ax-frame.ax-chat { position: relative; }
+.ax-chat-drop {
+    position: absolute; inset: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--accent) 12%, rgba(0, 0, 0, 0.55));
+    border: 2px dashed var(--accent); border-radius: 12px;
+    pointer-events: none; /* let drag events reach the frame underneath */
+}
+.ax-chat-drop.hidden { display: none; }
+.ax-chat-drop-inner {
+    color: var(--text); font-size: 16px; padding: 14px 20px;
+    background: var(--panel-2); border-radius: 10px;
+}
 /* Staged-attachment preview strip above the composer. */
 .ax-chat-attach-preview {
     flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 8px;
