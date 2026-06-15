@@ -84,6 +84,10 @@ type Manager struct {
 
 func New(d *db.Service) *Manager { return &Manager{db: d, cache: map[string]*scopeFold{}} }
 
+// Scopes lists every scope that has frames (passthrough to the db) — lets
+// callers enumerate e.g. all per-channel scopes.
+func (m *Manager) Scopes() []string { return m.db.Scopes() }
+
 // acc accumulates one block's versions while folding a scope.
 type acc struct {
 	blockType  string

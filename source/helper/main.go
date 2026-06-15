@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -175,6 +176,23 @@ func run(bind string, console bool, autostart bool) error {
 	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
 	dbSync.Register()
 	dbSvc.OnCommit(dbSync.Push)
+	// Membership-gating: serve a scope to a peer only if it belongs to the
+	// channel. Channel meta ("channel:<bid>"), messages ("message:<bid>") and
+	// notes ("note:<bid>") all key off the channel bid; other scopes are open.
+	dbSync.SetMemberCheck(func(scope, pub string) bool {
+		var bid string
+		switch {
+		case strings.HasPrefix(scope, channels.ScopePrefix):
+			bid = strings.TrimPrefix(scope, channels.ScopePrefix)
+		case strings.HasPrefix(scope, message.ScopePrefix):
+			bid = strings.TrimPrefix(scope, message.ScopePrefix)
+		case strings.HasPrefix(scope, "note:"):
+			bid = strings.TrimPrefix(scope, "note:")
+		default:
+			return true // non-channel scope → open
+		}
+		return channelsMgr.IsMember(bid, pub)
+	})
 
 	// Messaging is now blocks (db/blocks/message + channels) — see channelsMgr/
 	// msgMgr above. Scoped (channel/DM) files are served over torrent only to

@@ -11,7 +11,7 @@
 Camp  (оверлей; владелец = pub в camp_id)                    ✅
 ├── User  (человек; user_id, per-camp, passkey-якорь)        📐  — член кэмпа
 │    └── Device / Peer  (машина; device_pub)                 ✅  — привязан к User, 1..N
-├── Channel (= scope; владелец: User, участники: User[] динам.) ✅ (членство-в-логе 📐)
+├── Channel (= блок `block.channel` в scope channel:<bid>; владелец+участники в content) ✅ (синк гейтится членством ✅; e2e 📐)
 │    └── Resource  (всё гейтится каналом)
 │         ├── persistent (логи db): messages·notes·docs·tasks·files(ref)·secrets
 │         ├── live (стримы шины):    terminals·desktops(VNC)·calls
@@ -34,18 +34,21 @@ Camp  (оверлей; владелец = pub в camp_id)                    ✅
 
 ## Слой 2 — Channel (где/кому) — сквозной ACL
 
-- **Channel = `scope`** ✅ — единица доступа и шеринга: **владелец (User) +
-  участники (User[])**, состав меняется динамически.
-- **Членство** = owner-authored записи в логе канала; текущий состав = свёртка
-  (single-writer владелец → тотальный порядок). *(сейчас членство таскается
-  снапшотом в сообщении — 📐 переезд в лог)*
-- DM = вырожденный канал (2 юзера, по форме ключа); `general` — спец-канал.
-- **e2e**: group key на канал (эпохи), раздаётся участникам; смена состава =
-  новая эпоха.
-- **Членство канала = единый ACL для ВСЕХ его ресурсов** (persistent, live и
-  channel-scoped infra).
+- **Channel = блок `block.channel`** ✅ — в **своём** scope `channel:<bid>`,
+  `content = {name, members}`. Владелец = автор первой версии; **участники прямо
+  во фрейме канала**, состав меняет владелец новой версией (single-writer → без
+  конфликтов). Ресурсы канала — в scope'ах по bid (`note:<bid>`, `message:<bid>`).
+- **bid** ✅: `general` (well-known), `dm-<hash(pubs)>` (личка, детерминир.),
+  `<fp16>-<rand>` (обычный). `general` зарезервирован (нельзя пересоздать/вложить).
+- **Членство канала = единый ACL** — **синк гейтится по нему ✅**:
+  `Sync.SetMemberCheck` отдаёт `channel:`/`message:`/`note:<bid>` пиру только если
+  он член (фильтрует `db.scopes`/`db.pull`/`db.push` по bus-attested pub).
+  Не-член не получает ни мету канала, ни сообщения/заметки.
+- **e2e** 📐: group key на канал (эпохи) участникам; смена состава = новая эпоха.
+  Нужен для защиты при релее/утечке фрейма и forward-secrecy при исключении —
+  одного гейтинга синка для этого мало. См. [ROADMAP.md](ROADMAP.md).
 
-Детали: [DB.md](DB.md) («Scope = канал»), [MESSAGING_DESIGN.md](MESSAGING_DESIGN.md).
+Детали: [DB.md](DB.md) («Scope»), [BLOCKS.md](BLOCKS.md) (`block.channel`).
 
 ## Слой 3 — Resource (что) — три природы
 

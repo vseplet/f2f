@@ -27,13 +27,22 @@ const (
 // Sync replicates the log between peers by anti-entropy: pull (ask a peer
 // for entries beyond our version vector) + eager push (fan a freshly
 // committed entry to peers). One mechanism covers catch-up, redelivery
-// and convergence. Relay / e2e / membership-gating layer on top later.
+// and convergence. Membership-gating (below) restricts which scopes a peer is
+// served; relay / e2e layer on top later.
 type Sync struct {
-	svc *Service
-	bus Bus
+	svc    *Service
+	bus    Bus
+	member func(scope, peerPub string) bool // nil = serve every scope to everyone
 }
 
 func NewSync(svc *Service, bus Bus) *Sync { return &Sync{svc: svc, bus: bus} }
+
+// SetMemberCheck installs an ACL: scopes are served (scopes-list, pull, push)
+// to a peer only if member(scope, peerPub) is true. The peerPub is bus-attested
+// (≡ its overlay identity). Without it, all scopes go to all camp peers.
+func (s *Sync) SetMemberCheck(fn func(scope, peerPub string) bool) { s.member = fn }
+
+func (s *Sync) allowed(scope, peer string) bool { return s.member == nil || s.member(scope, peer) }
 
 // Register wires the bus handlers. Call once after construction.
 func (s *Sync) Register() {
@@ -43,9 +52,20 @@ func (s *Sync) Register() {
 }
 
 // onScopes answers a peer's "which scopes do you have" — lets a peer that
-// joined late discover scopes it has never seen and pull them.
-func (s *Sync) onScopes(_ string, _ []byte) ([]byte, error) {
-	return json.Marshal(s.svc.Scopes())
+// joined late discover scopes it has never seen and pull them. Only scopes the
+// asking peer is a member of are revealed (ACL).
+func (s *Sync) onScopes(from string, _ []byte) ([]byte, error) {
+	all := s.svc.Scopes()
+	if s.member == nil {
+		return json.Marshal(all)
+	}
+	out := make([]string, 0, len(all))
+	for _, sc := range all {
+		if s.member(sc, from) {
+			out = append(out, sc)
+		}
+	}
+	return json.Marshal(out)
 }
 
 // remoteScopes asks a peer for its scope list (empty on an un-upgraded peer
@@ -67,11 +87,15 @@ type pullReq struct {
 	Have  VersionVector `json:"have"`
 }
 
-// onPull answers a peer's "what am I missing in this scope".
-func (s *Sync) onPull(_ string, payload []byte) ([]byte, error) {
+// onPull answers a peer's "what am I missing in this scope" — empty if the
+// asking peer isn't a member of that scope's channel (ACL).
+func (s *Sync) onPull(from string, payload []byte) ([]byte, error) {
 	var req pullReq
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
+	}
+	if !s.allowed(req.Scope, from) {
+		return json.Marshal([]*Frame{})
 	}
 	return json.Marshal(s.svc.Since(req.Scope, req.Have))
 }
@@ -89,14 +113,17 @@ func (s *Sync) onPush(from string, payload []byte) ([]byte, error) {
 	return nil, nil
 }
 
-// Push fans a freshly-committed entry to all reachable peers (best-effort;
-// anyone offline catches up later via pull).
+// Push fans a freshly-committed entry to reachable peers that are members of
+// its scope (best-effort; anyone offline catches up later via pull).
 func (s *Sync) Push(e *Frame) {
 	payload, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
 	for _, pub := range s.bus.Peers() {
+		if !s.allowed(e.Scope, pub) {
+			continue
+		}
 		_ = s.bus.Notify(pub, typePush, payload)
 	}
 }
