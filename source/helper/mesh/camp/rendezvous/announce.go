@@ -24,7 +24,7 @@ type AnnounceClient struct {
 	campAddrStr   string                      // unresolved "host:port"; re-resolved on send
 	campAddr      atomic.Pointer[net.UDPAddr] // latest resolved endpoint (nil until resolved)
 	lastResolveMs atomic.Int64                // throttles re-resolution
-	name          string
+	name          atomic.Pointer[string]      // display name; SetName updates it live (re-announced next tick)
 	campID        string
 	pub           string // local ed25519 pubkey in hex, "" in static --peer mode
 
@@ -54,10 +54,10 @@ func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub string)
 	a := &AnnounceClient{
 		conn:        conn,
 		campAddrStr: campAddrStr,
-		name:        name,
 		campID:      campID,
 		pub:         pub,
 	}
+	a.name.Store(&name)
 	a.resolve() // best-effort; sendAnnounce keeps retrying if DNS isn't ready
 	return a, nil
 }
@@ -93,6 +93,9 @@ func (a *AnnounceClient) CampAddr() *net.UDPAddr { return a.campAddr.Load() }
 // Self returns the latest PeerInfo camp gave us, or nil if we haven't
 // received any reply yet.
 func (a *AnnounceClient) Self() *PeerInfo { return a.self.Load() }
+
+// SetName changes the display name announced from the next tick onward.
+func (a *AnnounceClient) SetName(name string) { a.name.Store(&name) }
 
 // OnPeers registers the callback invoked with the roster carried in
 // announce replies. Set once before Run.
@@ -244,9 +247,13 @@ func (a *AnnounceClient) sendAnnounce() error {
 	if addr == nil {
 		return fmt.Errorf("camp addr %q unresolved", a.campAddrStr)
 	}
+	name := ""
+	if p := a.name.Load(); p != nil {
+		name = *p
+	}
 	data, err := json.Marshal(AnnounceReq{
 		T:      "announce",
-		Name:   a.name,
+		Name:   name,
 		CampID: a.campID,
 		Pub:    a.pub,
 	})

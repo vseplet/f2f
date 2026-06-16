@@ -82,17 +82,59 @@
 Два слоя: `block.camp` (кто в кэмпе, owner) ⊃ `block.channel.members` (кто в канале,
 владелец канала).
 
-## Секрет vs публичное (правило одной таблицей)
+## Где что хранится — три слоя
+
+Это карта хранения для всего identity/membership/ресурсов. Три слоя по природе
+данных:
+
+| слой | что | свойства |
+|---|---|---|
+| **DB** (блоки) | профили (`block.user`), членство кэмпа/каналов (`block.camp`/`block.channel`), инвайты-мета (`block.invite`), OIDC-клиент (публичный конфиг), messages/notes/files-ref | реплицируется, подписано, **единый ACL-источник** |
+| **config** (локально) | ключи устройства; **текущий профиль** (активный `user_id` + ссылка на passkey-credential); identity пира (имя, listen-порт, WG); **публикуемые ресурсы** (domains/files/intercepts/egress/shell/VNC); **полиси-привязки** ресурс→группа; ник в кэмпе; секреты (client secret, приватный ключ IdP — лучше vault) | durable, per-device, **не реплицируется** |
+| **memory** (рантайм) | liveness (online/offline), текущие endpoint'ы, RTT, pair-state, кэш announce | волатильно, пересобирается из camp + DB |
+
+Правило: **durable shared → DB; durable local/secret → config; volatile/derived → memory.**
+
+### Полиси ∘ членство (как композируется доступ)
+
+- **Полиси-привязка** (`my-domain → channel:devs`) — **config**: локальное решение
+  устройства про свой ресурс.
+- **Состав группы** (`кто в channel:devs`, `кто в кэмпе`) — **DB-блок**
+  (`block.channel.members` / `block.camp`, подписан владельцем группы).
+- Проверка доступа = **config (привязка ресурс→группа) ∘ DB (членство группы)**.
+  Так ресурсы и их политика — локальная власть устройства, а идентичность
+  принципалов — общая правда; **копии членства не разъезжаются** (единый источник).
+
+> **Почему членство нельзя в config:** если каждое устройство держит свой список
+> «кто в кэмпе/канале», копии разойдутся и единого ACL не будет. Членство — всегда
+> один подписанный блок в DB; config лишь **ссылается** на группу.
+
+### Что выпиливается
+
+`<camp_id>.config.json` сейчас держит **`PeerCatalog`** (персистнутый список пиров).
+С новой моделью он **не нужен**: «кто существует» (durable) → `block.user`/`block.camp`
+в DB; «кто online + endpoint» (volatile) → memory из camp-announce. Persist не нужен.
+
+### Секрет vs публичное (внутри DB-слоя)
 
 | данные | где | почему |
 |---|---|---|
-| user_id, имя, device-pubs | `block.user` | публично, нужен синк |
-| **публичные** passkey-креды | `block.user` | проверка passkey везде; приват в аутентификаторе |
+| user_id, имя, device-pubs, **публичные** passkey-креды | `block.user` | публично, нужен синк |
 | состав/админы кэмпа | `block.camp` (owner) | публичный факт допуска, single-writer |
-| OIDC-клиент (id/redirect/…) | `block.oidcclient` | публичный конфиг, channel-gated |
-| публичный JWK | блок или well-known | публичный |
-| **client secret** | vault / локально | секрет |
-| **приватный ключ IdP** | per-peer локально | секрет + per-peer attestation |
+| OIDC-клиент (id/redirect/…), публичный JWK | `block.oidcclient` / well-known | публичный конфиг |
+| **client secret**, **приватный ключ IdP** | config/vault, per-peer | секрет; реплика ключа IdP сломала бы per-peer attestation |
+
+## Вкладка users (UI)
+
+Секция `peers` в боковом меню становится вкладкой **users** — список **по людям**.
+
+- **Источник:** свёртка `block.user` (все юзеры) + `block.camp` (роли/членство) —
+  это identity; статус устройства — из pair-state (membership-gated) + announce
+  (liveness, из memory).
+- **Рендер:** строка юзера (имя, бейдж owner/admin, «you») → разворот → его
+  устройства (имя, dot-статус, метка «это устройство»).
+- **Действия:** «+ Invite» (device-link для своих устройств — всем; camp-invite —
+  только owner), revoke инвайта, remove user (owner), remove device (self).
 
 ## Открытые вопросы
 
@@ -110,9 +152,18 @@
 
 ## Этапность
 
-1. ✅→📐 **`block.user`** — self-профиль + публичные passkeys; синк публичных кредов
-   (заменяет локальный `credstore.go` на реплицируемый).
-2. 📐 **`block.camp`** (owner-only членство) + подключить к `SetMemberCheck` и
-   `handlePairReq` как источник членства; camp-announce → только liveness.
-3. 📐 **`block.oidcclient`** (публичный конфиг, channel-gated); секреты → vault.
-4. 📐 **e2e-эпохи** для реального исключения — общий механизм с каналами.
+Режем на самодостаточные куски, чтобы объём был подъёмным:
+
+1. 📐 **Модель** — зафиксировать схемы `block.user/camp/invite` + карту хранения
+   (этот док). Кода ноль. ← *сделано здесь.*
+2. 📐 **`block.user` + вкладка users (read-only)** — каждое устройство публикует
+   self-профиль; UI рисует юзеров+устройства из блоков. Без инвайтов и гейтинга.
+   Низкий риск, сразу видно. ← *конкретный следующий шаг.* Заодно синк публичных
+   passkey-кредов заменяет локальный `credstore.go`.
+3. 📐 **`block.camp`** (owner-only членство) + подключить к `SetMemberCheck` и
+   `handlePairReq` как источник членства; camp-announce → только liveness;
+   выпилить `PeerCatalog` из config.
+4. 📐 **Инвайты** — device-link (self) + camp-invite (owner) + join-handshake
+   (детали флоу/подписей — в [INVITE.md](INVITE.md)).
+5. 📐 **`block.oidcclient`** (публичный конфиг, channel-gated); секреты → vault.
+6. 📐 **e2e-эпохи** для реального исключения — общий механизм с каналами.

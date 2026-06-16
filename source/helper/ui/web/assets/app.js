@@ -5,6 +5,11 @@ $(function () {
   let lastStatus = null;   // last /api/status sample, for re-rendering on route change
   let livePeers = [];      // last seen camp peers from /api/status (declared early:
                            // nameForPub/applyRoute reference it during init)
+  // Profile state — declared up here because applyRoute() reads profileRequired
+  // during init (a later `let` would be in the temporal dead zone → crash).
+  let profile = null;          // {user_id, first, last, nick} or null
+  let profileChecked = false;  // /api/profile fetched this session
+  let profileRequired = false; // router pins the user to the profile page until saved
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -1670,6 +1675,10 @@ $(function () {
   }
   function applyRoute() {
     const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    // Mandatory profile gate: until a profile exists, pin the user to the
+    // profile page and bounce any attempt to navigate away.
+    if (profileRequired && h !== 'profile') { location.hash = 'profile'; return; }
+    if (h === 'profile') { activateTab('profile'); fillProfilePage(); return; }
     // peer:<key> → open the (hidden) camp tab with that peer's details.
     const pm = h.match(/^peer:(.+)$/);
     if (pm) {
@@ -2743,6 +2752,208 @@ $(function () {
 
   // renderIdentity fills the identity panel — with the selected peer's details
   // when a peer:<key> route is active, otherwise our own camp identity.
+  // renderAccount fills the sidebar header plaque (avatar + name + camp/peer) —
+  // the messenger-style account chip. Avatar is initials on a colour derived
+  // from the identity pub (stable per identity); a real avatar comes later.
+  function avatarColor(seed) {
+    let h = 0; const str = String(seed || '');
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+    return 'hsl(' + (h % 360) + ', 42%, 46%)';
+  }
+  function avatarInitials(name) {
+    const p = String(name || '?').trim().split(/\s+/);
+    return ((p[0] || '?')[0] + (p[1] ? p[1][0] : '')).toUpperCase();
+  }
+  function profileName() {
+    if (!profile) return '';
+    return [profile.first, profile.last].filter(Boolean).join(' ').trim();
+  }
+  function renderAccount(s) {
+    const $av = $('#ax-account-avatar'), $nm = $('#ax-account-name'),
+      $sub = $('#ax-account-sub'), $dev = $('#ax-account-dev');
+    if (!s || !s.running) {
+      $nm.text('no camp');
+      $sub.text('engine stopped');
+      $dev.text('');
+      $av.text('·').css('background', 'var(--panel-2)');
+      return;
+    }
+    // Prefer the user profile's name over the camp nickname once it exists.
+    const name = profileName() || s.camp_name || 'me';
+    const camp = s.camp_label || s.camp_id || '';
+    const nick = (profile && profile.nick) ? '@' + profile.nick : '';
+    // Device line: peer name @ overlay ip — identifies THIS machine, distinct
+    // from the person (nick above).
+    const self = (s.peers || []).find((p) => p.self);
+    const ip = (self && self.overlay_v4) || s.local_ip || '';
+    const dev = [s.camp_name, ip].filter(Boolean).join('@');
+    $nm.text(name);
+    $sub.text([nick, camp ? 'camp ' + camp : ''].filter(Boolean).join(' · '));
+    $dev.text(dev);
+    $av.text(avatarInitials(name)).css('background', avatarColor((profile && profile.user_id) || s.identity_pub || name));
+  }
+
+  // Profile: a page (#tab-profile) in the main pane. While in a camp with no
+  // profile yet, it's mandatory — the router (applyRoute) forces this page and
+  // blocks leaving until saved (profileRequired). Editing is just opening it via
+  // the account plaque. (State vars declared at the top — applyRoute uses them.)
+  function ensureProfile(s) {
+    if (!s || !s.running || profileChecked) return;
+    profileChecked = true;
+    $.getJSON('/api/profile').done((p) => {
+      if (p && p.exists) {
+        profile = p;
+        renderAccount(lastStatus);
+        // If the profile page is already open (deep-link / it rendered before
+        // the fetch landed), repaint it now that we have the data.
+        if (!$('#tab-profile').hasClass('hidden')) fillProfilePage();
+      } else { profileRequired = true; location.hash = 'profile'; }
+    }).fail(() => { profileChecked = false; }); // retry next tick on error
+  }
+  // fillProfilePage paints the form for create (no profile) or edit (existing):
+  // pre-fills, sets title/hint, shows Cancel only when leaving is allowed.
+  function fillProfilePage() {
+    const dev = (lastStatus && lastStatus.camp_name) || '';
+    const editing = !!profile;
+    $('#profile-title').text(editing ? 'Профиль' : 'Создайте профиль');
+    $('#profile-nick-hint').text(dev
+      ? 'Никнейм — это вы, а не устройство «' + dev + '»; он должен отличаться от него.'
+      : 'Никнейм — это вы, а не устройство; он должен отличаться от имени устройства.');
+    $('#profile-err').text('');
+    $('#profile-first').val(editing ? (profile.first || '') : '');
+    $('#profile-last').val(editing ? (profile.last || '') : '');
+    $('#profile-nick').val(editing ? (profile.nick || '') : '');
+    $('#profile-save').text(editing ? 'Сохранить' : 'Создать');
+    renderProfileDevices();
+  }
+  // renderProfileDevices fills the "this device" + "my devices" sections from
+  // /api/status. The device list is just the current device until block.user
+  // gains a devices[] (device-link, slice B+) — flagged in the heading.
+  function renderProfileDevices() {
+    const s = lastStatus || {};
+    const self = (s.peers || []).find((p) => p.self) || {};
+    const ip = self.overlay_v4 || s.local_ip || '—';
+    const name = s.camp_name || '—';
+    const fp = s.identity_fp || (s.identity_pub || '').slice(0, 16) || '—';
+    const row = (k, v, mono) => '<div class="ax-prof-row"><span class="ax-prof-k">' + esc(k) +
+      '</span><span class="ax-prof-v' + (mono ? ' ax-prof-mono' : '') + '">' + esc(v) + '</span></div>';
+    // Device name is editable (live rename → re-announce); value set via .val()
+    // afterwards to avoid attribute-injection.
+    $('#profile-device').html(
+      '<div class="ax-prof-row"><span class="ax-prof-k">Имя устройства</span>' +
+      '<span class="ax-prof-v ax-prof-edit"><input id="device-name" class="ax-prof-input" maxlength="64">' +
+      '<button type="button" id="device-rename" class="ax-prof-mini" title="переименовать">✓</button></span></div>' +
+      '<div class="ax-prof-err" id="device-err"></div>' +
+      row('Overlay IP', ip, true) + row('Отпечаток ключа', fp, true) +
+      '<div class="ax-prof-row"><span class="ax-prof-k">Passkey</span>' +
+      '<span class="ax-prof-v" id="passkey-cell"></span></div>' +
+      '<div class="ax-prof-err" id="passkey-err"></div>');
+    $('#device-name').val(name);
+    if (profile && profile.has_passkey) $('#passkey-cell').html('<span class="ax-prof-ok">✓ создан</span>');
+    else $('#passkey-cell').html('<button type="button" id="passkey-create" class="ax-prof-mini">Создать passkey</button>');
+    // My devices — only this one for now (multi-device arrives with device-link).
+    const dev = '<div class="ax-prof-dev"><span class="ax-dot reachable"></span>' +
+      '<span class="ax-prof-dev-name">' + esc(name) + '</span>' +
+      '<span class="ax-prof-dev-ip">' + esc(ip) + '</span>' +
+      '<span class="ax-prof-dev-tag">это устройство</span></div>';
+    $('#profile-devices').html(dev +
+      '<div class="ax-prof-note">Другие устройства появятся, когда привяжете их к профилю.</div>');
+  }
+  // Clicking the account plaque opens the profile page (edit). Leaving without
+  // saving = just navigate away via the sidebar (no explicit cancel needed).
+  $('#ax-account').on('click', function () { if (lastStatus && lastStatus.running) location.hash = 'profile'; });
+  // Rename this device (live: re-announced to peers).
+  $('#tab-profile').on('click', '#device-rename', function () {
+    const name = $('#device-name').val().trim();
+    $('#device-err').text('');
+    if (!name) { $('#device-err').text('Имя устройства обязательно'); return; }
+    const $btn = $('#device-rename').prop('disabled', true);
+    $.ajax({
+      url: '/api/profile/device', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ name }),
+    }).done((r) => {
+      if (lastStatus) lastStatus.camp_name = (r && r.name) || name; // instant feedback
+      renderAccount(lastStatus);
+      renderProfileDevices();
+    }).fail((x) => { $('#device-err').text(errorOf(x)); })
+      .always(() => { $btn.prop('disabled', false); });
+  });
+
+  // WebAuthn base64url ↔ ArrayBuffer (the server speaks base64url per the spec).
+  function b64urlToBuf(s) {
+    s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+    const pad = s.length % 4 ? '='.repeat(4 - (s.length % 4)) : '';
+    const bin = atob(s + pad), b = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+    return b.buffer;
+  }
+  function bufToB64url(buf) {
+    const b = new Uint8Array(buf); let s = '';
+    for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Create a passkey for this device (registers with the local IdP credstore).
+  $('#tab-profile').on('click', '#passkey-create', function () {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      $('#passkey-err').text('Этот браузер не поддерживает passkey'); return;
+    }
+    $('#passkey-err').text('');
+    const $b = $('#passkey-create').prop('disabled', true).text('…');
+    $.ajax({ url: '/api/profile/passkey/begin', method: 'POST' }).then((opts) => {
+      const pk = opts.publicKey;
+      pk.challenge = b64urlToBuf(pk.challenge);
+      pk.user.id = b64urlToBuf(pk.user.id);
+      (pk.excludeCredentials || []).forEach((c) => { c.id = b64urlToBuf(c.id); });
+      return navigator.credentials.create({ publicKey: pk });
+    }).then((cred) => {
+      const body = {
+        id: cred.id, type: cred.type, rawId: bufToB64url(cred.rawId),
+        response: {
+          attestationObject: bufToB64url(cred.response.attestationObject),
+          clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        },
+      };
+      return $.ajax({
+        url: '/api/profile/passkey/finish', method: 'POST',
+        contentType: 'application/json', data: JSON.stringify(body),
+      });
+    }).then(() => {
+      if (profile) profile.has_passkey = true;
+      renderProfileDevices();
+    }, (e) => {
+      const msg = (e && e.name === 'NotAllowedError') ? 'отменено или истекло время'
+        : ((e && e.responseText) || (e && e.message) || 'не удалось');
+      $('#passkey-err').text(msg);
+      $b.prop('disabled', false).text('Создать passkey');
+    });
+  });
+  $('#profile-form').on('submit', function (e) {
+    e.preventDefault();
+    const first = $('#profile-first').val().trim();
+    const last = $('#profile-last').val().trim();
+    const nick = $('#profile-nick').val().trim();
+    $('#profile-err').text('');
+    if (!first) { $('#profile-err').text('Имя обязательно'); return; }
+    if (!nick) { $('#profile-err').text('Никнейм обязателен'); return; }
+    const dev = (lastStatus && lastStatus.camp_name) || '';
+    if (dev && nick.toLowerCase() === dev.toLowerCase()) {
+      $('#profile-err').text('Никнейм должен отличаться от имени устройства «' + dev + '»');
+      return;
+    }
+    const $btn = $('#profile-save').prop('disabled', true).text('Сохраняю…');
+    $.ajax({
+      url: '/api/profile', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ first, last, nick }),
+    }).done((p) => {
+      profile = p;
+      profileRequired = false;
+      renderAccount(lastStatus);
+      location.hash = ''; // leave the profile page
+    }).fail((x) => {
+      $('#profile-err').text(errorOf(x));
+    }).always(() => { $btn.prop('disabled', false).text(profile ? 'Сохранить' : 'Создать'); });
+  });
+
   function renderIdentity(s) {
     if (!s) return;
     const peer = selectedPeer
@@ -2768,6 +2979,8 @@ $(function () {
 
   function applyStatus(s) {
     lastStatus = s;
+    renderAccount(s);
+    ensureProfile(s); // force profile creation if there's none yet
     if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';

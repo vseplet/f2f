@@ -98,6 +98,14 @@
         <div class="flex-1 flex min-h-0">
             <aside id="ax-sidebar" class="ax-sidebar">
                 <div class="ax-sidebar-inner">
+                    <div class="ax-account" id="ax-account" title="profile / camp">
+                        <div class="ax-account-avatar" id="ax-account-avatar"></div>
+                        <div class="ax-account-meta">
+                            <div class="ax-account-name" id="ax-account-name">—</div>
+                            <div class="ax-account-sub" id="ax-account-sub"></div>
+                            <div class="ax-account-dev" id="ax-account-dev"></div>
+                        </div>
+                    </div>
                     <div class="ax-sidebar-header">
                         <input
                             type="search"
@@ -271,6 +279,34 @@
                 </div>
             </div>
             <!-- /#tab-camp -->
+
+            <!-- Profile page. Opened from the account plaque; also the mandatory
+                 first-time gate (router forces it here until a profile exists). -->
+            <div id="tab-profile" class="tab-panel hidden">
+                <div class="ax-frame ax-profile-page">
+                    <div class="ax-section-title" id="profile-title">Профиль</div>
+                    <form id="profile-form" class="ax-profile-form">
+                        <label class="ax-profile-label">Имя</label>
+                        <input id="profile-first" class="ax-modal-input" type="text" placeholder="Имя" autocomplete="given-name" />
+                        <label class="ax-profile-label">Фамилия</label>
+                        <input id="profile-last" class="ax-modal-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+                        <label class="ax-profile-label">Никнейм</label>
+                        <input id="profile-nick" class="ax-modal-input" type="text" placeholder="Никнейм" autocomplete="off" spellcheck="false" />
+                        <div class="ax-modal-hint" id="profile-nick-hint">Никнейм — это вы, а не устройство; он должен отличаться от имени устройства.</div>
+                        <div class="ax-modal-err" id="profile-err"></div>
+                        <div class="ax-profile-actions">
+                            <button type="submit" class="ax-modal-btn" id="profile-save">Сохранить</button>
+                        </div>
+                    </form>
+
+                    <div class="ax-section-title ax-profile-h2">Это устройство</div>
+                    <div class="ax-profile-device" id="profile-device"></div>
+
+                    <div class="ax-section-title ax-profile-h2">Мои устройства</div>
+                    <div class="ax-profile-devices" id="profile-devices"></div>
+                </div>
+            </div>
+            <!-- /#tab-profile -->
 
             <div id="tab-tunnel" class="tab-panel hidden">
                 <div class="ax-frame">

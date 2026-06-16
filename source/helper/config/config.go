@@ -63,9 +63,14 @@ type Camp struct {
 	// this camp. Defaults applied by NewCamp; can be overridden by
 	// hand-editing the per-camp file. Used by mesh/camp to spin
 	// up the announce client + HTTP poller.
-	ServerURL    string        `json:"server_url,omitempty"`
-	StunAddr     string        `json:"stun_addr,omitempty"`
-	Identity     Identity      `json:"identity"`
+	ServerURL string   `json:"server_url,omitempty"`
+	StunAddr  string   `json:"stun_addr,omitempty"`
+	Identity  Identity `json:"identity"`
+	// Profile is the active user profile on THIS device — its user_id. The
+	// profile itself (name, passkeys, …) lives as a block.user in db; this only
+	// records which user_id this device operates as. Empty = no profile yet
+	// (the UI then forces profile creation). See docs/IDENTITY.md.
+	Profile      string        `json:"profile,omitempty"`
 	Intercepts   []Intercept   `json:"intercepts"`
 	MyDomains    []Domain      `json:"my_domains"`
 	Firewall     []Firewall    `json:"firewall"`
