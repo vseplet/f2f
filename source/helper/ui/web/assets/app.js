@@ -2940,6 +2940,7 @@ $(function () {
     $('#status-fp').text((s && s.identity_fp) ? 'fp ' + s.identity_fp : '');
   }
 
+  let lastTreeHtml = ''; // memo: skip the tree DOM swap when nothing changed
   function renderSidebarTree(s) {
     const $tree = $('#ax-tree');
     if (!$tree.length) return;
@@ -2963,9 +2964,9 @@ $(function () {
       for (const p of peers) {
         const state = peerDot(p);
         const ip = p.overlay_v4 || '';
-        const rtt = (typeof p.last_rtt_ms === 'number' && p.last_rtt_ms > 0)
-          ? `${p.last_rtt_ms}ms` : '';
-        const meta = [ip, rtt].filter(Boolean).join(' · ');
+        // NB: no live rtt here — it churns every poll and would defeat the
+        // tree's "skip rebuild when unchanged" memo, making the sidebar flicker.
+        const meta = ip;
         // Offline ghosts (no pairing, not in the camp roster) carry a
         // forget button — the camp only re-sends active peers, so removing
         // one of these sticks. Live peers have no button (would reappear).
@@ -3222,7 +3223,7 @@ $(function () {
       ? vncList.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
       : empty('none');
 
-    $tree.html(
+    const treeHtml = (
       category('peers',     'peers',     peers.length, peersBody)
       + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
@@ -3246,6 +3247,10 @@ $(function () {
       + category('policies',  'policies',  null, empty('not configured'))
       + category('apps',      'apps',      null, empty('coming soon'))
     );
+    // These timers fire several times a second; only touch the DOM when the
+    // tree actually changed, else the wholesale rebuild makes rows/selects
+    // flicker and resets hover/scroll. Route highlight is cheap & idempotent.
+    if (treeHtml !== lastTreeHtml) { lastTreeHtml = treeHtml; $tree.html(treeHtml); }
     highlightActiveRoute();
   }
 
