@@ -31,7 +31,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"strconv"
 
 	"github.com/vseplet/f2f/source/helper/identity"
@@ -66,14 +65,6 @@ type Req struct {
 	WGPub  string `json:"wg_pub"`  // X25519 pub hex (64 chars)
 	SentMs int64  `json:"sent_ms"` // sender's clock at send time
 	Sig    string `json:"sig"`     // Ed25519 signature hex (128 chars)
-	// Local advertises the sender's LAN endpoints ("ip:port") so peers behind
-	// the SAME NAT can punch each other directly over the LAN instead of via the
-	// public reflex (which depends on flaky NAT hairpinning). NOT signed — a
-	// forged candidate only makes the receiver send a pair_req to a wrong
-	// address (harmless; the response still needs a valid signature), so it
-	// stays out of the canonical form for backward compatibility with peers
-	// that predate the field.
-	Local []string `json:"local,omitempty"`
 }
 
 // Res is the parsed pair_res JSON payload. EchoMs is the responder's
@@ -106,7 +97,7 @@ func Type(plaintext []byte) string {
 // BuildReq constructs a signed pair_req. sentMs is typically
 // time.Now().UnixMilli() at the moment of build. The signed canonical
 // form is `f2f-pair-req-v1|name|pub|wg_pub|sent_ms`.
-func BuildReq(id *identity.Identity, name string, sentMs int64, local []string) ([]byte, error) {
+func BuildReq(id *identity.Identity, name string, sentMs int64) ([]byte, error) {
 	if !identity.ValidPeerName(name) {
 		return nil, ErrInvalidName
 	}
@@ -118,7 +109,6 @@ func BuildReq(id *identity.Identity, name string, sentMs int64, local []string) 
 		WGPub:  id.X25519PubHex(),
 		SentMs: sentMs,
 		Sig:    hex.EncodeToString(sig),
-		Local:  sanitizeLocal(local),
 	})
 }
 
@@ -177,37 +167,7 @@ func ParseReq(plaintext []byte) (Req, bool) {
 	if !ed25519.Verify(ed25519.PublicKey(pubBytes), canonReq(p.Name, p.Pub, p.WGPub, p.SentMs), sigBytes) {
 		return Req{}, false
 	}
-	p.Local = sanitizeLocal(p.Local) // unsigned field — clamp + drop malformed
 	return p, true
-}
-
-// maxLocalCandidates caps how many LAN endpoints we accept/advertise, so a peer
-// can't make us spray pair_reqs at an arbitrary number of addresses.
-const maxLocalCandidates = 6
-
-// sanitizeLocal keeps only well-formed "ip:port" entries (parseable host:port
-// with a literal IP) and caps the count.
-func sanitizeLocal(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]string, 0, maxLocalCandidates)
-	seen := map[string]bool{}
-	for _, s := range in {
-		host, port, err := net.SplitHostPort(s)
-		if err != nil || net.ParseIP(host) == nil || port == "" {
-			continue
-		}
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-		if len(out) >= maxLocalCandidates {
-			break
-		}
-	}
-	return out
 }
 
 // ParseRes decodes and verifies a pair_res. Same guarantees as ParseReq

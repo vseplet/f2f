@@ -15,7 +15,7 @@ func TestBuildParseReqRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := BuildReq(id, "alice", 1735000000123, nil)
+	raw, err := BuildReq(id, "alice", 1735000000123)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestBuildParseResRoundtrip(t *testing.T) {
 // since the engine uses it to route to the right handler.
 func TestTypeDiscrimination(t *testing.T) {
 	id, _ := identity.Generate()
-	req, _ := BuildReq(id, "alice", 1, nil)
+	req, _ := BuildReq(id, "alice", 1)
 	res, _ := BuildRes(id, "alice", 1, 0)
 	if got := Type(req); got != TypeReq {
 		t.Errorf("Type(req) = %q, want %q", got, TypeReq)
@@ -83,7 +83,7 @@ func TestTypeDiscrimination(t *testing.T) {
 // underlying signature is otherwise valid.
 func TestParseRejectsTypeMismatch(t *testing.T) {
 	id, _ := identity.Generate()
-	req, _ := BuildReq(id, "alice", 1, nil)
+	req, _ := BuildReq(id, "alice", 1)
 	res, _ := BuildRes(id, "alice", 1, 0)
 	if _, ok := ParseRes(req); ok {
 		t.Error("ParseRes accepted a pair_req")
@@ -98,7 +98,7 @@ func TestParseRejectsTypeMismatch(t *testing.T) {
 // distinct tags an attacker could replay a captured Req as a Res.
 func TestDomainSeparationReqVsRes(t *testing.T) {
 	id, _ := identity.Generate()
-	req, _ := BuildReq(id, "alice", 1, nil)
+	req, _ := BuildReq(id, "alice", 1)
 	// Surgically rewrite "pair_req" → "pair_res" in the JSON, keeping
 	// the same signature. ParseRes should reject because the Res
 	// canonical form differs from what the sig covers.
@@ -126,7 +126,7 @@ func TestParseRejectsTimingTampering(t *testing.T) {
 func TestParseRejectsWGPubTampering(t *testing.T) {
 	a, _ := identity.Generate()
 	b, _ := identity.Generate()
-	req, _ := BuildReq(a, "alice", 1, nil)
+	req, _ := BuildReq(a, "alice", 1)
 	tampered := bytes.ReplaceAll(req,
 		[]byte(`"`+a.X25519PubHex()+`"`),
 		[]byte(`"`+b.X25519PubHex()+`"`))
@@ -139,10 +139,10 @@ func TestParseRejectsWGPubTampering(t *testing.T) {
 // an unverifiable packet (Parse on the other side would just drop it).
 func TestBuildRejectsInvalidName(t *testing.T) {
 	id, _ := identity.Generate()
-	if _, err := BuildReq(id, "", 1, nil); err == nil {
+	if _, err := BuildReq(id, "", 1); err == nil {
 		t.Error("BuildReq accepted empty name")
 	}
-	if _, err := BuildReq(id, "with|pipe", 1, nil); err == nil {
+	if _, err := BuildReq(id, "with|pipe", 1); err == nil {
 		t.Error("BuildReq accepted name with pipe")
 	}
 	if _, err := BuildRes(id, "with\x00null", 1, 0); err == nil {
@@ -191,7 +191,7 @@ func TestCanonicalResFormat(t *testing.T) {
 func TestSentMsExtremeRoundtrip(t *testing.T) {
 	id, _ := identity.Generate()
 	for _, ts := range []int64{0, 1, -1, 1 << 62, -(1 << 62)} {
-		raw, err := BuildReq(id, "x", ts, nil)
+		raw, err := BuildReq(id, "x", ts)
 		if err != nil {
 			t.Fatal(err)
 		}

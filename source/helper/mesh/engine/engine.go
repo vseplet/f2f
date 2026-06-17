@@ -14,7 +14,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -214,11 +213,6 @@ type peerState struct {
 	LastSeenAt int64
 
 	UDPAddr    *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
-	// Candidates are the peer's LAN endpoints (from its pair_req Local field),
-	// filtered to addresses on OUR subnets. holePunchLoop also punches these so
-	// two peers behind the SAME NAT connect directly over the LAN, bypassing
-	// flaky hairpinning. Mutated under e.mu.
-	Candidates []*net.UDPAddr
 	LastSeenMs atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
 	LastPingMs atomic.Int64 // epoch ms of last punch/keepalive we sent
 
@@ -1059,69 +1053,11 @@ func (e *Engine) pairReqPacket(sentMs int64) ([]byte, error) {
 	if e.cfg.CampID == "" || e.identity == nil || e.obfenv == nil {
 		return nil, errors.New("pair_req: not in camp mode")
 	}
-	reqJSON, err := pair.BuildReq(e.identity, e.cfg.CampName, sentMs, e.localCandidates())
+	reqJSON, err := pair.BuildReq(e.identity, e.cfg.CampName, sentMs)
 	if err != nil {
 		return nil, fmt.Errorf("pair_req build: %w", err)
 	}
 	return e.obfenv.Seal(obfenv.SlotHello, reqJSON)
-}
-
-// localCandidates lists this host's LAN endpoints ("ip:port") to advertise in
-// pair_req — real IPv4 interface addresses (no loopback / link-local / the f2f
-// overlay 100.64/10), at our UDP listen port. Peers behind the same NAT use
-// them to punch us directly over the LAN.
-func (e *Engine) localCandidates() []string {
-	e.mu.Lock()
-	udp := e.udp
-	e.mu.Unlock()
-	if udp == nil {
-		return nil
-	}
-	la, ok := udp.LocalAddr().(*net.UDPAddr)
-	if !ok || la.Port == 0 {
-		return nil
-	}
-	port := strconv.Itoa(la.Port)
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, a := range addrs {
-		n, ok := a.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip4 := n.IP.To4()
-		if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
-			continue
-		}
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 { // f2f overlay 100.64/10
-			continue
-		}
-		out = append(out, net.JoinHostPort(ip4.String(), port))
-	}
-	return out
-}
-
-// lanContains reports whether ip is on one of our local IPv4 subnets — i.e. a
-// peer candidate we can actually reach directly over the LAN (so we don't spray
-// pair_reqs at foreign 192.168/10.x addresses that would route to the internet).
-func (e *Engine) lanContains(ip net.IP) bool {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, a := range addrs {
-		n, ok := a.(*net.IPNet)
-		if !ok || n.IP.To4() == nil || n.IP.IsLoopback() {
-			continue
-		}
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // handlePairReq applies a verified pair_req to engine state, then
@@ -1145,30 +1081,10 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 		clog.Info("pair", "req: peer %s rotated wg_pub %s → %s", p.label(), p.WGPub[:16], req.WGPub[:16])
 	}
 	p.WGPub = req.WGPub
-	// Store the peer's LAN candidates that are reachable on our subnets — these
-	// get punched by holePunchLoop for a direct same-NAT path. Build a fresh
-	// slice (not in-place) so the lock-free reader in holePunchLoop never sees a
-	// half-rewritten one.
-	var cands []*net.UDPAddr
-	for _, s := range req.Local {
-		if a, err := net.ResolveUDPAddr("udp", s); err == nil && a.IP != nil && e.lanContains(a.IP) {
-			cands = append(cands, a)
-		}
-	}
-	p.Candidates = cands
 	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
 	if endpointChanged {
-		// Prefer a LAN path: once we're on the peer's LAN address, don't
-		// downgrade back to a non-LAN (public reflex) source.
-		curLAN := p.UDPAddr != nil && e.lanContains(p.UDPAddr.IP)
-		fromLAN := from.IP != nil && e.lanContains(from.IP)
-		if curLAN && !fromLAN {
-			clog.Debug("pair", "req: peer %s keep LAN %s, ignore %s", p.label(), p.UDPAddr, from)
-		} else {
-			clog.Info("pair", "req: peer %s UDP %s → %s%s", p.label(), p.UDPAddr, from,
-				map[bool]string{true: " (LAN)", false: " (NAT rebind?)"}[fromLAN])
-			p.UDPAddr = from
-		}
+		clog.Info("pair", "req: peer %s UDP %s → %s (NAT rebind?)", p.label(), p.UDPAddr, from)
+		p.UDPAddr = from
 	}
 	e.mu.Unlock()
 	p.LastSeenMs.Store(now)
@@ -1388,15 +1304,6 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				sentOK = true
 				p.LastPingMs.Store(now)
 				p.LastSentReqMs.Store(now)
-				// Also punch the peer's LAN candidates (direct same-NAT path).
-				// Best-effort: they're filtered to our subnets, so a send error
-				// is just a dead candidate — don't treat it as net-down.
-				for _, c := range p.Candidates {
-					if c == nil || sameUDPAddr(c, p.UDPAddr) {
-						continue
-					}
-					_, _ = e.udp.WriteToUDP(reqPkt, c)
-				}
 			}
 			// Awake-network-change recovery. When every send fails with a
 			// network-down errno and none succeed, the local route is gone
