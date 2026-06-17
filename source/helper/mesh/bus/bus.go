@@ -511,7 +511,12 @@ func (s *Service) OpenStream(ctx context.Context, pub, typ string, open []byte) 
 func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) ([]byte, error) {
 	st, err := s.openStream(ctx, pub, false)
 	if err != nil {
-		return nil, err
+		// Tag the stage so a timeout tells us WHERE it stalled: "open" means we
+		// couldn't even get a stream (conn stuck / stream-count limit); "write"
+		// / "read" mean the stream opened but the round-trip stalled (path or
+		// peer). Lets the ping log distinguish stream-exhaustion from a
+		// half-dead path without guessing.
+		return nil, fmt.Errorf("open: %w", err)
 	}
 	defer st.Close()
 	// Bound the WHOLE exchange by ctx — crucially the response read. Without a
@@ -523,12 +528,12 @@ func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) 
 	}
 	if err := writeFrame(st, header{Type: typ}, payload); err != nil {
 		s.dropIfStalled(pub, err)
-		return nil, err
+		return nil, fmt.Errorf("write: %w", err)
 	}
 	resp, err := readChunk(st)
 	if err != nil {
 		s.dropIfStalled(pub, err)
-		return nil, err
+		return nil, fmt.Errorf("read: %w", err)
 	}
 	return resp, nil
 }
