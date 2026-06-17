@@ -2793,10 +2793,9 @@ $(function () {
     $av.text(avatarInitials(name)).css('background', avatarColor((profile && profile.user_id) || s.identity_pub || name));
   }
 
-  // Profile: a page (#tab-profile) in the main pane. While in a camp with no
-  // profile yet, it's mandatory — the router (applyRoute) forces this page and
-  // blocks leaving until saved (profileRequired). Editing is just opening it via
-  // the account plaque. (State vars declared at the top — applyRoute uses them.)
+  // Profile: a page (#tab-profile) in the main pane, reached via the account
+  // plaque. Creating one is optional — we just load it if it exists (to fill
+  // the plaque) and otherwise leave it empty; the page works for create or edit.
   function ensureProfile(s) {
     if (!s || !s.running || profileChecked) return;
     profileChecked = true;
@@ -2807,7 +2806,7 @@ $(function () {
         // If the profile page is already open (deep-link / it rendered before
         // the fetch landed), repaint it now that we have the data.
         if (!$('#tab-profile').hasClass('hidden')) fillProfilePage();
-      } else { profileRequired = true; location.hash = 'profile'; }
+      }
     }).fail(() => { profileChecked = false; }); // retry next tick on error
   }
   // fillProfilePage paints the form for create (no profile) or edit (existing):
