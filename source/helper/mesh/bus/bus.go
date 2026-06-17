@@ -43,6 +43,11 @@ import (
 const (
 	alpn = "f2f-bus"
 	Port = "2203" // UDP port on the overlay IP
+
+	// pingFailLimit is how many consecutive failed liveness pings drop a peer's
+	// cached conn. >1 so a single transient stall doesn't tear a conn carrying a
+	// live VNC/shell stream; a truly dead conn still fails the streak and goes.
+	pingFailLimit = 2
 )
 
 // dbg logs verbose connection-lifecycle diagnostics (dial/adopt/forget/drop
@@ -104,6 +109,7 @@ type Service struct {
 	handlers       map[string]HandlerFunc
 	streamHandlers map[string]StreamHandlerFunc
 	linkUp         map[string]bool // pub → last ping outcome (for up/down notifications)
+	pingFail       map[string]int  // pub → consecutive failed pings; drop the conn only after a streak
 	// dialing collapses concurrent dials to the same peer (the shell and
 	// vnc discovery probes fire together every 5s): the first caller dials,
 	// the rest wait on the channel and reuse the outcome. Without this every
@@ -128,6 +134,7 @@ func New(r Resolver) (*Service, error) {
 		handlers:       make(map[string]HandlerFunc),
 		streamHandlers: make(map[string]StreamHandlerFunc),
 		linkUp:         make(map[string]bool),
+		pingFail:       make(map[string]int),
 		dialing:        make(map[string]chan struct{}),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
@@ -281,10 +288,26 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	ok := err == nil
 	rtt := time.Since(start).Round(time.Millisecond)
 	if ok {
+		s.mu.Lock()
+		s.pingFail[pub] = 0
+		s.mu.Unlock()
 		clog.Debug("bus", "ping %s ok via QUIC (%s)", s.label(pub), rtt)
 	} else {
-		clog.Warn("bus", "ping %s failed: %v", s.label(pub), err)
-		s.dropConn(pub) // force a fresh dial next round
+		// Drop only after a streak — a single missed ping is usually a
+		// transient stall, and tearing the conn would also kill any live
+		// VNC/shell stream multiplexed on it. A genuinely dead conn fails
+		// repeatedly and gets dropped after the streak.
+		s.mu.Lock()
+		s.pingFail[pub]++
+		fails := s.pingFail[pub]
+		s.mu.Unlock()
+		clog.Warn("bus", "ping %s failed (%d/%d): %v", s.label(pub), fails, pingFailLimit, err)
+		if fails >= pingFailLimit {
+			s.dropConn(pub)
+			s.mu.Lock()
+			s.pingFail[pub] = 0
+			s.mu.Unlock()
+		}
 	}
 
 	// Notify only on a link-state CHANGE, not every ping: "up" when it first
@@ -515,8 +538,11 @@ func (s *Service) dropIfStalled(pub string, err error) {
 	if errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		(errors.As(err, &ne) && ne.Timeout()) {
-		dbg("drop %s: request stalled to deadline on a live conn", s.label(pub))
-		s.dropConn(pub)
+		// Don't tear the connection — that also kills any live VNC/shell stream
+		// multiplexed on it. The request's own stream is already closed (its
+		// deadline bounded it); a genuinely dead conn is reaped by the ping
+		// streak (pingFailLimit) instead.
+		dbg("%s: request stalled (stream closed; conn kept)", s.label(pub))
 	}
 }
 
@@ -684,6 +710,7 @@ func (s *Service) dropConn(pub string) {
 	s.mu.Lock()
 	c := s.conns[pub]
 	delete(s.conns, pub)
+	delete(s.pingFail, pub)
 	s.mu.Unlock()
 	if c != nil {
 		dbg("drop %s: closing conn (cause=%v)", s.label(pub), context.Cause(c.Context()))
