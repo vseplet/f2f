@@ -572,17 +572,29 @@ func (s *Service) openStream(ctx context.Context, pub string, notify bool) (*qui
 		return nil, err
 	}
 	st, err := conn.OpenStreamSync(ctx)
+	if err == nil {
+		return st, nil
+	}
+	// CRUCIAL: distinguish "the conn is dead" from "OUR caller ran out of time".
+	// If ctx is done, OpenStreamSync just surfaced the caller's deadline/cancel
+	// (e.g. a 2s discovery probe or 5s ping) — the conn itself is still healthy
+	// (its own context has no error). Tearing it here would CloseWithError the
+	// whole conn and kill every multiplexed stream on it (live VNC/shell), and
+	// the peer sees our "redial" close and churns its side too. So on a caller
+	// timeout, keep the conn and just fail this one open.
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	// ctx still live but the open failed → the cached conn is genuinely stale.
+	// Drop and dial fresh once.
+	s.dropConn(pub, fmt.Sprintf("OpenStream failed on cached conn: %v", err))
+	conn, err = s.connFor(ctx, pub)
 	if err != nil {
-		// likely a stale connection — drop and dial fresh once.
-		s.dropConn(pub, fmt.Sprintf("OpenStream failed on cached conn: %v", err))
-		conn, err = s.connFor(ctx, pub)
-		if err != nil {
-			return nil, err
-		}
-		st, err = conn.OpenStreamSync(ctx)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
+	}
+	st, err = conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
 	}
 	return st, nil
 }
