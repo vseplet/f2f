@@ -221,7 +221,6 @@ type peerState struct {
 	Candidates []*net.UDPAddr
 	LastSeenMs atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
 	LastPingMs atomic.Int64 // epoch ms of last punch/keepalive we sent
-	LastLANMs  atomic.Int64 // epoch ms of last packet from a LAN-candidate source; gates LAN preference
 
 	// WGPub is the peer's X25519 transport pubkey, learned from a verified
 	// hello-handshake (engine/hello). Empty until first valid hello arrives
@@ -1105,33 +1104,6 @@ func (e *Engine) localCandidates() []string {
 	return out
 }
 
-// adoptEndpoint points the peer at `from` unless that would downgrade a still-
-// fresh LAN path to a non-LAN (public reflex) source — which is what made the
-// endpoint flap when both paths answer. Once on the peer's LAN address we keep
-// it while LAN packets keep arriving; if LAN goes quiet (>pairFreshMs) a public
-// source takes over so we don't get stuck on a dead LAN. Caller holds e.mu.
-// Returns true if it actually moved p.UDPAddr (caller re-syncs AWG).
-func (e *Engine) adoptEndpoint(p *peerState, from *net.UDPAddr, now int64, kind string) bool {
-	fromLAN := from.IP != nil && e.lanContains(from.IP)
-	if fromLAN {
-		p.LastLANMs.Store(now)
-	}
-	if sameUDPAddr(p.UDPAddr, from) {
-		return false
-	}
-	curLAN := p.UDPAddr != nil && e.lanContains(p.UDPAddr.IP)
-	if curLAN && !fromLAN && now-p.LastLANMs.Load() < pairFreshMs {
-		return false // keep the fresh LAN path; ignore the public source
-	}
-	tag := " (NAT rebind?)"
-	if fromLAN {
-		tag = " (LAN)"
-	}
-	clog.Info("pair", "%s: peer %s UDP %s → %s%s", kind, p.label(), p.UDPAddr, from, tag)
-	p.UDPAddr = from
-	return true
-}
-
 // lanContains reports whether ip is on one of our local IPv4 subnets — i.e. a
 // peer candidate we can actually reach directly over the LAN (so we don't spray
 // pair_reqs at foreign 192.168/10.x addresses that would route to the internet).
@@ -1184,7 +1156,20 @@ func (e *Engine) handlePairReq(req pair.Req, from *net.UDPAddr) {
 		}
 	}
 	p.Candidates = cands
-	endpointChanged := e.adoptEndpoint(p, from, now, "req")
+	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
+	if endpointChanged {
+		// Prefer a LAN path: once we're on the peer's LAN address, don't
+		// downgrade back to a non-LAN (public reflex) source.
+		curLAN := p.UDPAddr != nil && e.lanContains(p.UDPAddr.IP)
+		fromLAN := from.IP != nil && e.lanContains(from.IP)
+		if curLAN && !fromLAN {
+			clog.Debug("pair", "req: peer %s keep LAN %s, ignore %s", p.label(), p.UDPAddr, from)
+		} else {
+			clog.Info("pair", "req: peer %s UDP %s → %s%s", p.label(), p.UDPAddr, from,
+				map[bool]string{true: " (LAN)", false: " (NAT rebind?)"}[fromLAN])
+			p.UDPAddr = from
+		}
+	}
 	e.mu.Unlock()
 	p.LastSeenMs.Store(now)
 	// First-time signal: this is the visible confirmation in logs that
@@ -1245,7 +1230,11 @@ func (e *Engine) handlePairRes(res pair.Res, from *net.UDPAddr) {
 		clog.Info("pair", "res: peer %s rotated wg_pub %s → %s", p.label(), p.WGPub[:16], res.WGPub[:16])
 	}
 	p.WGPub = res.WGPub
-	endpointChanged := e.adoptEndpoint(p, from, now, "res")
+	endpointChanged := !sameUDPAddr(p.UDPAddr, from)
+	if endpointChanged {
+		clog.Info("pair", "res: peer %s UDP %s → %s (NAT rebind?)", p.label(), p.UDPAddr, from)
+		p.UDPAddr = from
+	}
 	e.mu.Unlock()
 	p.LastSeenMs.Store(now)
 	firstRes := p.LastValidResMs.Load() == 0
