@@ -459,7 +459,7 @@ func (s *Service) forgetConn(pub string, conn *quic.Conn) {
 func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 	hdr, payload, err := readFrame(st)
 	if err != nil {
-		st.Close()
+		endStream(st)
 		return
 	}
 	s.mu.Lock()
@@ -472,7 +472,7 @@ func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 		sfn(fromPub, payload, st)
 		return
 	}
-	defer st.Close()
+	defer endStream(st)
 	if fn == nil {
 		clog.Warn("bus", "no handler for type %q from %s", hdr.Type, s.label(fromPub))
 		return
@@ -518,7 +518,7 @@ func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) 
 		// half-dead path without guessing.
 		return nil, fmt.Errorf("open: %w", err)
 	}
-	defer st.Close()
+	defer endStream(st)
 	// Bound the WHOLE exchange by ctx — crucially the response read. Without a
 	// stream deadline, readChunk blocks on a half-dead conn until the QUIC
 	// idle-timeout (tens of seconds), not the caller's ctx, which hangs callers
@@ -559,6 +559,22 @@ func (s *Service) dropIfStalled(pub string, err error) {
 	}
 }
 
+// endStream fully retires a request/response bidi stream so QUIC returns the
+// stream-count credit to the peer. quic-go deletes a stream (and only then
+// raises MAX_STREAMS) once BOTH halves complete: the send half via Close (FIN),
+// the receive half ONLY when we read the peer's FIN/EOF or cancel the read.
+// A request/response exchange reads exactly one frame and never consumes the
+// peer's trailing FIN, so without CancelRead the receive half lingers, the
+// stream is never retired, and after ~100 such streams every OpenStreamSync
+// blocks until its deadline ("open: context deadline exceeded"). Verified
+// against quic-go v0.59.1 (stream.go checkIfCompleted, receive_stream.go
+// isNewlyCompleted). Stream handlers (vnc/shell) own their own lifetime and
+// must NOT go through here.
+func endStream(st *quic.Stream) {
+	st.CancelRead(0) // completes the receive half without waiting to read the FIN
+	_ = st.Close()   // FIN on the send half
+}
+
 // Notify sends a fire-and-forget typed message to pub (no response).
 func (s *Service) Notify(pub, typ string, payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -567,7 +583,7 @@ func (s *Service) Notify(pub, typ string, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer endStream(st)
 	return writeFrame(st, header{Type: typ, Notify: true}, payload)
 }
 
