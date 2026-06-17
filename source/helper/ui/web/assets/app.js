@@ -7,9 +7,10 @@ $(function () {
                            // nameForPub/applyRoute reference it during init)
   // Profile state — declared up here because applyRoute() reads profileRequired
   // during init (a later `let` would be in the temporal dead zone → crash).
-  let profile = null;          // {user_id, first, last, nick} or null
+  let profile = null;          // {first, last, has_passkey} or null
   let profileChecked = false;  // /api/profile fetched this session
   let profileRequired = false; // router pins the user to the profile page until saved
+  let onboardPkDone = false;   // passkey created during the onboarding page
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -384,8 +385,11 @@ $(function () {
     }
     return 'message';
   }
+  // msgFromName is the sender's display name: the profile full name the server
+  // resolved (from_name), else the peer/roster name.
+  function msgFromName(m) { return (m && m.from_name) || nameForPub(m && m.from); }
   function authorOf(m) {
-    return (m && (m.mine || (lastStatus && m.from === lastStatus.identity_pub))) ? 'you' : nameForPub(m && m.from);
+    return (m && (m.mine || (lastStatus && m.from === lastStatus.identity_pub))) ? 'you' : msgFromName(m);
   }
   // quoteHtml renders the "replying to" preview shown above a message that
   // quotes another. Resolves the target from the loaded history; click scrolls
@@ -408,7 +412,7 @@ $(function () {
   // no thread action).
   function msgRow(m, grouped, replies, inThread) {
     if (m.type && m.type !== 'text') {
-      const who = nameForPub(m.from);
+      const who = msgFromName(m);
       const names = (m.targets || []).map(nameForPub).join(', ');
       let line;
       if (m.type === 'create') line = who + ' created the channel';
@@ -424,7 +428,7 @@ $(function () {
     }
     // Own messages bubble on the right, everyone else's on the left.
     const mine = m.mine || (lastStatus && m.from === lastStatus.identity_pub);
-    const author = mine ? 'you' : nameForPub(m.from);
+    const author = mine ? 'you' : msgFromName(m);
     const edited = m.edited ? `<span class="ax-msg-edited">edited</span>` : '';
     const head = (grouped && !m.edited) ? '' :
       `<div class="ax-msg-head">`
@@ -2778,19 +2782,17 @@ $(function () {
       $av.text('·').css('background', 'var(--panel-2)');
       return;
     }
-    // Prefer the user profile's name over the camp nickname once it exists.
+    // Prefer the profile's full name; fall back to the peer name (= username).
     const name = profileName() || s.camp_name || 'me';
     const camp = s.camp_label || s.camp_id || '';
-    const nick = (profile && profile.nick) ? '@' + profile.nick : '';
-    // Device line: peer name @ overlay ip — identifies THIS machine, distinct
-    // from the person (nick above).
+    // Device line: peer name @ overlay ip — this machine = this peer (= user).
     const self = (s.peers || []).find((p) => p.self);
     const ip = (self && self.overlay_v4) || s.local_ip || '';
     const dev = [s.camp_name, ip].filter(Boolean).join('@');
     $nm.text(name);
-    $sub.text([nick, camp ? 'camp ' + camp : ''].filter(Boolean).join(' · '));
+    $sub.text(camp ? 'camp ' + camp : '');
     $dev.text(dev);
-    $av.text(avatarInitials(name)).css('background', avatarColor((profile && profile.user_id) || s.identity_pub || name));
+    $av.text(avatarInitials(name)).css('background', avatarColor(s.identity_pub || name));
   }
 
   // Profile: a page (#tab-profile) in the main pane, reached via the account
@@ -2802,32 +2804,31 @@ $(function () {
     $.getJSON('/api/profile').done((p) => {
       if (p && p.exists) {
         profile = p;
+        hideOnboarding();
         renderAccount(lastStatus);
         // If the profile page is already open (deep-link / it rendered before
         // the fetch landed), repaint it now that we have the data.
         if (!$('#tab-profile').hasClass('hidden')) fillProfilePage();
+      } else {
+        // No profile yet → mandatory full-screen onboarding (name + passkey).
+        showOnboarding(p);
       }
     }).fail(() => { profileChecked = false; }); // retry next tick on error
   }
   // fillProfilePage paints the form for create (no profile) or edit (existing):
-  // pre-fills, sets title/hint, shows Cancel only when leaving is allowed.
+  // pre-fills first/last and the device section.
   function fillProfilePage() {
-    const dev = (lastStatus && lastStatus.camp_name) || '';
     const editing = !!profile;
     $('#profile-title').text(editing ? 'Профиль' : 'Создайте профиль');
-    $('#profile-nick-hint').text(dev
-      ? 'Никнейм — это вы, а не устройство «' + dev + '»; он должен отличаться от него.'
-      : 'Никнейм — это вы, а не устройство; он должен отличаться от имени устройства.');
     $('#profile-err').text('');
     $('#profile-first').val(editing ? (profile.first || '') : '');
     $('#profile-last').val(editing ? (profile.last || '') : '');
-    $('#profile-nick').val(editing ? (profile.nick || '') : '');
     $('#profile-save').text(editing ? 'Сохранить' : 'Создать');
     renderProfileDevices();
   }
-  // renderProfileDevices fills the "this device" + "my devices" sections from
-  // /api/status. The device list is just the current device until block.user
-  // gains a devices[] (device-link, slice B+) — flagged in the heading.
+  // renderProfileDevices fills the "this device" section from /api/status —
+  // name (editable, live rename), overlay IP, key fingerprint, passkey state.
+  // Peer = user, so there's no multi-device list.
   function renderProfileDevices() {
     const s = lastStatus || {};
     const self = (s.peers || []).find((p) => p.self) || {};
@@ -2850,13 +2851,6 @@ $(function () {
     $('#device-name').val(name);
     if (profile && profile.has_passkey) $('#passkey-cell').html('<span class="ax-prof-ok">✓ создан</span>');
     else $('#passkey-cell').html('<button type="button" id="passkey-create" class="ax-prof-mini">Создать passkey</button>');
-    // My devices — only this one for now (multi-device arrives with device-link).
-    const dev = '<div class="ax-prof-dev"><span class="ax-dot reachable"></span>' +
-      '<span class="ax-prof-dev-name">' + esc(name) + '</span>' +
-      '<span class="ax-prof-dev-ip">' + esc(ip) + '</span>' +
-      '<span class="ax-prof-dev-tag">это устройство</span></div>';
-    $('#profile-devices').html(dev +
-      '<div class="ax-prof-note">Другие устройства появятся, когда привяжете их к профилю.</div>');
   }
   // Clicking the account plaque opens the profile page (edit). Leaving without
   // saving = just navigate away via the sidebar (no explicit cancel needed).
@@ -2930,19 +2924,12 @@ $(function () {
     e.preventDefault();
     const first = $('#profile-first').val().trim();
     const last = $('#profile-last').val().trim();
-    const nick = $('#profile-nick').val().trim();
     $('#profile-err').text('');
     if (!first) { $('#profile-err').text('Имя обязательно'); return; }
-    if (!nick) { $('#profile-err').text('Никнейм обязателен'); return; }
-    const dev = (lastStatus && lastStatus.camp_name) || '';
-    if (dev && nick.toLowerCase() === dev.toLowerCase()) {
-      $('#profile-err').text('Никнейм должен отличаться от имени устройства «' + dev + '»');
-      return;
-    }
     const $btn = $('#profile-save').prop('disabled', true).text('Сохраняю…');
     $.ajax({
       url: '/api/profile', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ first, last, nick }),
+      data: JSON.stringify({ first, last }),
     }).done((p) => {
       profile = p;
       profileRequired = false;
@@ -2951,6 +2938,78 @@ $(function () {
     }).fail((x) => {
       $('#profile-err').text(errorOf(x));
     }).always(() => { $btn.prop('disabled', false).text(profile ? 'Сохранить' : 'Создать'); });
+  });
+
+  // --- Onboarding: mandatory full-screen profile + passkey on first run ---
+  function showOnboarding(p) {
+    // A passkey may already exist (created, then reloaded before saving the
+    // profile) — pre-mark it so the user isn't asked to register a duplicate.
+    onboardPkDone = !!(p && p.has_passkey);
+    if (onboardPkDone) $('#onboard-pk-cell').html('<span class="ax-prof-ok">✓ создан</span>');
+    $('#onboarding').removeClass('hidden');
+    setTimeout(() => $('#onboard-first').trigger('focus'), 0);
+    updateOnboardSave();
+  }
+  function hideOnboarding() { $('#onboarding').addClass('hidden'); }
+  function updateOnboardSave() {
+    const ok = $('#onboard-first').val().trim() && onboardPkDone;
+    $('#onboard-save').prop('disabled', !ok);
+  }
+  $('#onboard-first').on('input', updateOnboardSave);
+  $('#onboard-pk-create').on('click', function () {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      $('#onboard-err').text('Этот браузер не поддерживает passkey'); return;
+    }
+    $('#onboard-err').text('');
+    const $b = $('#onboard-pk-create').prop('disabled', true).text('…');
+    $.ajax({ url: '/api/profile/passkey/begin', method: 'POST' }).then((opts) => {
+      const pk = opts.publicKey;
+      pk.challenge = b64urlToBuf(pk.challenge);
+      pk.user.id = b64urlToBuf(pk.user.id);
+      (pk.excludeCredentials || []).forEach((c) => { c.id = b64urlToBuf(c.id); });
+      return navigator.credentials.create({ publicKey: pk });
+    }).then((cred) => {
+      const body = {
+        id: cred.id, type: cred.type, rawId: bufToB64url(cred.rawId),
+        response: {
+          attestationObject: bufToB64url(cred.response.attestationObject),
+          clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        },
+      };
+      return $.ajax({
+        url: '/api/profile/passkey/finish', method: 'POST',
+        contentType: 'application/json', data: JSON.stringify(body),
+      });
+    }).then(() => {
+      onboardPkDone = true;
+      $('#onboard-pk-cell').html('<span class="ax-prof-ok">✓ создан</span>');
+      updateOnboardSave();
+    }, (e) => {
+      const msg = (e && e.name === 'NotAllowedError') ? 'отменено или истекло время'
+        : ((e && e.responseText) || (e && e.message) || 'не удалось');
+      $('#onboard-err').text(msg);
+      $b.prop('disabled', false).text('Создать passkey');
+    });
+  });
+  $('#onboard-form').on('submit', function (e) {
+    e.preventDefault();
+    const first = $('#onboard-first').val().trim();
+    const last = $('#onboard-last').val().trim();
+    $('#onboard-err').text('');
+    if (!first) { $('#onboard-err').text('Имя обязательно'); return; }
+    if (!onboardPkDone) { $('#onboard-err').text('Сначала создайте passkey'); return; }
+    const $btn = $('#onboard-save').prop('disabled', true).text('Сохраняю…');
+    $.ajax({
+      url: '/api/profile', method: 'POST', contentType: 'application/json',
+      data: JSON.stringify({ first, last }),
+    }).done((p) => {
+      profile = p;
+      hideOnboarding();
+      renderAccount(lastStatus);
+    }).fail((x) => {
+      $('#onboard-err').text(errorOf(x));
+      $btn.prop('disabled', false).text('Готово');
+    });
   });
 
   function renderIdentity(s) {
@@ -3436,7 +3495,7 @@ $(function () {
       : empty('none');
 
     const treeHtml = (
-      category('peers',     'peers',     peers.length, peersBody)
+      category('peers',     'network',   peers.length, peersBody)
       + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'channels',  totalUnread || null, messagingBody)
@@ -4045,6 +4104,7 @@ $(function () {
       $row.append(
         $('<td>').append($('<span>').addClass('ax-dot ' + dotClass).attr('title', dotTitle)),
         $name,
+        $('<td>').addClass(p.profile_name ? '' : 'muted').text(p.profile_name || '—'),
         $tipCell,
         $('<td>').text(endpoint || '—'),
         $rtt,
