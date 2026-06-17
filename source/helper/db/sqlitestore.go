@@ -77,30 +77,30 @@ func (s *SQLiteStore) connLocked() (*sql.DB, error) {
 	return d, nil
 }
 
-func (s *SQLiteStore) Append(e *Frame) error {
+func (s *SQLiteStore) Append(e *Frame) (bool, error) {
 	if err := e.verify(); err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.connLocked()
 	if err != nil {
-		return err
+		return false, err
 	}
 	tx, err := d.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 
 	var dummy string
 	switch err := tx.QueryRow(`SELECT id FROM frames WHERE id=?`, e.ID).Scan(&dummy); err {
 	case nil:
-		return nil // idempotent: already have it
+		return false, nil // idempotent: already have it
 	case sql.ErrNoRows:
 		// proceed
 	default:
-		return err
+		return false, err
 	}
 
 	var wantSeq uint64 = 1
@@ -114,21 +114,24 @@ func (s *SQLiteStore) Append(e *Frame) error {
 	case sql.ErrNoRows:
 		// first in chain
 	default:
-		return err
+		return false, err
 	}
 	if e.Seq != wantSeq {
-		return fmt.Errorf("db: seq gap for %s/%s: have %d, got %d", short(e.Author), e.Scope, wantSeq-1, e.Seq)
+		return false, fmt.Errorf("db: seq gap for %s/%s: have %d, got %d", short(e.Author), e.Scope, wantSeq-1, e.Seq)
 	}
 	if e.Prev != wantPrev {
-		return fmt.Errorf("db: broken chain for %s/%s at seq %d", short(e.Author), e.Scope, e.Seq)
+		return false, fmt.Errorf("db: broken chain for %s/%s at seq %d", short(e.Author), e.Scope, e.Seq)
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO frames(id,scope,author,seq,prev,lamport,type,ts,payload,sig) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.Scope, e.Author, e.Seq, e.Prev, e.Lamport, e.Type, e.TS, e.Payload, e.Sig,
 	); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *SQLiteStore) Head(scope, author string) *Frame {

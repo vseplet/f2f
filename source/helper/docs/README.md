@@ -33,5 +33,6 @@
 | [DB.md](DB.md) | распределённая БД: лог, SQLite, sync; релей/доставка/GC — дизайн | 🟡 |
 | [BLOCKS.md](BLOCKS.md) | блок-движок; каналы/сообщения/заметки-страницы на нём | 🟡 |
 | [MESSAGING_DESIGN.md](MESSAGING_DESIGN.md) | чат на блоках ✅; e2e/group keys/доставка/история — дизайн | 🟡 |
+| [IDENTITY.md](IDENTITY.md) | личность/членство кэмпа (owner-only)/OIDC-профиль — на блоках | 📐 |
 | [INVITE.md](INVITE.md) | user-identity, инвайты, допуск пиров | 📐 |
 | [SECRETS.md](SECRETS.md) | хранилище секретов (два уровня, unlock) | 📐 |

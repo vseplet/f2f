@@ -78,6 +78,17 @@ func New(eng *engine.Engine, store *config.Store) *Service {
 	return &Service{eng: eng, store: store}
 }
 
+// SetName changes our announced display name live — the next announce carries
+// it, so peers pick up the rename without a restart.
+func (s *Service) SetName(name string) {
+	s.mu.Lock()
+	ac := s.announce
+	s.mu.Unlock()
+	if ac != nil {
+		ac.SetName(name)
+	}
+}
+
 // Start brings up the announce client for the given camp config.
 // Order matters: register the UDP dispatch handler
 // BEFORE the announce client touches the socket — engine's

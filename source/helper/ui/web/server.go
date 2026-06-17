@@ -240,6 +240,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
 	// Notes are generic blocks (text) in a "note:<conv>" scope — the block
 	// engine surfaced under a meaningful entity name. No public /api/blocks.
+	mux.HandleFunc("GET /api/profile", s.handleProfileGet)
+	mux.HandleFunc("POST /api/profile", s.handleProfileSave)
+	mux.HandleFunc("POST /api/profile/device", s.handleDeviceRename)
+	mux.HandleFunc("POST /api/profile/passkey/begin", s.handlePasskeyBegin)
+	mux.HandleFunc("POST /api/profile/passkey/finish", s.handlePasskeyFinish)
 	mux.HandleFunc("GET /api/notes/scope", s.handleNotesScope)
 	mux.HandleFunc("GET /api/notes", s.handleNotesList)
 	mux.HandleFunc("POST /api/notes", s.handleNotesCreate)

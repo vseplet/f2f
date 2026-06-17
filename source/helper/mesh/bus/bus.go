@@ -43,6 +43,11 @@ import (
 const (
 	alpn = "f2f-bus"
 	Port = "2203" // UDP port on the overlay IP
+
+	// pingFailLimit is how many consecutive failed liveness pings drop a peer's
+	// cached conn. >1 so a single transient stall doesn't tear a conn carrying a
+	// live VNC/shell stream; a truly dead conn still fails the streak and goes.
+	pingFailLimit = 2
 )
 
 // dbg logs verbose connection-lifecycle diagnostics (dial/adopt/forget/drop
@@ -104,6 +109,7 @@ type Service struct {
 	handlers       map[string]HandlerFunc
 	streamHandlers map[string]StreamHandlerFunc
 	linkUp         map[string]bool // pub → last ping outcome (for up/down notifications)
+	pingFail       map[string]int  // pub → consecutive failed pings; drop the conn only after a streak
 	// dialing collapses concurrent dials to the same peer (the shell and
 	// vnc discovery probes fire together every 5s): the first caller dials,
 	// the rest wait on the channel and reuse the outcome. Without this every
@@ -128,6 +134,7 @@ func New(r Resolver) (*Service, error) {
 		handlers:       make(map[string]HandlerFunc),
 		streamHandlers: make(map[string]StreamHandlerFunc),
 		linkUp:         make(map[string]bool),
+		pingFail:       make(map[string]int),
 		dialing:        make(map[string]chan struct{}),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
@@ -281,10 +288,23 @@ func (s *Service) pingOne(ctx context.Context, pub string) {
 	ok := err == nil
 	rtt := time.Since(start).Round(time.Millisecond)
 	if ok {
+		s.mu.Lock()
+		s.pingFail[pub] = 0
+		s.mu.Unlock()
 		clog.Debug("bus", "ping %s ok via QUIC (%s)", s.label(pub), rtt)
 	} else {
-		clog.Warn("bus", "ping %s failed: %v", s.label(pub), err)
-		s.dropConn(pub) // force a fresh dial next round
+		// Drop only after a streak — a single missed ping is usually a
+		// transient stall, and tearing the conn would also kill any live
+		// VNC/shell stream multiplexed on it. A genuinely dead conn fails
+		// repeatedly and gets dropped after the streak.
+		s.mu.Lock()
+		s.pingFail[pub]++
+		fails := s.pingFail[pub]
+		s.mu.Unlock()
+		clog.Warn("bus", "ping %s failed (%d/%d): %v", s.label(pub), fails, pingFailLimit, err)
+		if fails >= pingFailLimit {
+			s.dropConn(pub, fmt.Sprintf("%d consecutive ping failures", fails))
+		}
 	}
 
 	// Notify only on a link-state CHANGE, not every ping: "up" when it first
@@ -321,8 +341,7 @@ func (s *Service) evictStale(known map[string]bool) {
 	}
 	s.mu.Unlock()
 	for _, pub := range stale {
-		dbg("evict %s: peer left roster", s.label(pub))
-		s.dropConn(pub)
+		s.dropConn(pub, "peer left roster")
 	}
 }
 
@@ -410,25 +429,37 @@ func (s *Service) acceptStreams(ctx context.Context, ip, fromPub string, conn *q
 // adoptConn caches a connection for pub unless one is already cached.
 func (s *Service) adoptConn(pub string, conn *quic.Conn) {
 	s.mu.Lock()
-	if s.conns[pub] == nil {
+	adopted := s.conns[pub] == nil
+	if adopted {
 		s.conns[pub] = conn
 	}
 	s.mu.Unlock()
+	if adopted {
+		clog.Info("bus", "conn UP %s (inbound)", s.label(pub))
+	}
 }
 
-// forgetConn drops conn from the cache if it's still the cached one.
+// forgetConn drops conn from the cache if it's still the cached one. This is
+// the path a connection takes when it DIES ON ITS OWN (accept loop returned) —
+// QUIC idle-timeout, the peer sending CONNECTION_CLOSE, or a path error — as
+// opposed to dropConn, where WE tear it. Log the QUIC-level cause so the log
+// distinguishes "the link broke under us" from "we redialed it".
 func (s *Service) forgetConn(pub string, conn *quic.Conn) {
 	s.mu.Lock()
-	if s.conns[pub] == conn {
+	removed := s.conns[pub] == conn
+	if removed {
 		delete(s.conns, pub)
 	}
 	s.mu.Unlock()
+	if removed {
+		clog.Info("bus", "conn DOWN %s: died (quic cause=%v)", s.label(pub), context.Cause(conn.Context()))
+	}
 }
 
 func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 	hdr, payload, err := readFrame(st)
 	if err != nil {
-		st.Close()
+		endStream(st)
 		return
 	}
 	s.mu.Lock()
@@ -441,7 +472,7 @@ func (s *Service) serveStream(fromPub string, st *quic.Stream) {
 		sfn(fromPub, payload, st)
 		return
 	}
-	defer st.Close()
+	defer endStream(st)
 	if fn == nil {
 		clog.Warn("bus", "no handler for type %q from %s", hdr.Type, s.label(fromPub))
 		return
@@ -480,9 +511,14 @@ func (s *Service) OpenStream(ctx context.Context, pub, typ string, open []byte) 
 func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) ([]byte, error) {
 	st, err := s.openStream(ctx, pub, false)
 	if err != nil {
-		return nil, err
+		// Tag the stage so a timeout tells us WHERE it stalled: "open" means we
+		// couldn't even get a stream (conn stuck / stream-count limit); "write"
+		// / "read" mean the stream opened but the round-trip stalled (path or
+		// peer). Lets the ping log distinguish stream-exhaustion from a
+		// half-dead path without guessing.
+		return nil, fmt.Errorf("open: %w", err)
 	}
-	defer st.Close()
+	defer endStream(st)
 	// Bound the WHOLE exchange by ctx — crucially the response read. Without a
 	// stream deadline, readChunk blocks on a half-dead conn until the QUIC
 	// idle-timeout (tens of seconds), not the caller's ctx, which hangs callers
@@ -492,12 +528,12 @@ func (s *Service) Request(ctx context.Context, pub, typ string, payload []byte) 
 	}
 	if err := writeFrame(st, header{Type: typ}, payload); err != nil {
 		s.dropIfStalled(pub, err)
-		return nil, err
+		return nil, fmt.Errorf("write: %w", err)
 	}
 	resp, err := readChunk(st)
 	if err != nil {
 		s.dropIfStalled(pub, err)
-		return nil, err
+		return nil, fmt.Errorf("read: %w", err)
 	}
 	return resp, nil
 }
@@ -515,9 +551,28 @@ func (s *Service) dropIfStalled(pub string, err error) {
 	if errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		(errors.As(err, &ne) && ne.Timeout()) {
-		dbg("drop %s: request stalled to deadline on a live conn", s.label(pub))
-		s.dropConn(pub)
+		// Don't tear the connection — that also kills any live VNC/shell stream
+		// multiplexed on it. The request's own stream is already closed (its
+		// deadline bounded it); a genuinely dead conn is reaped by the ping
+		// streak (pingFailLimit) instead.
+		dbg("%s: request stalled (stream closed; conn kept)", s.label(pub))
 	}
+}
+
+// endStream fully retires a request/response bidi stream so QUIC returns the
+// stream-count credit to the peer. quic-go deletes a stream (and only then
+// raises MAX_STREAMS) once BOTH halves complete: the send half via Close (FIN),
+// the receive half ONLY when we read the peer's FIN/EOF or cancel the read.
+// A request/response exchange reads exactly one frame and never consumes the
+// peer's trailing FIN, so without CancelRead the receive half lingers, the
+// stream is never retired, and after ~100 such streams every OpenStreamSync
+// blocks until its deadline ("open: context deadline exceeded"). Verified
+// against quic-go v0.59.1 (stream.go checkIfCompleted, receive_stream.go
+// isNewlyCompleted). Stream handlers (vnc/shell) own their own lifetime and
+// must NOT go through here.
+func endStream(st *quic.Stream) {
+	st.CancelRead(0) // completes the receive half without waiting to read the FIN
+	_ = st.Close()   // FIN on the send half
 }
 
 // Notify sends a fire-and-forget typed message to pub (no response).
@@ -528,7 +583,7 @@ func (s *Service) Notify(pub, typ string, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer endStream(st)
 	return writeFrame(st, header{Type: typ, Notify: true}, payload)
 }
 
@@ -538,17 +593,29 @@ func (s *Service) openStream(ctx context.Context, pub string, notify bool) (*qui
 		return nil, err
 	}
 	st, err := conn.OpenStreamSync(ctx)
+	if err == nil {
+		return st, nil
+	}
+	// CRUCIAL: distinguish "the conn is dead" from "OUR caller ran out of time".
+	// If ctx is done, OpenStreamSync just surfaced the caller's deadline/cancel
+	// (e.g. a 2s discovery probe or 5s ping) — the conn itself is still healthy
+	// (its own context has no error). Tearing it here would CloseWithError the
+	// whole conn and kill every multiplexed stream on it (live VNC/shell), and
+	// the peer sees our "redial" close and churns its side too. So on a caller
+	// timeout, keep the conn and just fail this one open.
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	// ctx still live but the open failed → the cached conn is genuinely stale.
+	// Drop and dial fresh once.
+	s.dropConn(pub, fmt.Sprintf("OpenStream failed on cached conn: %v", err))
+	conn, err = s.connFor(ctx, pub)
 	if err != nil {
-		// likely a stale connection — drop and dial fresh once.
-		s.dropConn(pub)
-		conn, err = s.connFor(ctx, pub)
-		if err != nil {
-			return nil, err
-		}
-		st, err = conn.OpenStreamSync(ctx)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
+	}
+	st, err = conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
 	}
 	return st, nil
 }
@@ -654,7 +721,6 @@ func (s *Service) dialOnce(ctx context.Context, pub string) (*quic.Conn, error) 
 		// already labels the peer, so repeating it just doubles up.
 		return nil, fmt.Errorf("bus: dial: %w", err)
 	}
-	dbg("dial %s ok in %s", lbl, time.Since(start).Round(time.Millisecond))
 	s.mu.Lock()
 	if existing := s.conns[pub]; existing != nil { // lost a race; keep the first
 		s.mu.Unlock()
@@ -664,6 +730,7 @@ func (s *Service) dialOnce(ctx context.Context, pub string) (*quic.Conn, error) 
 	s.conns[pub] = conn
 	sctx := s.ctx
 	s.mu.Unlock()
+	clog.Info("bus", "conn UP %s (dialed in %s)", lbl, time.Since(start).Round(time.Millisecond))
 	// A dialed conn is bidirectional too: the peer (which ACCEPTED it) reuses it
 	// to open streams back to us. Only the accepting end runs an accept loop, so
 	// without this our dialed conns would silently never deliver the peer's
@@ -680,13 +747,18 @@ func (s *Service) dialOnce(ctx context.Context, pub string) (*quic.Conn, error) 
 	return conn, nil
 }
 
-func (s *Service) dropConn(pub string) {
+// dropConn tears down the cached conn for pub because WE decided to (ping
+// streak, stale stream-open, peer left roster). reason says which — paired with
+// the QUIC-level cause it tells whether the conn was already broken or we
+// killed a healthy one. Counterpart of forgetConn (conn died on its own).
+func (s *Service) dropConn(pub, reason string) {
 	s.mu.Lock()
 	c := s.conns[pub]
 	delete(s.conns, pub)
+	delete(s.pingFail, pub)
 	s.mu.Unlock()
 	if c != nil {
-		dbg("drop %s: closing conn (cause=%v)", s.label(pub), context.Cause(c.Context()))
+		clog.Info("bus", "conn DROP %s: %s (quic cause=%v)", s.label(pub), reason, context.Cause(c.Context()))
 		_ = c.CloseWithError(0, "redial")
 	}
 }

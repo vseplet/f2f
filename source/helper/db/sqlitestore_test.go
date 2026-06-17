@@ -39,7 +39,7 @@ func TestSQLitePersistence(t *testing.T) {
 	// tamper rejected by the persistent store too
 	bad := *e4
 	bad.Payload = []byte("evil")
-	if err := svc2.store.Append(&bad); err == nil {
+	if _, err := svc2.store.Append(&bad); err == nil {
 		t.Fatal("tampered entry accepted by sqlite store")
 	}
 }

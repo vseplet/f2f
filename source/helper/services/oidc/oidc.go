@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
 )
@@ -77,7 +78,8 @@ type Service struct {
 
 	mu       sync.Mutex
 	codes    map[string]*authCode
-	sessions map[string]*authSession // ceremony id (cookie) → in-flight /authorize
+	sessions map[string]*authSession          // ceremony id (cookie) → in-flight /authorize
+	regSess  map[string]*webauthn.SessionData // pub → in-flight standalone passkey registration
 }
 
 // New builds the provider over backend be, persisting passkeys via creds,
@@ -90,6 +92,7 @@ func New(be Backend, creds *CredStore, clients *ClientStore, keys *SignKeys) *Se
 		keys:     keys,
 		codes:    map[string]*authCode{},
 		sessions: map[string]*authSession{},
+		regSess:  map[string]*webauthn.SessionData{},
 	}
 }
 

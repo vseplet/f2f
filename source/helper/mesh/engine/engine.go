@@ -785,6 +785,15 @@ func (e *Engine) UDPConn() *net.UDPConn {
 // the engine isn't running in camp mode. mesh/camp tags the
 // announce packet with this so peers in the camp can route us by
 // identity.
+// SetName updates our display name in the running engine — used by the
+// peer-list self-filter and stamped into pair_req/res. The camp announce name
+// is updated separately (mesh/camp.SetName); the web layer drives both.
+func (e *Engine) SetName(name string) {
+	e.mu.Lock()
+	e.cfg.CampName = name
+	e.mu.Unlock()
+}
+
 func (e *Engine) IdentityPub() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
