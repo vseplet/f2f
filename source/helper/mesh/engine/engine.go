@@ -923,8 +923,11 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				existing.PublicIP = p.PublicIP
 				existing.UDPPort = p.UDPPort
 				existing.UDPEndpoint = p.UDPEndpoint
-				if addr != nil && !sameUDPAddr(existing.UDPAddr, addr) {
-					existing.UDPAddr = addr
+				// Route through adoptEndpoint so the camp-reported public reflex
+				// doesn't clobber a fresh LAN endpoint we already punched — that
+				// overwrite was flapping public↔LAN every poll.
+				if addr != nil {
+					e.adoptEndpoint(existing, addr, time.Now().UnixMilli(), "camp")
 				}
 				if !existing.InCamp {
 					clog.Info("camp", "peer %s back in roster", existing.label())
