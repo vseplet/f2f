@@ -18,8 +18,9 @@
 - **Канал = блок** (`block.channel`, scope `channels`): владелец + участники в
   его content; единица доступа для всех приложений. ACL-гейтинг пока не включён.
   См. [BLOCKS.md](BLOCKS.md), [DB.md](DB.md), [ENTITIES.md](ENTITIES.md).
-- **Identity / пользователь**: `user_id` поверх device-ключей; passkey-якорь.
-  См. [INVITE.md](INVITE.md), [OIDC.md](OIDC.md).
+- **Identity**: пир = пользователь, идентичность = `peer_pub`; профиль
+  (`block.profile`) + passkey-якорь. См. [IDENTITY.md](IDENTITY.md),
+  [INVITE.md](INVITE.md), [OIDC.md](OIDC.md).
 - **Субстрат `db` + блоки**: иммутабельные подписанные логи (`Frame`) +
   репликация; чат/каналы/заметки-со-страницами — **на блоках** (`db/blocks`).
   См. [DB.md](DB.md), [BLOCKS.md](BLOCKS.md).
@@ -34,5 +35,5 @@
 | [BLOCKS.md](BLOCKS.md) | блок-движок; каналы/сообщения/заметки-страницы на нём | 🟡 |
 | [MESSAGING_DESIGN.md](MESSAGING_DESIGN.md) | чат на блоках ✅; e2e/group keys/доставка/история — дизайн | 🟡 |
 | [IDENTITY.md](IDENTITY.md) | личность/членство кэмпа (owner-only)/OIDC-профиль — на блоках | 📐 |
-| [INVITE.md](INVITE.md) | user-identity, инвайты, допуск пиров | 📐 |
+| [INVITE.md](INVITE.md) | инвайты и допуск пиров (пир=пользователь) | 📐 |
 | [SECRETS.md](SECRETS.md) | хранилище секретов (два уровня, unlock) | 📐 |

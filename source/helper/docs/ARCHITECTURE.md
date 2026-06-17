@@ -781,7 +781,7 @@ Per-peer ACL отложен до Identity Phase 1 (см. TODO.md). Сами keyp
 уже генерятся per-camp под `/var/lib/f2f/identity/<camp_id>/` и pub
 зеркалится в `<camp_id>/config.json`, но протокол announce / peer-list
 их пока не использует. Когда подвяжем подпись announce-пакетов — у
-каждого peer'а в roster'е появится верифицируемый `user_pub`, и можно
+каждого peer'а в roster'е появится верифицируемый `peer_pub`, и можно
 будет добавить matching по source-IP с привязкой к pubkey.
 
 ### Built-in порты — read-only, не редактируются юзером

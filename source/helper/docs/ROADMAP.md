@@ -32,7 +32,8 @@
 
 - **Аутентификация, SSO, f2f как OIDC-провайдер** — реализовано и
   задокументировано отдельно: [OIDC.md](OIDC.md) (провайдер, клиенты,
-  passkey/WebAuthn) и [INVITE.md](INVITE.md) (identity и инвайты). Код:
+  passkey/WebAuthn), [IDENTITY.md](IDENTITY.md) (модель пир=пользователь,
+  профиль/членство на блоках) и [INVITE.md](INVITE.md) (инвайты, допуск). Код:
   `services/oidc`.
 
 ## Планы
