@@ -284,20 +284,22 @@
             <!-- Profile page. Opened from the account plaque (create/edit). -->
             <div id="tab-profile" class="tab-panel hidden">
                 <div class="ax-frame ax-profile-page">
-                    <div class="ax-section-title" id="profile-title">Профиль</div>
                     <form id="profile-form" class="ax-profile-form">
+                        <div class="ax-section-title" id="profile-title">Профиль</div>
                         <label class="ax-profile-label">Имя</label>
-                        <input id="profile-first" class="ax-modal-input" type="text" placeholder="Имя" autocomplete="given-name" />
+                        <input id="profile-first" class="ax-input" type="text" placeholder="Имя" autocomplete="given-name" />
                         <label class="ax-profile-label">Фамилия</label>
-                        <input id="profile-last" class="ax-modal-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+                        <input id="profile-last" class="ax-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+
+                        <label class="ax-profile-label">Никнейм</label>
+                        <input id="device-name" class="ax-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" />
+                        <div id="profile-device"></div>
+
                         <div class="ax-modal-err" id="profile-err"></div>
                         <div class="ax-profile-actions">
-                            <button type="submit" class="ax-modal-btn" id="profile-save">Сохранить</button>
+                            <button type="submit" class="ax-btn ax-btn-primary" id="profile-save">Сохранить</button>
                         </div>
                     </form>
-
-                    <div class="ax-section-title ax-profile-h2">Это устройство</div>
-                    <div class="ax-profile-device" id="profile-device"></div>
                 </div>
             </div>
             <!-- /#tab-profile -->

@@ -2823,54 +2823,34 @@ $(function () {
     $('#profile-err').text('');
     $('#profile-first').val(editing ? (profile.first || '') : '');
     $('#profile-last').val(editing ? (profile.last || '') : '');
+    $('#device-name').val((lastStatus && lastStatus.camp_name) || '');
     $('#profile-save').text(editing ? 'Сохранить' : 'Создать');
     renderProfileDevices();
   }
-  // renderProfileDevices fills the "this device" section from /api/status —
-  // name (editable, live rename), overlay IP, key fingerprint, passkey state.
-  // Peer = user, so there's no multi-device list.
+  // renderProfileDevices fills the read-only device facts (overlay IP, key
+  // fingerprint, passkey state). The editable fields (name, device name) live in
+  // the form above and save with the single Сохранить. Peer = user → no list.
   function renderProfileDevices() {
     const s = lastStatus || {};
     const self = (s.peers || []).find((p) => p.self) || {};
     const ip = self.overlay_v4 || s.local_ip || '—';
-    const name = s.camp_name || '—';
     const fp = s.identity_fp || (s.identity_pub || '').slice(0, 16) || '—';
-    const row = (k, v, mono) => '<div class="ax-prof-row"><span class="ax-prof-k">' + esc(k) +
-      '</span><span class="ax-prof-v' + (mono ? ' ax-prof-mono' : '') + '">' + esc(v) + '</span></div>';
-    // Device name is editable (live rename → re-announce); value set via .val()
-    // afterwards to avoid attribute-injection.
+    const row = (k, v) => '<div class="ax-prof-row"><span class="ax-prof-k">' + esc(k) +
+      '</span><span class="ax-prof-v ax-prof-mono">' + esc(v) + '</span></div>';
+    const pk = (profile && profile.has_passkey)
+      ? '<span class="ax-prof-ok">✓ создан</span>'
+      : '<button type="button" id="passkey-create" class="ax-btn ax-btn-primary ax-btn-sm">Создать passkey</button>';
     $('#profile-device').html(
-      '<div class="ax-prof-row"><span class="ax-prof-k">Имя устройства</span>' +
-      '<span class="ax-prof-v ax-prof-edit"><input id="device-name" class="ax-prof-input" maxlength="64">' +
-      '<button type="button" id="device-rename" class="ax-prof-mini" title="переименовать">✓</button></span></div>' +
-      '<div class="ax-prof-err" id="device-err"></div>' +
-      row('Overlay IP', ip, true) + row('Отпечаток ключа', fp, true) +
+      '<div class="ax-prof-readonly">' +
+      row('Overlay IP', ip) + row('Отпечаток ключа', fp) +
       '<div class="ax-prof-row"><span class="ax-prof-k">Passkey</span>' +
-      '<span class="ax-prof-v" id="passkey-cell"></span></div>' +
-      '<div class="ax-prof-err" id="passkey-err"></div>');
-    $('#device-name').val(name);
-    if (profile && profile.has_passkey) $('#passkey-cell').html('<span class="ax-prof-ok">✓ создан</span>');
-    else $('#passkey-cell').html('<button type="button" id="passkey-create" class="ax-prof-mini">Создать passkey</button>');
+      '<span class="ax-prof-v" id="passkey-cell">' + pk + '</span></div>' +
+      '</div>' +
+      '<div class="ax-modal-err" id="passkey-err"></div>');
   }
   // Clicking the account plaque opens the profile page (edit). Leaving without
   // saving = just navigate away via the sidebar (no explicit cancel needed).
   $('#ax-account').on('click', function () { if (lastStatus && lastStatus.running) location.hash = 'profile'; });
-  // Rename this device (live: re-announced to peers).
-  $('#tab-profile').on('click', '#device-rename', function () {
-    const name = $('#device-name').val().trim();
-    $('#device-err').text('');
-    if (!name) { $('#device-err').text('Имя устройства обязательно'); return; }
-    const $btn = $('#device-rename').prop('disabled', true);
-    $.ajax({
-      url: '/api/profile/device', method: 'POST', contentType: 'application/json',
-      data: JSON.stringify({ name }),
-    }).done((r) => {
-      if (lastStatus) lastStatus.camp_name = (r && r.name) || name; // instant feedback
-      renderAccount(lastStatus);
-      renderProfileDevices();
-    }).fail((x) => { $('#device-err').text(errorOf(x)); })
-      .always(() => { $btn.prop('disabled', false); });
-  });
 
   // WebAuthn base64url ↔ ArrayBuffer (the server speaks base64url per the spec).
   function b64urlToBuf(s) {
@@ -2920,24 +2900,39 @@ $(function () {
       $b.prop('disabled', false).text('Создать passkey');
     });
   });
+  // One Сохранить saves the profile (name) and, if it changed, the device name
+  // — two endpoints, one button. Device rename re-announces to peers live.
   $('#profile-form').on('submit', function (e) {
     e.preventDefault();
     const first = $('#profile-first').val().trim();
     const last = $('#profile-last').val().trim();
+    const dname = $('#device-name').val().trim();
     $('#profile-err').text('');
     if (!first) { $('#profile-err').text('Имя обязательно'); return; }
+    if (!dname) { $('#profile-err').text('Никнейм обязателен'); return; }
+    const cur = (lastStatus && lastStatus.camp_name) || '';
     const $btn = $('#profile-save').prop('disabled', true).text('Сохраняю…');
+    const done = () => { $btn.prop('disabled', false).text(profile ? 'Сохранить' : 'Создать'); };
     $.ajax({
       url: '/api/profile', method: 'POST', contentType: 'application/json',
       data: JSON.stringify({ first, last }),
-    }).done((p) => {
+    }).then((p) => {
       profile = p;
       profileRequired = false;
+      if (dname === cur) return null;
+      return $.ajax({
+        url: '/api/profile/device', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ name: dname }),
+      });
+    }).then((r) => {
+      if (r && r.name && lastStatus) lastStatus.camp_name = r.name;
       renderAccount(lastStatus);
+      done();
       location.hash = ''; // leave the profile page
-    }).fail((x) => {
+    }, (x) => {
       $('#profile-err').text(errorOf(x));
-    }).always(() => { $btn.prop('disabled', false).text(profile ? 'Сохранить' : 'Создать'); });
+      done();
+    });
   });
 
   // --- Onboarding: mandatory full-screen profile + passkey on first run ---
