@@ -64,7 +64,9 @@ type Backend interface {
 // passkeys.json. Implemented over the blocks manager in main.
 type ProfileSource interface {
 	Creds(pub string) []webauthn.Credential
-	Name(pub string) string
+	// Profile returns the peer's full display name plus its first/last parts
+	// (for the given_name/family_name claims), all "" if no profile.
+	Profile(pub string) (name, given, family string)
 	WithCreds() map[string]int // pub → registered passkey count
 }
 
@@ -519,15 +521,16 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 	if ac.nonce != "" {
 		idClaims["nonce"] = ac.nonce
 	}
-	// name = profile display name (block.profile) when set, else the peer name;
-	// preferred_username stays the peer name (a stable handle without spaces).
-	displayName := ac.name
+	// name = profile full name (block.profile) when set, else the peer name;
+	// given_name/family_name from the profile's first/last; preferred_username
+	// stays the peer name (a stable handle without spaces).
+	displayName, given, family := ac.name, "", ""
 	if s.profile != nil {
-		if pn := s.profile.Name(ac.sub); pn != "" {
-			displayName = pn
+		if full, g, f := s.profile.Profile(ac.sub); full != "" {
+			displayName, given, family = full, g, f
 		}
 	}
-	for k, v := range identityClaims(ac.sub, displayName, ac.name, ac.scope, r) {
+	for k, v := range identityClaims(ac.sub, displayName, ac.name, given, family, ac.scope, r) {
 		idClaims[k] = v
 	}
 	idToken, err := mintRS256(key, kid, idClaims)
@@ -543,8 +546,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		"aud":   iss + "/userinfo",
 		"iat":   now.Unix(),
 		"exp":   now.Add(tokenTTL).Unix(),
-		"scope": ac.scope,
-		"name":  ac.name,
+		"scope": ac.scope, // /userinfo resolves name/given/family live from the profile
 	})
 	if err != nil {
 		http.Error(w, "sign access_token", http.StatusInternalServerError)
@@ -578,11 +580,20 @@ func (s *Service) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sub, _ := claims["sub"].(string)
-	name, _ := claims["name"].(string)
-	username, _ := claims["preferred_username"].(string)
 	scope, _ := claims["scope"].(string)
+	// Resolve name/given/family LIVE from the profile (same as the id_token),
+	// not from the token: the access token only carries sub+scope, and a token
+	// minted before a profile edit would otherwise serve a stale name.
+	// preferred_username stays the peer name (stable handle).
+	username := s.be.PeerName(sub)
+	name, given, family := username, "", ""
+	if s.profile != nil {
+		if full, g, f := s.profile.Profile(sub); full != "" {
+			name, given, family = full, g, f
+		}
+	}
 	out := map[string]any{"sub": sub}
-	for k, v := range identityClaims(sub, name, username, scope, r) {
+	for k, v := range identityClaims(sub, name, username, given, family, scope, r) {
 		out[k] = v
 	}
 	writeJSON(w, out)
@@ -814,7 +825,7 @@ func wildcardMatch(pattern, s string) bool {
 // email, so we synthesize a stable one from the peer's fingerprint within the
 // camp zone (email_verified=false — it's an identifier, not a reachable
 // address). zone is the camp domain (e.g. xyz.f2f) from the request host.
-func identityClaims(sub, name, username, scope string, r *http.Request) map[string]any {
+func identityClaims(sub, name, username, given, family, scope string, r *http.Request) map[string]any {
 	out := map[string]any{}
 	if strings.Contains(scope, "profile") {
 		if name != "" {
@@ -822,6 +833,12 @@ func identityClaims(sub, name, username, scope string, r *http.Request) map[stri
 		}
 		if username != "" {
 			out["preferred_username"] = username
+		}
+		if given != "" {
+			out["given_name"] = given
+		}
+		if family != "" {
+			out["family_name"] = family
 		}
 	}
 	if strings.Contains(scope, "email") {

@@ -569,10 +569,10 @@ func (b oidcBackend) PeerName(pub string) string {
 // (first+last). Empty when there's no profile. Wired into OIDC via
 // SetProfileSource so login verifies against the synced profile, not the local
 // passkeys.json.
-func profileFromBlocks(b *blocks.Manager, pub string) ([]webauthn.Credential, string) {
+func profileFromBlocks(b *blocks.Manager, pub string) (creds []webauthn.Credential, first, last string) {
 	blk := b.Block("profiles", pub)
 	if blk == nil || len(blk.Heads) == 0 {
-		return nil, ""
+		return nil, "", ""
 	}
 	var c struct {
 		First    string                `json:"first"`
@@ -580,9 +580,9 @@ func profileFromBlocks(b *blocks.Manager, pub string) ([]webauthn.Credential, st
 		Passkeys []webauthn.Credential `json:"passkeys"`
 	}
 	if err := json.Unmarshal(blk.Heads[len(blk.Heads)-1].Content, &c); err != nil {
-		return nil, ""
+		return nil, "", ""
 	}
-	return c.Passkeys, strings.TrimSpace(c.First + " " + c.Last)
+	return c.Passkeys, c.First, c.Last
 }
 
 // oidcProfiles implements oidc.ProfileSource over the block engine: OIDC login
@@ -591,13 +591,13 @@ func profileFromBlocks(b *blocks.Manager, pub string) ([]webauthn.Credential, st
 type oidcProfiles struct{ blocks *blocks.Manager }
 
 func (p oidcProfiles) Creds(pub string) []webauthn.Credential {
-	c, _ := profileFromBlocks(p.blocks, pub)
+	c, _, _ := profileFromBlocks(p.blocks, pub)
 	return c
 }
 
-func (p oidcProfiles) Name(pub string) string {
-	_, n := profileFromBlocks(p.blocks, pub)
-	return n
+func (p oidcProfiles) Profile(pub string) (name, given, family string) {
+	_, first, last := profileFromBlocks(p.blocks, pub)
+	return strings.TrimSpace(first + " " + last), first, last
 }
 
 func (p oidcProfiles) WithCreds() map[string]int {
