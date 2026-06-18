@@ -143,7 +143,7 @@ func (s *Service) Register() {
 		if eg != nil {
 			eg.ensureTargets(addrs, s.eng.UtunName())
 		}
-		clog.Info("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
+		clog.Debug("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
 		return json.Marshal(out)
 	}
 	s.bus.Handle(busTypeResolve, resolveHandler)
