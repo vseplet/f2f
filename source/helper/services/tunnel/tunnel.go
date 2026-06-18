@@ -549,7 +549,7 @@ func (s *Service) resolvePrefixes(spec, peer string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		clog.Info("tunnel", "resolved %s → %s (on %s)", spec, a, peer)
+		clog.Debug("tunnel", "resolved %s → %s (on %s)", spec, a, peer)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("exit peer %s resolved %q to no usable addresses", peer, spec)
@@ -784,7 +784,7 @@ func resolveSpec(spec string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		clog.Info("tunnel", "resolved %s → %s", spec, a)
+		clog.Debug("tunnel", "resolved %s → %s", spec, a)
 	}
 	return out, nil
 }
