@@ -2085,6 +2085,14 @@ a.ax-domain-link:hover {
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
+.ax-callbar-accept {
+    color: var(--ok, #86b86b);
+}
+.ax-callbar-accept:hover {
+    border-color: var(--ok, #86b86b);
+    color: var(--ok, #86b86b);
+    background: color-mix(in srgb, var(--ok, #86b86b) 16%, transparent);
+}
 .ax-callbar-hangup {
     color: var(--danger);
 }

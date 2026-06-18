@@ -43,6 +43,7 @@ $(function () {
   let isOfferer = false;       // also = the "impolite" peer for glare handling
   let makingOffer = false;     // perfect-negotiation: a local offer is in flight
   let currentPeerPub = '';     // who we're signalling with
+  let pendingOffer = null;     // {sdp, from} of a ringing incoming call, until accepted
 
   // screen share + volume
   let screenStream = null;
@@ -254,29 +255,44 @@ $(function () {
         } catch (_) {}
         return;
       }
-      // fresh offer: a new call, or the other side reloaded and is reconnecting.
-      // Drop any stale connection and answer cleanly.
+      // Busy: a fresh offer from someone ELSE while we're in a call or already
+      // ringing another caller. Decline them, leave the current call untouched.
+      const busy = (pc && pc.signalingState !== 'closed') || pendingOffer;
+      if (busy && currentPeerPub && msg.from !== currentPeerPub) {
+        fetch('/api/signal/outbox', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: msg.from, kind: 'decline' }),
+        }).catch(() => {});
+        return;
+      }
+      // fresh offer = a NEW incoming call. Don't answer yet: ring with an
+      // accept/decline gate in the call bar. We acquire no media and build no
+      // pc until the user accepts (acceptIncoming) — privacy. Drop any stale
+      // connection first so the ring starts clean.
       if (pc) {
         try { pc.close(); } catch (_) {}
         pc = null; peerCamStreamId = ''; peerScreenStreamId = '';
         videoPeer.srcObject = null; tilePeer.classList.remove('has-video');
         clearRemoteScreen();
       }
+      pendingOffer = { sdp: msg.sdp, from: msg.from };
+      currentPeerPub = msg.from;
       const name = await nameForPub(msg.from);
       Call.adopt('dm', name, name, msg.from);
-      location.hash = 'call:dm:' + msg.from; // routes key dm calls by pub, like chats
-      await ensureLocalStream();
-      pc = newPC();
-      isOfferer = false;
-      if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-      await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-      const ans = await pc.createAnswer();
-      await pc.setLocalDescription(ans);
-      await waitIceComplete(pc);
-      sendSignal({ kind: 'answer', sdp: pc.localDescription.sdp });
+      Call.setState('incoming');
+      Call.renderBar();
     } else if (msg.kind === 'answer') {
       if (!pc) return;
       await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      // Callee picked up — leave the "ringing" state and start the timer.
+      if (Call.active && Call.active.state === 'ringing') {
+        Call.active.startedAt = Date.now();
+        Call.setState('connecting');
+        Call.renderBar();
+      }
+    } else if (msg.kind === 'decline') {
+      // Callee declined our outgoing call — tear down on our side too.
+      Call.endLocal();
     } else if (msg.kind === 'candidate') {
       // We're non-trickle (candidates ride in the SDP); only honour a stray
       // trickled candidate if the connection is already up enough to take it.
@@ -307,12 +323,44 @@ $(function () {
     }
   }
 
+  // accept a ringing incoming call: NOW acquire media, build the pc, answer.
+  async function acceptIncoming() {
+    if (!pendingOffer) return;
+    const off = pendingOffer;
+    pendingOffer = null;
+    currentPeerPub = off.from;
+    location.hash = 'call:dm:' + off.from; // routes key dm calls by pub, like chats
+    if (Call.active) Call.active.startedAt = Date.now();
+    Call.setState('connecting');
+    Call.renderBar();
+    await ensureLocalStream();
+    pc = newPC();
+    isOfferer = false;
+    if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    await pc.setRemoteDescription({ type: 'offer', sdp: off.sdp });
+    const ans = await pc.createAnswer();
+    await pc.setLocalDescription(ans);
+    await waitIceComplete(pc);
+    sendSignal({ kind: 'answer', sdp: pc.localDescription.sdp });
+  }
+
+  // decline a ringing incoming call: tell the caller, drop it, no media touched.
+  function declineIncoming() {
+    if (currentPeerPub) { try { sendSignal({ kind: 'decline' }); } catch (_) {} }
+    pendingOffer = null;
+    Call.endLocal();
+  }
+
+  $('#ax-callbar-accept').on('click', () => { acceptIncoming().catch(() => Call.hangup()); });
+  $('#ax-callbar-decline').on('click', () => declineIncoming());
+
   function teardown() {
     stopScreenShare(true);
     clearRemoteScreen();
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     isOfferer = false;
+    pendingOffer = null;
     currentPeerPub = '';
     peerCamStreamId = '';
     peerScreenStreamId = '';
@@ -360,6 +408,8 @@ $(function () {
         if (!pub) { return; } // unknown / not a real peer
         const name = title || (await nameForPub(pub)); // nameForPub falls back to a pub slice
         this.adopt('dm', name, name, pub);
+        this.setState('ringing'); // waiting for the callee to accept
+        this.renderBar();
         currentPeerPub = pub;
         location.hash = 'call:dm:' + pub; // routes key dm calls by pub, like chats
         chatEvent('dm', pub, 'call_start'); // caller drops the system line (callee doesn't — no dupes)
@@ -412,14 +462,26 @@ $(function () {
       const a = this.active;
       if (!a) {
         $bar.hide();
+        $('#ax-callbar-incoming').css('display', 'none');
+        $('#ax-callbar-ctrls').css('display', 'flex');
         if (this.timer) { clearInterval(this.timer); this.timer = null; }
         return;
       }
       $bar.css('display', 'flex');
+      const incoming = a.state === 'incoming'; // callee ringing — accept/decline
+      const ringing = a.state === 'ringing';   // caller waiting for pickup
+      $('#ax-callbar-incoming').css('display', incoming ? 'flex' : 'none');
+      $('#ax-callbar-ctrls').css('display', incoming ? 'none' : 'flex');
       $('#ax-callbar-icon').attr('class', 'bi ' + (a.kind === 'group' ? 'bi-people-fill' : 'bi-telephone-fill'));
       $('#ax-callbar-title').text((a.kind === 'group' ? '# ' : '') + a.title);
-      if (!this.timer) this.timer = setInterval(() => this.tick(), 1000);
-      this.tick();
+      // Show a status word while ringing; the running timer only when connected.
+      if (incoming || ringing) {
+        if (this.timer) { clearInterval(this.timer); this.timer = null; }
+        $('#ax-callbar-time').text(incoming ? 'incoming…' : 'ringing…');
+      } else {
+        if (!this.timer) this.timer = setInterval(() => this.tick(), 1000);
+        this.tick();
+      }
     },
     tick() {
       if (!this.active) return;
