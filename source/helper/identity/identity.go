@@ -1,8 +1,9 @@
 // Package identity owns the per-camp Ed25519 keypair used to prove
-// ownership of a tunnel_ip to the camp server. Each camp gets its own
-// keypair under /var/lib/f2f/identity/<camp_id>/ so different camps
-// can't correlate the same operator across sessions, and "leaving" a
-// camp is as physical as removing that directory.
+// ownership of a tunnel_ip to the camp server. The keypair now lives in the
+// camp's identity dir (~/.f2f/<camp_id>/identity/). The legacy location was
+// /var/lib/f2f/identity/<camp_id>/ (see DirFor); Migrate moves it on first run.
+// Each camp has its own keypair so different camps can't correlate the same
+// operator, and "leaving" a camp is as physical as removing its dir.
 //
 // The camp server (re)binds tunnel_ip stickily by pubkey, so the
 // keypair must persist for an operator to keep their address across
@@ -26,17 +27,41 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// baseDir is the root under which every camp's keypair lives, one
-// subdir per camp_id. Root-owned, 0700 — different camps can't
-// correlate, and "leaving" a camp is rm -rf of its DirFor.
+// baseDir is the LEGACY root where keypairs used to live (one subdir per
+// camp_id, root-owned 0700). Kept only so Migrate can find and relocate an
+// existing key into the camp dir. New keys are written under the camp dir by
+// the caller — identity itself stays dir-agnostic.
 const baseDir = "/var/lib/f2f/identity"
 
-// DirFor returns the on-disk directory holding the keypair for campID
-// (/var/lib/f2f/identity/<camp_id>). Single source of truth for the
-// path — engine and cli resolve it through here instead of hard-coding
-// the prefix.
+// DirFor returns the LEGACY on-disk directory for campID
+// (/var/lib/f2f/identity/<camp_id>). Used as the source for Migrate; the live
+// location is now the camp's own dir, chosen by the caller.
 func DirFor(campID string) string {
 	return filepath.Join(baseDir, campID)
+}
+
+// Migrate relocates a camp's keypair from oldDir to newDir when newDir has none
+// and oldDir does — moving the identity out of the legacy
+// /var/lib/f2f/identity/<camp> path into the camp's own dir, so all of a camp's
+// state lives in one folder. No-op if newDir already has a key (already
+// migrated / fresh install) or oldDir has nothing valid. The pub is re-derived
+// from the private key, so a missing or stale pub.key is fine. On success the
+// legacy dir is removed.
+func Migrate(oldDir, newDir string) error {
+	if _, err := os.Stat(filepath.Join(newDir, "priv.key")); err == nil {
+		return nil // already at the new location
+	}
+	priv, err := os.ReadFile(filepath.Join(oldDir, "priv.key"))
+	if err != nil || len(priv) != ed25519.PrivateKeySize {
+		return nil // nothing valid to migrate
+	}
+	pk := ed25519.PrivateKey(priv)
+	id := newIdentity(pk, pk.Public().(ed25519.PublicKey), "")
+	if err := id.Save(newDir); err != nil {
+		return fmt.Errorf("identity: migrate to %s: %w", newDir, err)
+	}
+	_ = os.RemoveAll(oldDir) // legacy location no longer needed
+	return nil
 }
 
 // x25519HKDFInfo is the domain-separation tag for deriving the per-identity

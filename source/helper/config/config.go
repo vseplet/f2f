@@ -312,6 +312,25 @@ func (s *Store) CampDir(id string) string {
 	return dir
 }
 
+// IdentityDir returns (creating) ~/.f2f/<camp_id>/identity/ — the Ed25519
+// network-identity keypair (priv.key/pub.key). Root-owned 0700 so it stays
+// unreadable to the desktop user even though the parent camp dir is theirs.
+func (s *Store) IdentityDir(id string) string {
+	dir := filepath.Join(s.CampDir(id), "identity")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
+// OIDCDir returns (creating) ~/.f2f/<camp_id>/oidc/ — the OIDC provider's
+// state: the RS256 token-signing key (oidc_rsa.pem) and the client registry
+// (clients.json). Grouped by service, separate from the network identity.
+// Root-owned 0700.
+func (s *Store) OIDCDir(id string) string {
+	dir := filepath.Join(s.CampDir(id), "oidc")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
 // statePath / campPath build the absolute paths under s.dir.
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
 

@@ -154,12 +154,22 @@ func run(bind string, console bool, autostart bool) error {
 	// for co-located apps. Served on a loopback port; the proxy exposes it
 	// at id.<zone>.f2f and injects the attested caller pub.
 	const oidcPort = 2203
-	oidcDir := func() string {
+	// camp dir holds shared/data state (db.sqlite, content); the OIDC provider's
+	// own files (oidc_rsa.pem signing key + clients.json registry) live grouped
+	// under ~/.f2f/<camp>/oidc/.
+	campDir := func() string {
 		id := eng.Status().CampID
 		if id == "" {
 			return ""
 		}
 		return store.CampDir(id)
+	}
+	oidcDir := func() string {
+		id := eng.Status().CampID
+		if id == "" {
+			return ""
+		}
+		return store.OIDCDir(id)
 	}
 	oidcClients := oidc.NewClientStore(oidcDir)
 	oidcKeys := oidc.NewSignKeys(oidcDir)
@@ -169,7 +179,7 @@ func run(bind string, console bool, autostart bool) error {
 	// (notes now; docs/tasks/chat later) build on it. Push on every local
 	// commit; PullAll periodically (below) catches up offline gaps. Built
 	// before OIDC so the provider can read passkeys/profile from block.profile.
-	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
+	dbSvc := db.New(db.NewSQLiteStore(campDir))
 	blocksMgr := blocks.New(dbSvc)
 
 	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcClients, oidcKeys)
