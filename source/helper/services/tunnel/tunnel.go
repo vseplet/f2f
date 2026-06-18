@@ -686,6 +686,9 @@ func (s *Service) refreshOnce() {
 	s.mu.Unlock()
 
 	routes := s.eng.Routes()
+	if routes == nil {
+		return // engine not started yet (or stopped) — no route table to touch
+	}
 	for _, d := range domains {
 		// Skip when the exit peer's bus link is down: resolving asks the peer
 		// over the bus, so dialing a dead peer just times out and re-warns every
