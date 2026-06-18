@@ -3491,9 +3491,9 @@ $(function () {
 
     const treeHtml = (
       category('peers',     'network',   peers.length, peersBody)
+      + category('messages',  'channels',  totalUnread || null, messagingBody)
       + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
-      + category('messages',  'channels',  totalUnread || null, messagingBody)
       // drop section hidden from the sidebar for now — uncomment to restore:
       // + category('drop',      'drop',      allFiles.length,
       //     section('available') + peerFilesBody
@@ -3502,7 +3502,7 @@ $(function () {
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
-      + category('blob',      'Blob Storage', null, empty('coming soon'))
+      // + category('blob',      'Blob Storage', null, empty('coming soon')) // hidden for now
       + category('oidc',      'OIDC',      oidcClients.length || null,
           addRow('manage applications →', 'oidc')
           + (oidcClients.length
@@ -3511,8 +3511,8 @@ $(function () {
                   cl.confidential ? '' : 'public', null, 'oidc')).join('')
               : empty('no applications')))
       + category('secrets',   'secrets',   null, empty('coming soon'))
-      + category('policies',  'policies',  null, empty('not configured'))
-      + category('apps',      'apps',      null, empty('coming soon'))
+      // + category('policies',  'policies',  null, empty('not configured')) // hidden for now
+      // + category('apps',      'apps',      null, empty('coming soon')) // hidden for now
     );
     // These timers fire several times a second; only touch the DOM when the
     // tree actually changed, else the wholesale rebuild makes rows/selects
