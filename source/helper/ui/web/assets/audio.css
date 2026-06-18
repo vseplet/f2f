@@ -440,10 +440,8 @@
    icon and label share the colour. */
 .ax-tree-category[data-cat="peers"]    .ax-tree-cat-icon,
 .ax-tree-category[data-cat="peers"]    .ax-tree-label { color: #5aa9e6; }
-.ax-tree-category[data-cat="shells"]   .ax-tree-cat-icon,
-.ax-tree-category[data-cat="shells"]   .ax-tree-label { color: #5fbf7f; }
-.ax-tree-category[data-cat="desktops"] .ax-tree-cat-icon,
-.ax-tree-category[data-cat="desktops"] .ax-tree-label { color: #b18cf0; }
+.ax-tree-category[data-cat="remote"]   .ax-tree-cat-icon,
+.ax-tree-category[data-cat="remote"]   .ax-tree-label { color: #b18cf0; }
 .ax-tree-category[data-cat="messages"] .ax-tree-cat-icon,
 .ax-tree-category[data-cat="messages"] .ax-tree-label { color: #e87ab8; }
 .ax-tree-category[data-cat="drop"]     .ax-tree-cat-icon,
@@ -2085,6 +2083,14 @@ a.ax-domain-link:hover {
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
+.ax-callbar-accept {
+    color: var(--ok, #86b86b);
+}
+.ax-callbar-accept:hover {
+    border-color: var(--ok, #86b86b);
+    color: var(--ok, #86b86b);
+    background: color-mix(in srgb, var(--ok, #86b86b) 16%, transparent);
+}
 .ax-callbar-hangup {
     color: var(--danger);
 }
@@ -2851,6 +2857,8 @@ a.ax-domain-link:hover {
     white-space: nowrap;
 }
 .ax-msg-doc:hover .ax-msg-doc-name { text-decoration: underline; }
+.ax-msg-torrent-name { cursor: pointer; }
+.ax-msg-torrent-name:hover { text-decoration: underline; }
 .ax-msg-doc-sub { color: var(--muted); font-size: 11px; }
 
 /* Torrent file: the same doc card as an inline file (only a transfer icon),

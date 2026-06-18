@@ -1237,11 +1237,21 @@ func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
 // the filesystem" backdoor.
 func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Path string `json:"path"`
+		Path     string `json:"path"`
+		InfoHash string `json:"info_hash"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	// Reveal by info_hash (seeding or downloaded file): resolve its local path.
+	if body.Path == "" && body.InfoHash != "" {
+		if p := s.drop.PathForInfoHash(body.InfoHash); p != "" {
+			body.Path = p
+		} else {
+			writeError(w, http.StatusNotFound, fmt.Errorf("file not present locally"))
+			return
+		}
 	}
 	abs, err := filepath.Abs(body.Path)
 	if err != nil {

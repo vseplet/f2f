@@ -266,6 +266,27 @@ func (s *Service) DownloadsDir() string {
 	return s.downloads
 }
 
+// PathForInfoHash returns the on-disk path of a locally-present torrent file —
+// a seed we share (uploads/) or a download we've fetched (downloads/) — or ""
+// if we don't have it. Used to "reveal in Finder" by info hash.
+func (s *Service) PathForInfoHash(infoHash string) string {
+	c := s.Client()
+	if c == nil {
+		return ""
+	}
+	for _, h := range c.ListSeeds() {
+		if h.InfoHash == infoHash {
+			return h.Path
+		}
+	}
+	for _, d := range c.ListDownloads() {
+		if d.InfoHash == infoHash {
+			return c.DownloadPath(d)
+		}
+	}
+	return ""
+}
+
 // AddDownload wraps Client.AddDownload. Idempotent — re-adding the same
 // info_hash is a no-op. Survival across restarts no longer needs a downloads
 // file: the block that references the file carries its magnet, and Start

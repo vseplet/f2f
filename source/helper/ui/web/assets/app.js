@@ -507,7 +507,7 @@ $(function () {
       return `<div class="ax-msg-doc ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
         + `<span class="ax-msg-doc-ic"><i class="bi bi-cloud-arrow-down-fill"></i></span>`
         + `<span class="ax-msg-doc-meta">`
-          + `<span class="ax-msg-doc-name">${tn}</span>`
+          + `<span class="ax-msg-doc-name ax-msg-torrent-name" title="открыть папку с файлом">${tn}</span>`
           + `<span class="ax-msg-doc-sub"><span class="ax-msg-doc-size">${esc(fmtBytes(f.size || 0))}</span><span class="ax-msg-torrent-status"></span></span>`
         + `</span>`
       + `</div>`;
@@ -1775,6 +1775,9 @@ $(function () {
       clearReplyTarget(); // a pending reply doesn't carry across conversations
       clearChatPending(); // nor a staged attachment
       loadConversation();
+      // Focus the composer so you can type right away. setTimeout: the tab was
+      // just un-hidden above, focus needs the element visible.
+      setTimeout(() => $('#chat-input').trigger('focus'), 0);
     }
     // Reconcile the thread panel with the URL.
     if (thread) showThread(thread); else closeThreadPanel();
@@ -2576,6 +2579,14 @@ $(function () {
       $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });
     }
   });
+  // Click the file name to open its folder — works for files we seed AND files
+  // we've downloaded; backend resolves the local path by info_hash. No local
+  // copy (not downloaded) → 404, silently ignored.
+  $('#tab-chat, #tab-note').on('click', '.ax-msg-torrent-name', function () {
+    const ih = $(this).closest('.ax-msg-torrent').attr('data-infohash');
+    if (!ih) return;
+    $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ info_hash: ih }) });
+  });
   setInterval(pollTorrents, 2500);
 
   const $btnEngine = $('#btn-engine');
@@ -3118,8 +3129,7 @@ $(function () {
   // the label). Keep in sync with the category() calls below.
   const catIcons = {
     peers:    'bi-people-fill',
-    shells:   'bi-terminal-fill',
-    desktops: 'bi-display-fill',
+    remote:   'bi-pc-display-horizontal',
     messages: 'bi-chat-dots-fill',
     drop:     'bi-folder-fill',
     domains:  'bi-globe2',
@@ -3489,11 +3499,16 @@ $(function () {
       ? vncList.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
       : empty('none');
 
+    // remote access — terminals (services/shell) + desktops (services/vnc)
+    // under one collapsible with section dividers.
+    const remoteBody =
+      section('terminals') + shellsBody
+      + section('desktops')  + desktopsBody;
+
     const treeHtml = (
       category('peers',     'network',   peers.length, peersBody)
-      + category('shells',    'terminals', shellList.length || null, shellsBody)
-      + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'channels',  totalUnread || null, messagingBody)
+      + category('remote',    'remote access', (shellList.length + vncList.length) || null, remoteBody)
       // drop section hidden from the sidebar for now — uncomment to restore:
       // + category('drop',      'drop',      allFiles.length,
       //     section('available') + peerFilesBody
@@ -3502,7 +3517,7 @@ $(function () {
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)
       + category('tunnel',    'tunnel',    (intercepts.length + allPorts.length) || null, tunnelBody)
-      + category('blob',      'Blob Storage', null, empty('coming soon'))
+      // + category('blob',      'Blob Storage', null, empty('coming soon')) // hidden for now
       + category('oidc',      'OIDC',      oidcClients.length || null,
           addRow('manage applications →', 'oidc')
           + (oidcClients.length
@@ -3511,8 +3526,8 @@ $(function () {
                   cl.confidential ? '' : 'public', null, 'oidc')).join('')
               : empty('no applications')))
       + category('secrets',   'secrets',   null, empty('coming soon'))
-      + category('policies',  'policies',  null, empty('not configured'))
-      + category('apps',      'apps',      null, empty('coming soon'))
+      // + category('policies',  'policies',  null, empty('not configured')) // hidden for now
+      // + category('apps',      'apps',      null, empty('coming soon')) // hidden for now
     );
     // These timers fire several times a second; only touch the DOM when the
     // tree actually changed, else the wholesale rebuild makes rows/selects
