@@ -80,7 +80,7 @@ func (a *AnnounceClient) resolve() {
 		return
 	}
 	if cur == nil || cur.String() != addr.String() {
-		clog.Info("camp", "resolved %q → %s", a.campAddrStr, addr)
+		clog.Debug("camp", "resolved %q → %s", a.campAddrStr, addr)
 	}
 	a.campAddr.Store(addr)
 }

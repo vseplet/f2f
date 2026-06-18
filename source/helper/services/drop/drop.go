@@ -3,8 +3,8 @@
 //
 //   - The anacrolix client lifecycle (Start binds it on the overlay
 //     v4, Stop closes it).
-//   - The on-disk catalog (shared/ + downloads/, persisted across
-//     restarts via rescan + downloads.json).
+//   - The on-disk catalog (uploads/ + downloads/, re-seeded across
+//     restarts by rescanning the dirs + the block-referenced files).
 //   - Reconciliation loops: prune missing files, re-feed peer
 //     addresses to stalled downloads, chown root-owned writes back
 //     to the invoking user.
@@ -28,7 +28,11 @@ import (
 	"sync"
 	"time"
 
+	"slices"
+
 	"github.com/vseplet/f2f/source/helper/clog"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/attach"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 	internaltorrent "github.com/vseplet/f2f/source/helper/services/drop/torrent"
@@ -58,6 +62,7 @@ type Service struct {
 	eng     *engine.Engine
 	bus     *bus.Service
 	campDir func(campID string) string // ~/.f2f/<camp_id>/ (creates it)
+	blocks  *blocks.Manager            // source of "which file belongs to which scope"
 
 	mu        sync.Mutex
 	client    *internaltorrent.Client
@@ -68,17 +73,71 @@ type Service struct {
 	peerMu    sync.RWMutex
 	peerFiles map[string][]PeerFile // pub → files
 
-	// scopes pins a seeded file to one conversation (channel id or dm key).
-	// A scoped file is private: it's hidden from the public catalog and only
-	// served to peers who are members of that conversation (see isMember).
-	// infohash → scope.
-	scopeMu sync.RWMutex
-	scopes  map[string]string
-
 	// isMember reports whether a peer may see files scoped to a conversation.
-	// Backed by the messenger (channel roster / dm pair). nil = scoped files
-	// stay fully private (served to nobody but ourselves).
+	// Backed by the messenger (channel roster / dm pair). nil = nothing served.
 	isMember func(scope, pub string) bool
+}
+
+// refFile is one torrent file referenced by a block: its info hash and magnet
+// (for restore) plus the channel scopes it appears in (for access gating).
+type refFile struct {
+	Name     string
+	InfoHash string
+	Magnet   string
+	Scopes   []string
+}
+
+// refFiles scans the blocks for every torrent attachment and returns, per
+// info_hash, the file's magnet/name and the channel bids that reference it.
+// This is the SOLE source of "which file belongs where" — no file-scopes.json,
+// no public catalog. Pull-based (re-scanned on each use): OnApply doesn't fire
+// for local writes, so an event index would miss our own shared files, and
+// Blocks(scope) is incrementally cached so re-scans are cheap. Scope strings
+// (message:/note:/channel:<bid>) map to the bid IsMember expects.
+func (s *Service) refFiles() []refFile {
+	if s.blocks == nil {
+		return nil
+	}
+	byHash := map[string]*refFile{}
+	for _, scope := range s.blocks.Scopes() {
+		bid := scope
+		for _, p := range []string{"message:", "note:", "channel:"} {
+			if strings.HasPrefix(scope, p) {
+				bid = strings.TrimPrefix(scope, p)
+				break
+			}
+		}
+		for _, blk := range s.blocks.Blocks(scope) {
+			if blk == nil || blk.Deleted || len(blk.Heads) == 0 {
+				continue
+			}
+			var c struct {
+				attach.Attachment                    // file blocks: content.info_hash (flattened)
+				File              *attach.Attachment `json:"file"` // messages: content.file.info_hash
+			}
+			if json.Unmarshal(blk.Heads[len(blk.Heads)-1].Content, &c) != nil {
+				continue
+			}
+			for _, a := range []*attach.Attachment{&c.Attachment, c.File} {
+				if a == nil || a.InfoHash == "" {
+					continue
+				}
+				r := byHash[a.InfoHash]
+				if r == nil {
+					r = &refFile{Name: a.Name, InfoHash: a.InfoHash, Magnet: a.Magnet}
+					byHash[a.InfoHash] = r
+				}
+				if !slices.Contains(r.Scopes, bid) {
+					r.Scopes = append(r.Scopes, bid)
+				}
+			}
+		}
+	}
+	out := make([]refFile, 0, len(byHash))
+	for _, r := range byHash {
+		out = append(out, *r)
+	}
+	return out
 }
 
 // SetMembershipCheck wires the conversation-membership predicate used to
@@ -89,14 +148,16 @@ func (s *Service) SetMembershipCheck(fn func(scope, pub string) bool) {
 }
 
 // New constructs a Service. campDir resolves a camp's directory
-// (config.Store.CampDir). The engine must outlive the service.
-func New(eng *engine.Engine, campDir func(campID string) string, b *bus.Service) *Service {
+// (config.Store.CampDir); blocksMgr is the block engine drop scans to learn
+// which torrent files are referenced and in which scope. The engine must
+// outlive the service.
+func New(eng *engine.Engine, campDir func(campID string) string, b *bus.Service, blocksMgr *blocks.Manager) *Service {
 	return &Service{
 		eng:       eng,
 		bus:       b,
 		campDir:   campDir,
+		blocks:    blocksMgr,
 		peerFiles: map[string][]PeerFile{},
-		scopes:    map[string]string{},
 	}
 }
 
@@ -112,15 +173,17 @@ func (s *Service) Register() {
 		if c == nil {
 			return nil, fmt.Errorf("torrent client not running")
 		}
+		// A file is served only if it's referenced by a block in some scope the
+		// asking peer is a member of. No public catalog: a seed no block points
+		// to (or that the peer shares no scope with) is invisible to them.
+		scopesByHash := map[string][]string{}
+		for _, r := range s.refFiles() {
+			scopesByHash[r.InfoHash] = r.Scopes
+		}
 		out := []PeerFile{}
 		for _, h := range c.ListSeeds() {
-			// A scoped file is private: serve it only to members of its
-			// conversation, so non-members don't see it but members' downloads
-			// still find it in our catalog (and don't get retired as zombies).
-			if scope := s.scopeOf(h.InfoHash); scope != "" {
-				if s.isMember == nil || !s.isMember(scope, fromPub) {
-					continue
-				}
+			if !s.servableTo(scopesByHash[h.InfoHash], fromPub) {
+				continue
 			}
 			out = append(out, PeerFile{
 				Name: h.Name, Size: h.Size,
@@ -144,9 +207,12 @@ func (s *Service) Start(campID, localIP string) error {
 		return fmt.Errorf("drop: already started")
 	}
 	s.campID = campID
-	s.sharedDir = filepath.Join(s.campDir(campID), "shared")
-	s.downloads = filepath.Join(s.campDir(campID), "drops")
-	s.loadScopes()
+	camp := s.campDir(campID)
+	s.sharedDir = filepath.Join(camp, "uploads")
+	s.downloads = filepath.Join(camp, "downloads")
+	// Relocate from the old names on first run after the rename.
+	migrateDir(filepath.Join(camp, "shared"), s.sharedDir)
+	migrateDir(filepath.Join(camp, "drops"), s.downloads)
 	t0 := time.Now()
 	opts := internaltorrent.Options{
 		ListenAddr:   net.JoinHostPort(localIP, fmt.Sprint(internaltorrent.DefaultPort)),
@@ -163,8 +229,10 @@ func (s *Service) Start(campID, localIP string) error {
 		time.Since(t0).Round(time.Millisecond), opts.SharedDir, opts.DownloadsDir)
 	chownToUser(opts.SharedDir)
 	chownToUser(opts.DownloadsDir)
-	go s.rescanSharedDir(c, opts.SharedDir)
-	go s.restoreDownloads(c)
+	go func() {
+		s.rescanSharedDir(c, opts.SharedDir) // re-seed my uploads first…
+		s.restoreReferenced(c)               // …then resume/seed files the blocks reference
+	}()
 	go s.chownLoop(opts.SharedDir, opts.DownloadsDir)
 	go s.pruneLoop(c)
 	return nil
@@ -198,57 +266,29 @@ func (s *Service) DownloadsDir() string {
 	return s.downloads
 }
 
-// AddDownload wraps Client.AddDownload and persists the entry so it
-// survives restart. Idempotent — re-adding the same info_hash is a
-// no-op.
+// AddDownload wraps Client.AddDownload. Idempotent — re-adding the same
+// info_hash is a no-op. Survival across restarts no longer needs a downloads
+// file: the block that references the file carries its magnet, and Start
+// resumes every referenced file (see restoreReferenced).
 func (s *Service) AddDownload(magnet string, peers []string) (*internaltorrent.Download, error) {
 	c := s.Client()
 	if c == nil {
 		return nil, fmt.Errorf("drop: torrent client not running")
 	}
-	d, err := c.AddDownload(magnet, peers)
-	if err != nil {
-		return nil, err
-	}
-	saved := s.loadSavedDownloads()
-	for _, sv := range saved {
-		if sv.InfoHash == d.InfoHash {
-			return d, nil
-		}
-	}
-	saved = append(saved, savedDownload{
-		Magnet: magnet, InfoHash: d.InfoHash, Peers: peers,
-	})
-	if err := s.saveDownloads(saved); err != nil {
-		clog.Warn("downloads", "persist: %v", err)
-	}
-	return d, nil
+	return c.AddDownload(magnet, peers)
 }
 
-// RemoveDownload cancels (or unseeds) a download by info_hash and
-// drops it from downloads.json so it doesn't come back on restart.
-// Files on disk are NOT deleted; pruneLoop handles that case when
-// the user removes them via Finder.
+// RemoveDownload cancels (or unseeds) a download by info_hash for this session.
+// Files on disk are NOT deleted; pruneLoop handles that when the user removes
+// them via Finder. Note: if a block still references the file and its bytes are
+// on disk, Start's restoreReferenced re-adds it next launch — removal sticks
+// only once the referencing block (message/note) is gone too.
 func (s *Service) RemoveDownload(infoHash string) bool {
 	c := s.Client()
-	removed := false
-	if c != nil {
-		removed = c.RemoveDownload(infoHash)
+	if c == nil {
+		return false
 	}
-	saved := s.loadSavedDownloads()
-	kept := saved[:0]
-	for _, sv := range saved {
-		if sv.InfoHash == infoHash {
-			continue
-		}
-		kept = append(kept, sv)
-	}
-	if len(kept) != len(saved) {
-		if err := s.saveDownloads(kept); err != nil {
-			clog.Warn("downloads", "persist after remove: %v", err)
-		}
-	}
-	return removed
+	return c.RemoveDownload(infoHash)
 }
 
 // metaVerdict is what to do with a download still fetching metadata,
@@ -419,18 +459,11 @@ func (s *Service) fetchPeerFiles(ctx context.Context, pub string) ([]PeerFile, e
 	return files, nil
 }
 
-// --- persistence ---
-
-type savedDownload struct {
-	Magnet   string   `json:"magnet"`
-	InfoHash string   `json:"info_hash"`
-	Peers    []string `json:"peers,omitempty"`
-}
-
-// ShareToScope seeds a file and pins it to a conversation (channel id or dm
-// key) so it stays out of the public catalog. Returns the seed's peer-facing
-// metadata (name/size/info_hash/magnet) for embedding in a chat message.
-func (s *Service) ShareToScope(path, scope string) (PeerFile, error) {
+// Share seeds a local file and returns its peer-facing metadata
+// (name/size/info_hash/magnet) for embedding in the block (message/note/…) that
+// references it. The file's scope is NOT recorded here — it's the scope of that
+// block, surfaced via the SetFileIndex resolver.
+func (s *Service) Share(path string) (PeerFile, error) {
 	c := s.Client()
 	if c == nil {
 		return PeerFile{}, fmt.Errorf("drop: torrent client not running")
@@ -439,102 +472,85 @@ func (s *Service) ShareToScope(path, scope string) (PeerFile, error) {
 	if err != nil {
 		return PeerFile{}, err
 	}
-	s.scopeMu.Lock()
-	s.scopes[h.InfoHash] = scope
-	s.scopeMu.Unlock()
-	s.saveScopes()
 	return PeerFile{Name: h.Name, Size: h.Size, InfoHash: h.InfoHash, Magnet: h.Magnet}, nil
 }
 
-// scopeOf returns the conversation a seeded file is pinned to ("" = public).
-func (s *Service) scopeOf(infoHash string) string {
-	s.scopeMu.RLock()
-	defer s.scopeMu.RUnlock()
-	return s.scopes[infoHash]
+// servableTo reports whether a file referenced in the given scopes may be
+// served to pub: true iff pub is a member of at least one of them. No scopes
+// (no block references the file) ⇒ not served — there is no public catalog.
+func (s *Service) servableTo(scopes []string, pub string) bool {
+	if s.isMember == nil {
+		return false
+	}
+	for _, sc := range scopes {
+		if s.isMember(sc, pub) {
+			return true
+		}
+	}
+	return false
 }
 
-func (s *Service) scopesStatePath() string {
-	return filepath.Join(s.campDir(s.campID), "file-scopes.json")
-}
-
-func (s *Service) loadScopes() {
-	data, err := os.ReadFile(s.scopesStatePath())
-	if err != nil {
-		return
+// restoreReferenced resumes/re-seeds files the blocks reference whose bytes we
+// already have in downloads/ — derived from the block index (magnet) + disk
+// (presence), no downloads.json. It does NOT fetch files we never downloaded:
+// only those with local bytes are (re-)added, so we don't pull the whole camp's
+// catalog on every start. Files I share live in uploads/ and are re-seeded by
+// rescanSharedDir before this runs.
+func (s *Service) restoreReferenced(c *internaltorrent.Client) {
+	seeded := map[string]bool{}
+	for _, h := range c.ListSeeds() {
+		seeded[h.InfoHash] = true
 	}
-	m := map[string]string{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		clog.Warn("torrent", "parse scopes: %v", err)
-		return
-	}
-	s.scopeMu.Lock()
-	s.scopes = m
-	s.scopeMu.Unlock()
-}
-
-func (s *Service) saveScopes() {
-	s.scopeMu.RLock()
-	data, err := json.MarshalIndent(s.scopes, "", "  ")
-	s.scopeMu.RUnlock()
-	if err != nil {
-		return
-	}
-	path := s.scopesStatePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		clog.Warn("torrent", "save scopes: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		clog.Warn("torrent", "save scopes: %v", err)
-	}
-}
-
-func (s *Service) downloadsStatePath() string {
-	return filepath.Join(s.campDir(s.campID), "downloads.json")
-}
-
-func (s *Service) loadSavedDownloads() []savedDownload {
-	path := s.downloadsStatePath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var out []savedDownload
-	if err := json.Unmarshal(data, &out); err != nil {
-		clog.Warn("downloads", "parse %s: %v", path, err)
-		return nil
-	}
-	return out
-}
-
-func (s *Service) saveDownloads(list []savedDownload) error {
-	path := s.downloadsStatePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-func (s *Service) restoreDownloads(c *internaltorrent.Client) {
-	saved := s.loadSavedDownloads()
-	if len(saved) == 0 {
-		return
-	}
+	peers := s.campPeerAddrs()
 	added := 0
-	for _, sv := range saved {
-		if _, err := c.AddDownload(sv.Magnet, sv.Peers); err != nil {
-			clog.Warn("downloads", "restore %s: %v", sv.InfoHash, err)
+	for _, r := range s.refFiles() {
+		if r.Magnet == "" || seeded[r.InfoHash] || !s.haveLocalBytes(r.Name) {
+			continue
+		}
+		if _, err := c.AddDownload(r.Magnet, peers); err != nil {
+			clog.Warn("downloads", "resume %s: %v", r.InfoHash, err)
 			continue
 		}
 		added++
 	}
 	if added > 0 {
-		clog.Info("downloads", "restored %d previously-downloaded torrent(s)", added)
+		clog.Debug("downloads", "resumed %d previously-downloaded file(s)", added)
 	}
+}
+
+// haveLocalBytes reports whether a downloaded file (complete or partial) is
+// present on disk — the torrent stores it as downloads/<name>.
+func (s *Service) haveLocalBytes(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(s.downloads, name))
+	return err == nil
+}
+
+// campPeerAddrs lists online camp peers as torrent peer addresses
+// (overlayIP:torrentPort) to seed a resumed download with — there's no tracker
+// on the overlay, so peers are fed explicitly.
+func (s *Service) campPeerAddrs() []string {
+	var out []string
+	for _, p := range s.eng.OnlinePeersForCAPoll() {
+		if p.Host != "" {
+			out = append(out, net.JoinHostPort(p.Host, fmt.Sprint(internaltorrent.DefaultPort)))
+		}
+	}
+	return out
+}
+
+// migrateDir renames oldPath→newPath when newPath doesn't exist and oldPath
+// does — used to relocate uploads/ (was shared/) and downloads/ (was drops/).
+func migrateDir(oldPath, newPath string) {
+	if _, err := os.Stat(newPath); err == nil {
+		return
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		return
+	}
+	_ = os.Rename(oldPath, newPath)
 }
 
 // --- background goroutines ---
@@ -561,10 +577,10 @@ func (s *Service) rescanSharedDir(c *internaltorrent.Client, dir string) {
 			continue
 		}
 		added++
-		clog.Info("torrent", "rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
+		clog.Debug("torrent", "rescan re-seeded %s (%d bytes, info_hash=%s)", name, h.Size, h.InfoHash)
 	}
 	if added > 0 {
-		clog.Info("torrent", "rescan re-seeded %d file(s) from %s", added, dir)
+		clog.Debug("torrent", "rescan re-seeded %d file(s) from %s", added, dir)
 	}
 }
 
@@ -638,43 +654,23 @@ func (s *Service) refeedActiveDownloads(c *internaltorrent.Client) {
 }
 
 func (s *Service) pruneOnce(c *internaltorrent.Client) {
-	removed := false
-	saved := s.loadSavedDownloads()
-	keep := saved[:0]
-	for _, sv := range saved {
-		var d *internaltorrent.Download
-		for _, x := range c.ListDownloads() {
-			if x.InfoHash == sv.InfoHash {
-				d = x
-				break
-			}
-		}
-		if d == nil || d.Torrent == nil || d.Torrent.Info() == nil {
-			keep = append(keep, sv)
+	// Drop a completed download whose file the user deleted from disk
+	// (Finder) — walk the live download set, no persisted list needed.
+	for _, d := range c.ListDownloads() {
+		if d.Torrent == nil || d.Torrent.Info() == nil {
 			continue
 		}
 		total := d.Torrent.Info().TotalLength()
-		complete := total > 0 && d.Torrent.BytesCompleted() >= total
-		if !complete {
-			keep = append(keep, sv)
-			continue
+		if total <= 0 || d.Torrent.BytesCompleted() < total {
+			continue // still fetching — keep
 		}
 		path := c.DownloadPath(d)
 		if path == "" {
-			keep = append(keep, sv)
 			continue
 		}
 		if _, err := os.Stat(path); err != nil {
-			clog.Info("downloads", "file gone, dropping %s (%s)", sv.InfoHash, path)
-			c.RemoveDownload(sv.InfoHash)
-			removed = true
-			continue
-		}
-		keep = append(keep, sv)
-	}
-	if removed {
-		if err := s.saveDownloads(keep); err != nil {
-			clog.Warn("downloads", "persist after prune: %v", err)
+			clog.Info("downloads", "file gone, dropping %s (%s)", d.InfoHash, path)
+			c.RemoveDownload(d.InfoHash)
 		}
 	}
 	for _, h := range c.ListSeeds() {

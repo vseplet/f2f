@@ -1481,6 +1481,7 @@ details.ax-advanced > .ax-advanced-body {
 .ax-btn-primary:hover {
     background: color-mix(in srgb, var(--ok) 15%, transparent);
 }
+.ax-frame .ax-btn.ax-btn-sm { display: inline-flex; padding: 6px 10px; font-size: 12px; }
 .ax-btn-danger {
     background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-color: var(--danger-deep);
@@ -3031,17 +3032,45 @@ a.ax-domain-link:hover {
     background: transparent; color: var(--text); font-size: 14px; cursor: pointer;
 }
 .ax-modal-btn-sec:hover { background: var(--panel-2); }
+/* Onboarding — a full-screen, OPAQUE setup page (distinct from the translucent
+   .ax-modal): when this peer has no profile, it covers the whole app until a
+   profile + passkey are created. Higher z-index than modals. */
+.ax-onboard {
+    position: fixed; inset: 0; z-index: 2000;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg, #131110);
+}
+.ax-onboard.hidden { display: none; }
+.ax-onboard-card {
+    width: min(92vw, 420px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 28px 28px 22px;
+    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.55);
+}
+.ax-onboard-title { color: var(--text); font-size: 22px; font-weight: 700; }
+.ax-onboard-sub { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 8px 0 18px; }
+.ax-onboard-form { display: flex; flex-direction: column; gap: 8px; }
+.ax-onboard-pk {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 14px; padding: 10px 0; border-top: 1px solid var(--border);
+}
+.ax-onboard-pk-k { color: var(--muted); font-size: 13px; }
+.ax-onboard-save-wrap { margin-top: 6px; }
+
 /* Profile page (in the main pane) — fills the available width like other tabs;
    the form itself stays a readable narrow column. */
 .ax-profile-page { padding: 20px 24px; overflow-y: auto; }
-.ax-profile-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-width: 420px; }
+.ax-profile-form { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; max-width: 420px; }
+.ax-profile-form .ax-input { width: 100%; box-sizing: border-box; }
 .ax-profile-label { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.ax-profile-actions { display: flex; gap: 10px; margin-top: 12px; }
-.ax-profile-actions .ax-modal-btn { flex: 1; max-width: 200px; }
+.ax-profile-actions { margin-top: 14px; }
+.ax-profile-actions .ax-btn { display: inline-flex; }
 .ax-profile-h2 { margin-top: 26px; }
 /* "This device" key/value rows. */
-.ax-profile-device { max-width: 520px; margin-top: 10px; }
-.ax-prof-row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; border-bottom: 1px dotted var(--border); }
+.ax-profile-device { max-width: 420px; margin-top: 4px; }
+.ax-profile-device .ax-input { width: 100%; box-sizing: border-box; }
+.ax-prof-readonly { margin-top: 18px; }
+.ax-prof-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 7px 0; border-bottom: 1px dotted var(--border); }
 .ax-prof-k { color: var(--muted); font-size: 13px; }
 .ax-prof-v { color: var(--text); font-size: 13px; text-align: right; word-break: break-all; }
 .ax-prof-mono { font-family: ui-monospace, monospace; font-size: 12px; }

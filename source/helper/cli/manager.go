@@ -88,7 +88,7 @@ func (m *Manager) Create(label, name string) (*config.Camp, *identity.Identity, 
 		return nil, nil, fmt.Errorf("generate identity: %w", err)
 	}
 	campID := id.PubHex() + "_" + label
-	if err := id.Save(identity.DirFor(campID)); err != nil {
+	if err := id.Save(m.store.IdentityDir(campID)); err != nil {
 		return nil, nil, fmt.Errorf("save identity: %w", err)
 	}
 	c := config.NewCamp(campID, name)
@@ -197,7 +197,18 @@ func (m *Manager) LoadForStart(campID string) (*config.Camp, *identity.Identity,
 	if c == nil {
 		return nil, nil, fmt.Errorf("no config for camp %q", campID)
 	}
-	idt, err := identity.LoadOrGenerate(identity.DirFor(campID))
+	// Relocate per-camp files into their grouped dirs on first run after the
+	// layout change: Ed25519 identity → identity/ (from the legacy /var/lib
+	// path), OIDC signing key + client registry → oidc/ (from the camp root
+	// where they used to sit).
+	idDir := m.store.IdentityDir(campID)
+	if err := identity.Migrate(identity.DirFor(campID), idDir); err != nil {
+		return nil, nil, fmt.Errorf("migrate identity %s: %w", campID, err)
+	}
+	camp, oidcDir := m.store.CampDir(campID), m.store.OIDCDir(campID)
+	moveIfAbsent(filepath.Join(camp, "oidc_rsa.pem"), filepath.Join(oidcDir, "oidc_rsa.pem"))
+	moveIfAbsent(filepath.Join(camp, "clients.json"), filepath.Join(oidcDir, "clients.json"))
+	idt, err := identity.LoadOrGenerate(idDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("identity %s: %w", campID, err)
 	}
@@ -213,6 +224,19 @@ func (m *Manager) LoadForStart(campID string) (*config.Camp, *identity.Identity,
 		c.Identity.Fingerprint = fp
 	}
 	return c, idt, nil
+}
+
+// moveIfAbsent relocates a file from oldPath to newPath when newPath doesn't
+// exist and oldPath does — used to migrate a camp's keys into its key dir.
+// Best-effort; a same-filesystem rename preserves owner/mode (root 0600).
+func moveIfAbsent(oldPath, newPath string) {
+	if _, err := os.Stat(newPath); err == nil {
+		return
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		return
+	}
+	_ = os.Rename(oldPath, newPath)
 }
 
 // Touch marks campID as last-used and ensures it appears in the

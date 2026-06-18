@@ -66,11 +66,9 @@ type Camp struct {
 	ServerURL string   `json:"server_url,omitempty"`
 	StunAddr  string   `json:"stun_addr,omitempty"`
 	Identity  Identity `json:"identity"`
-	// Profile is the active user profile on THIS device — its user_id. The
-	// profile itself (name, passkeys, …) lives as a block.user in db; this only
-	// records which user_id this device operates as. Empty = no profile yet
-	// (the UI then forces profile creation). See docs/IDENTITY.md.
-	Profile      string        `json:"profile,omitempty"`
+	// Profile (the peer's name/passkeys) lives as a block.profile in db, keyed by
+	// peer_pub in the well-known "profiles" scope — nothing about it is recorded
+	// in config. See docs/IDENTITY.md.
 	Intercepts   []Intercept   `json:"intercepts"`
 	MyDomains    []Domain      `json:"my_domains"`
 	Firewall     []Firewall    `json:"firewall"`
@@ -311,6 +309,25 @@ func (s *Store) CampDir(id string) string {
 	dir := filepath.Join(s.dir, seg)
 	_ = os.MkdirAll(dir, 0o755)
 	chownToUser(dir)
+	return dir
+}
+
+// IdentityDir returns (creating) ~/.f2f/<camp_id>/identity/ — the Ed25519
+// network-identity keypair (priv.key/pub.key). Root-owned 0700 so it stays
+// unreadable to the desktop user even though the parent camp dir is theirs.
+func (s *Store) IdentityDir(id string) string {
+	dir := filepath.Join(s.CampDir(id), "identity")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
+// OIDCDir returns (creating) ~/.f2f/<camp_id>/oidc/ — the OIDC provider's
+// state: the RS256 token-signing key (oidc_rsa.pem) and the client registry
+// (clients.json). Grouped by service, separate from the network identity.
+// Root-owned 0700.
+func (s *Store) OIDCDir(id string) string {
+	dir := filepath.Join(s.CampDir(id), "oidc")
+	_ = os.MkdirAll(dir, 0o700)
 	return dir
 }
 

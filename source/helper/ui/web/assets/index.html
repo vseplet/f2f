@@ -259,6 +259,7 @@
                                 <tr>
                                     <th class="ax-peers-dot"></th>
                                     <th>name</th>
+                                    <th>profile</th>
                                     <th>overlay ip</th>
                                     <th>endpoint</th>
                                     <th>rtt</th>
@@ -280,30 +281,25 @@
             </div>
             <!-- /#tab-camp -->
 
-            <!-- Profile page. Opened from the account plaque; also the mandatory
-                 first-time gate (router forces it here until a profile exists). -->
+            <!-- Profile page. Opened from the account plaque (create/edit). -->
             <div id="tab-profile" class="tab-panel hidden">
                 <div class="ax-frame ax-profile-page">
-                    <div class="ax-section-title" id="profile-title">Профиль</div>
                     <form id="profile-form" class="ax-profile-form">
+                        <div class="ax-section-title" id="profile-title">Профиль</div>
                         <label class="ax-profile-label">Имя</label>
-                        <input id="profile-first" class="ax-modal-input" type="text" placeholder="Имя" autocomplete="given-name" />
+                        <input id="profile-first" class="ax-input" type="text" placeholder="Имя" autocomplete="given-name" />
                         <label class="ax-profile-label">Фамилия</label>
-                        <input id="profile-last" class="ax-modal-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+                        <input id="profile-last" class="ax-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+
                         <label class="ax-profile-label">Никнейм</label>
-                        <input id="profile-nick" class="ax-modal-input" type="text" placeholder="Никнейм" autocomplete="off" spellcheck="false" />
-                        <div class="ax-modal-hint" id="profile-nick-hint">Никнейм — это вы, а не устройство; он должен отличаться от имени устройства.</div>
+                        <input id="device-name" class="ax-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" />
+                        <div id="profile-device"></div>
+
                         <div class="ax-modal-err" id="profile-err"></div>
                         <div class="ax-profile-actions">
-                            <button type="submit" class="ax-modal-btn" id="profile-save">Сохранить</button>
+                            <button type="submit" class="ax-btn ax-btn-primary" id="profile-save">Сохранить</button>
                         </div>
                     </form>
-
-                    <div class="ax-section-title ax-profile-h2">Это устройство</div>
-                    <div class="ax-profile-device" id="profile-device"></div>
-
-                    <div class="ax-section-title ax-profile-h2">Мои устройства</div>
-                    <div class="ax-profile-devices" id="profile-devices"></div>
                 </div>
             </div>
             <!-- /#tab-profile -->
@@ -1432,6 +1428,31 @@
             <span class="ax-status-spacer"></span>
             <span class="ax-status-item clickable" id="status-diag" title="open diagnostics">diagnostics</span>
             <span class="ax-status-item" id="status-fp"></span>
+        </div>
+
+        <!-- Onboarding: a full-screen, opaque setup page shown when this peer
+             has no profile yet. Fill name + create a passkey, then enter the
+             app. Mandatory — covers everything until done. -->
+        <div id="onboarding" class="ax-onboard hidden">
+            <div class="ax-onboard-card">
+                <div class="ax-onboard-title">Создайте профиль</div>
+                <div class="ax-onboard-sub">Профиль этого устройства в кэмпе. Заполните имя и создайте passkey для входа.</div>
+                <form id="onboard-form" class="ax-onboard-form">
+                    <label class="ax-profile-label">Имя</label>
+                    <input id="onboard-first" class="ax-modal-input" type="text" placeholder="Имя" autocomplete="given-name" />
+                    <label class="ax-profile-label">Фамилия</label>
+                    <input id="onboard-last" class="ax-modal-input" type="text" placeholder="Фамилия" autocomplete="family-name" />
+
+                    <div class="ax-onboard-pk">
+                        <span class="ax-onboard-pk-k">Passkey</span>
+                        <span class="ax-onboard-pk-v" id="onboard-pk-cell">
+                            <button type="button" id="onboard-pk-create" class="ax-prof-mini">Создать passkey</button>
+                        </span>
+                    </div>
+                    <div class="ax-modal-err" id="onboard-err"></div>
+                    <button type="submit" class="ax-modal-btn" id="onboard-save" disabled>Готово</button>
+                </form>
+            </div>
         </div>
 
         <!-- Rich message rendering: markdown (marked), code highlighting

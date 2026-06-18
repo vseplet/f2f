@@ -163,6 +163,17 @@ func (s *Service) HandleStream(typ string, fn StreamHandlerFunc) {
 // higher layers (gossip) to fan out to the mesh.
 func (s *Service) Peers() []string { return s.resolver.Peers() }
 
+// LinkUp reports whether the last liveness ping to pub succeeded — i.e. the bus
+// currently has a working connection to that peer. A peer never pinged (or
+// whose link is down) reports false. Callers use it to skip work that needs a
+// live peer (e.g. the tunnel route refresh) instead of dialing into a timeout.
+func (s *Service) LinkUp(pub string) bool {
+	s.mu.Lock()
+	up := s.linkUp[pub]
+	s.mu.Unlock()
+	return up
+}
+
 // Label renders a peer pub as the canonical name/fp for logs. Exposed so
 // services that only learn a peer by pub over the bus (shell, vnc) name it
 // the same way every other component does.

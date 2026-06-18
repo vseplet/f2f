@@ -143,7 +143,7 @@ func (s *Service) Register() {
 		if eg != nil {
 			eg.ensureTargets(addrs, s.eng.UtunName())
 		}
-		clog.Info("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
+		clog.Debug("resolve", "%s → %s (asked over bus)", name, strings.Join(out, ", "))
 		return json.Marshal(out)
 	}
 	s.bus.Handle(busTypeResolve, resolveHandler)
@@ -549,7 +549,7 @@ func (s *Service) resolvePrefixes(spec, peer string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		clog.Info("tunnel", "resolved %s → %s (on %s)", spec, a, peer)
+		clog.Debug("tunnel", "resolved %s → %s (on %s)", spec, a, peer)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("exit peer %s resolved %q to no usable addresses", peer, spec)
@@ -687,6 +687,15 @@ func (s *Service) refreshOnce() {
 
 	routes := s.eng.Routes()
 	for _, d := range domains {
+		// Skip when the exit peer's bus link is down: resolving asks the peer
+		// over the bus, so dialing a dead peer just times out and re-warns every
+		// tick. A pub of "" means not-in-roster — leave that to resolvePrefixes,
+		// which falls back to local resolution for public domains. The next tick
+		// picks the domain up once the peer's link is back.
+		if pub := s.pubForPeerName(d.peer); pub != "" && s.bus != nil && !s.bus.LinkUp(pub) {
+			clog.Debug("tunnel", "refresh %s: exit peer %s link down — skipping", d.spec, d.peer)
+			continue
+		}
 		newPrefixes, err := s.resolvePrefixes(d.spec, d.peer)
 		if err != nil {
 			clog.Warn("tunnel", "refresh %s: %v", d.spec, err)
@@ -775,7 +784,7 @@ func resolveSpec(spec string) ([]netip.Prefix, error) {
 		}
 		a = a.Unmap()
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
-		clog.Info("tunnel", "resolved %s → %s", spec, a)
+		clog.Debug("tunnel", "resolved %s → %s", spec, a)
 	}
 	return out, nil
 }

@@ -55,7 +55,7 @@ func (s *Server) dmPeer(bid string) string {
 func (s *Server) webMessage(m message.Message, kind, key, editID string) map[string]any {
 	return map[string]any{
 		"id": m.ID, "kind": kind, "peer": key, "type": "text",
-		"from": m.From, "to": "", "body": m.Body, "file": m.File,
+		"from": m.From, "from_name": s.authorName(m.From), "to": "", "body": m.Body, "file": m.File,
 		"reply_to": m.ReplyTo, "thread": m.Thread, "edit_id": editID,
 		"ts": m.TS, "edited": m.Edited, "mine": m.From == s.selfPub(),
 	}

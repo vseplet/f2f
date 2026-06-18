@@ -58,6 +58,18 @@ type Backend interface {
 	PeerName(pubHex string) string
 }
 
+// ProfileSource reads a peer's block.profile (well-known "profiles" scope): its
+// public passkey credentials and display name, plus an enumeration for the
+// admin users list. It is the SOLE source of login creds — there is no local
+// passkeys.json. Implemented over the blocks manager in main.
+type ProfileSource interface {
+	Creds(pub string) []webauthn.Credential
+	// Profile returns the peer's full display name plus its first/last parts
+	// (for the given_name/family_name claims), all "" if no profile.
+	Profile(pub string) (name, given, family string)
+	WithCreds() map[string]int // pub → registered passkey count
+}
+
 type authCode struct {
 	clientID    string
 	redirectURI string
@@ -72,28 +84,43 @@ type authCode struct {
 // Service is the provider. Construct with New, mount with Handler.
 type Service struct {
 	be      Backend
-	creds   *CredStore
 	clients *ClientStore
 	keys    *SignKeys
 
+	// profile is the synced block.profile — the SOLE source of passkey creds and
+	// display name for login (wired via SetProfileSource). nil ⇒ no creds, login
+	// impossible. There is no local passkeys.json.
+	profile ProfileSource
+
 	mu       sync.Mutex
 	codes    map[string]*authCode
-	sessions map[string]*authSession          // ceremony id (cookie) → in-flight /authorize
-	regSess  map[string]*webauthn.SessionData // pub → in-flight standalone passkey registration
+	sessions map[string]*authSession // ceremony id (cookie) → in-flight /authorize
 }
 
-// New builds the provider over backend be, persisting passkeys via creds,
-// the client registry via clients, and RS256 signing via keys.
-func New(be Backend, creds *CredStore, clients *ClientStore, keys *SignKeys) *Service {
+// New builds the provider over backend be, the client registry via clients, and
+// RS256 signing via keys. Login creds come from the block.profile source wired
+// with SetProfileSource.
+func New(be Backend, clients *ClientStore, keys *SignKeys) *Service {
 	return &Service{
 		be:       be,
-		creds:    creds,
 		clients:  clients,
 		keys:     keys,
 		codes:    map[string]*authCode{},
 		sessions: map[string]*authSession{},
-		regSess:  map[string]*webauthn.SessionData{},
 	}
+}
+
+// SetProfileSource wires the synced block.profile as the source of login creds
+// and display name. Required for login to work (no profile source ⇒ no creds).
+func (s *Service) SetProfileSource(p ProfileSource) { s.profile = p }
+
+// credsFor returns a peer's passkey credentials from its synced block.profile,
+// or nil if there's no profile source / no passkey.
+func (s *Service) credsFor(pub string) []webauthn.Credential {
+	if s.profile == nil {
+		return nil
+	}
+	return s.profile.Creds(pub)
 }
 
 // Handler returns the mux serving the provider's endpoints.
@@ -287,7 +314,6 @@ func (s *Service) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		scope:       q.Get("scope"),
 		sub:         sub,
 		name:        s.be.PeerName(sub),
-		register:    len(s.creds.Get(sub)) == 0,
 		exp:         time.Now().Add(5 * time.Minute),
 	}
 	s.mu.Unlock()
@@ -334,20 +360,14 @@ func (s *Service) handlePasskeyBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webauthn init: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user := &waUser{pub: sess.sub, name: sess.name, creds: s.creds.Get(sess.sub)}
-
-	if sess.register {
-		opts, sd, err := wa.BeginRegistration(user)
-		if err != nil {
-			http.Error(w, "begin register: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.mu.Lock()
-		sess.wa = sd
-		s.mu.Unlock()
-		writeJSON(w, map[string]any{"mode": "register", "options": opts})
+	creds := s.credsFor(sess.sub)
+	if len(creds) == 0 {
+		// No passkey in this peer's profile — registration happens on the peer's
+		// own node (onboarding writes block.profile), not here. Direct them there.
+		http.Error(w, "no passkey for this peer — create your profile on your own node first", http.StatusForbidden)
 		return
 	}
+	user := &waUser{pub: sess.sub, name: sess.name, creds: creds}
 	opts, sd, err := wa.BeginLogin(user)
 	if err != nil {
 		http.Error(w, "begin login: "+err.Error(), http.StatusInternalServerError)
@@ -359,9 +379,8 @@ func (s *Service) handlePasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"mode": "login", "options": opts})
 }
 
-// handlePasskeyFinish verifies the WebAuthn response (storing the new
-// credential on registration, bumping the sign counter on login), then
-// mints the authorization code and returns the redirect URL.
+// handlePasskeyFinish verifies the WebAuthn login assertion against the profile
+// credential, then mints the authorization code and returns the redirect URL.
 func (s *Service) handlePasskeyFinish(w http.ResponseWriter, r *http.Request) {
 	sid, sess := s.session(r)
 	if sess == nil || sess.wa == nil {
@@ -373,25 +392,13 @@ func (s *Service) handlePasskeyFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webauthn init: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user := &waUser{pub: sess.sub, name: sess.name, creds: s.creds.Get(sess.sub)}
-
-	if sess.register {
-		cred, err := wa.FinishRegistration(user, *sess.wa, r)
-		if err != nil {
-			http.Error(w, "finish register: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.creds.Add(sess.sub, *cred); err != nil {
-			http.Error(w, "store credential: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		cred, err := wa.FinishLogin(user, *sess.wa, r)
-		if err != nil {
-			http.Error(w, "finish login: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		s.creds.Update(sess.sub, cred)
+	user := &waUser{pub: sess.sub, name: sess.name, creds: s.credsFor(sess.sub)}
+	// Login only — verify the assertion against the profile's public cred. The
+	// sign counter is NOT persisted (we can't write a peer's block.profile from
+	// here); clone-detection is intentionally relaxed — see docs/OIDC.md.
+	if _, err := wa.FinishLogin(user, *sess.wa, r); err != nil {
+		http.Error(w, "finish login: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	code := s.issueCode(sess)
@@ -514,7 +521,16 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 	if ac.nonce != "" {
 		idClaims["nonce"] = ac.nonce
 	}
-	for k, v := range identityClaims(ac.sub, ac.name, ac.scope, r) {
+	// name = profile full name (block.profile) when set, else the peer name;
+	// given_name/family_name from the profile's first/last; preferred_username
+	// stays the peer name (a stable handle without spaces).
+	displayName, given, family := ac.name, "", ""
+	if s.profile != nil {
+		if full, g, f := s.profile.Profile(ac.sub); full != "" {
+			displayName, given, family = full, g, f
+		}
+	}
+	for k, v := range identityClaims(ac.sub, displayName, ac.name, given, family, ac.scope, r) {
 		idClaims[k] = v
 	}
 	idToken, err := mintRS256(key, kid, idClaims)
@@ -530,8 +546,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		"aud":   iss + "/userinfo",
 		"iat":   now.Unix(),
 		"exp":   now.Add(tokenTTL).Unix(),
-		"scope": ac.scope,
-		"name":  ac.name,
+		"scope": ac.scope, // /userinfo resolves name/given/family live from the profile
 	})
 	if err != nil {
 		http.Error(w, "sign access_token", http.StatusInternalServerError)
@@ -565,10 +580,20 @@ func (s *Service) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sub, _ := claims["sub"].(string)
-	name, _ := claims["name"].(string)
 	scope, _ := claims["scope"].(string)
+	// Resolve name/given/family LIVE from the profile (same as the id_token),
+	// not from the token: the access token only carries sub+scope, and a token
+	// minted before a profile edit would otherwise serve a stale name.
+	// preferred_username stays the peer name (stable handle).
+	username := s.be.PeerName(sub)
+	name, given, family := username, "", ""
+	if s.profile != nil {
+		if full, g, f := s.profile.Profile(sub); full != "" {
+			name, given, family = full, g, f
+		}
+	}
 	out := map[string]any{"sub": sub}
-	for k, v := range identityClaims(sub, name, scope, r) {
+	for k, v := range identityClaims(sub, name, username, given, family, scope, r) {
 		out[k] = v
 	}
 	writeJSON(w, out)
@@ -660,9 +685,6 @@ func (s *Service) renderPasskeyPage(w http.ResponseWriter, c *client, sess *auth
 		who = identity.Label("", sess.sub)
 	}
 	verb := "Continue with passkey"
-	if sess.register {
-		verb = "Set up a passkey"
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, passkeyHTML,
 		html.EscapeString(clientLabel(c)),
@@ -798,17 +820,25 @@ func wildcardMatch(pattern, s string) bool {
 }
 
 // identityClaims builds the profile/email claims apps like Gitea/Affine
-// expect. f2f has no real email, so we synthesize a stable one from the
-// peer's fingerprint within the camp zone (email_verified=false — it's an
-// identifier, not a reachable address). preferred_username is the peer's
-// display name. zone is the camp domain (e.g. xyz.f2f) taken from the
-// request host. Honours the requested scope.
-func identityClaims(sub, name, scope string, r *http.Request) map[string]any {
+// expect. name is the display name (block.profile full name, else peer name);
+// username is the stable peer-name handle → preferred_username. f2f has no real
+// email, so we synthesize a stable one from the peer's fingerprint within the
+// camp zone (email_verified=false — it's an identifier, not a reachable
+// address). zone is the camp domain (e.g. xyz.f2f) from the request host.
+func identityClaims(sub, name, username, given, family, scope string, r *http.Request) map[string]any {
 	out := map[string]any{}
 	if strings.Contains(scope, "profile") {
 		if name != "" {
 			out["name"] = name
-			out["preferred_username"] = name
+		}
+		if username != "" {
+			out["preferred_username"] = username
+		}
+		if given != "" {
+			out["given_name"] = given
+		}
+		if family != "" {
+			out["family_name"] = family
 		}
 	}
 	if strings.Contains(scope, "email") {

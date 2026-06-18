@@ -35,7 +35,7 @@ func newTestService(t *testing.T) (*Service, *identity.Identity) {
 	be := &fakeBackend{id: id, names: map[string]string{id.PubHex(): "alice"}}
 	dir := t.TempDir()
 	dirFn := func() string { return dir }
-	return New(be, NewCredStore(dirFn), NewClientStore(dirFn), NewSignKeys(dirFn)), id
+	return New(be, NewClientStore(dirFn), NewSignKeys(dirFn)), id
 }
 
 // rsaPub returns the service's RSA public key for verifying minted tokens.

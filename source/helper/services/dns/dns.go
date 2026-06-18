@@ -530,6 +530,17 @@ func (s *Service) LookupHost(label string) (Host, bool) {
 		}
 	}
 	online := s.eng.OnlinePeersForCAPoll() // re-used: same shape (Name/Host) + Pub via overlay
+	// Per-peer OIDC issuer host "auth-<fp8>": resolve to the online peer whose
+	// fingerprint starts with fp8, so a peer can reach ANOTHER peer's co-located
+	// IdP (cross-peer OIDC login). Self's auth-<fp8> is already answered by
+	// LocalRoutes above (→127.0.0.1). Not a published domain, so handle here.
+	if fp, ok := oidcFpFromLabel(label); ok {
+		for _, p := range online {
+			if p.Pub != "" && strings.HasPrefix(identity.FingerprintHex(p.Pub), fp) {
+				return Host{V4: p.Host}, true
+			}
+		}
+	}
 	// Pass 1: exact match.
 	if host, ok := s.matchPeers(online, label, false); ok {
 		return host, ok
@@ -539,6 +550,26 @@ func (s *Service) LookupHost(label string) (Host, bool) {
 		return host, ok
 	}
 	return Host{}, false
+}
+
+// oidcFpFromLabel extracts the fp8 from a per-peer OIDC issuer label
+// "auth-<8 hex>" (the form OIDCLabel produces). Returns ("",false) otherwise.
+func oidcFpFromLabel(label string) (string, bool) {
+	const pfx = "auth-"
+	if !strings.HasPrefix(label, pfx) {
+		return "", false
+	}
+	fp := strings.TrimPrefix(label, pfx)
+	if len(fp) != 8 {
+		return "", false
+	}
+	for i := 0; i < len(fp); i++ {
+		c := fp[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return "", false
+		}
+	}
+	return fp, true
 }
 
 // matchPeers walks the online peer list, looks up each peer's

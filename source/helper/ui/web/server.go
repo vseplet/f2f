@@ -40,6 +40,8 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/services/vnc"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 //go:embed assets
@@ -83,6 +85,13 @@ type Server struct {
 	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
 	msgEvents  *signalHub    // SSE hub: a new/edited chat message → browser (Message JSON)
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
+
+	// profRegSess holds in-flight profile passkey registration ceremonies
+	// (pub → WebAuthn session). Separate from OIDC's credstore: the profile
+	// passkey's public credential lands in block.profile (synced), not in the
+	// OIDC-local passkeys.json.
+	profRegMu   sync.Mutex
+	profRegSess map[string]*webauthn.SessionData
 }
 
 func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
@@ -110,6 +119,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		callSignals: newSignalHub(),
 		blockEvents: newSignalHub(),
 		msgEvents:  newSignalHub(),
+		profRegSess: make(map[string]*webauthn.SessionData),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
 		s.callSignals.broadcast(msg)
@@ -178,6 +188,26 @@ func (s *Server) peerName(pub string) string {
 		return pub[:12]
 	}
 	return pub
+}
+
+// profileFullName returns the peer's first+last from its block.profile (scope
+// "profiles", synced), or "" if there's no profile/name. Profiles replicate to
+// every camp member, so any peer can name any author it sees.
+func (s *Server) profileFullName(pub string) string {
+	if pub == "" {
+		return ""
+	}
+	c := s.loadProfileContent(pub)
+	return strings.TrimSpace(c.First + " " + c.Last)
+}
+
+// authorName resolves a peer pub to its display name for chat: the profile's
+// full name when set, else the roster/peer name.
+func (s *Server) authorName(pub string) string {
+	if n := s.profileFullName(pub); n != "" {
+		return n
+	}
+	return s.peerName(pub)
 }
 
 // pubForOverlayIP resolves a peer's overlay v4 to its pub via the
@@ -636,9 +666,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // without changes.
 type peerStatusView struct {
 	engine.PeerStatusInfo
-	Domains  []dns.Entry       `json:"domains,omitempty"`
-	Files    []drop.PeerFile   `json:"files,omitempty"`
-	Firewall []config.Firewall `json:"firewall,omitempty"`
+	ProfileName string            `json:"profile_name,omitempty"` // first+last from the peer's block.profile, "" if none
+	Domains     []dns.Entry       `json:"domains,omitempty"`
+	Files       []drop.PeerFile   `json:"files,omitempty"`
+	Firewall    []config.Firewall `json:"firewall,omitempty"`
 }
 
 // statusView re-serialises engine.Status with peerStatusView in
@@ -679,7 +710,7 @@ func (s *Server) statusWithDomains() statusView {
 	peers := make([]peerStatusView, 0, len(st.Peers))
 	mine := s.dns.MyDomains()
 	for _, p := range st.Peers {
-		v := peerStatusView{PeerStatusInfo: p}
+		v := peerStatusView{PeerStatusInfo: p, ProfileName: s.profileFullName(p.Pub)}
 		if p.Self {
 			v.Domains = mine
 			// Self files come from the local torrent seed list; self
