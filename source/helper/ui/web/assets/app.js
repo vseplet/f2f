@@ -3129,8 +3129,7 @@ $(function () {
   // the label). Keep in sync with the category() calls below.
   const catIcons = {
     peers:    'bi-people-fill',
-    shells:   'bi-terminal-fill',
-    desktops: 'bi-display-fill',
+    remote:   'bi-pc-display-horizontal',
     messages: 'bi-chat-dots-fill',
     drop:     'bi-folder-fill',
     domains:  'bi-globe2',
@@ -3500,11 +3499,16 @@ $(function () {
       ? vncList.map(p => row('online', p.name || (p.pub || '').slice(0, 12), '', null, 'vnc:' + p.pub)).join('')
       : empty('none');
 
+    // remote access — terminals (services/shell) + desktops (services/vnc)
+    // under one collapsible with section dividers.
+    const remoteBody =
+      section('terminals') + shellsBody
+      + section('desktops')  + desktopsBody;
+
     const treeHtml = (
       category('peers',     'network',   peers.length, peersBody)
       + category('messages',  'channels',  totalUnread || null, messagingBody)
-      + category('shells',    'terminals', shellList.length || null, shellsBody)
-      + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
+      + category('remote',    'remote access', (shellList.length + vncList.length) || null, remoteBody)
       // drop section hidden from the sidebar for now — uncomment to restore:
       // + category('drop',      'drop',      allFiles.length,
       //     section('available') + peerFilesBody

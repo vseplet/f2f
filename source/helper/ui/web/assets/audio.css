@@ -440,10 +440,8 @@
    icon and label share the colour. */
 .ax-tree-category[data-cat="peers"]    .ax-tree-cat-icon,
 .ax-tree-category[data-cat="peers"]    .ax-tree-label { color: #5aa9e6; }
-.ax-tree-category[data-cat="shells"]   .ax-tree-cat-icon,
-.ax-tree-category[data-cat="shells"]   .ax-tree-label { color: #5fbf7f; }
-.ax-tree-category[data-cat="desktops"] .ax-tree-cat-icon,
-.ax-tree-category[data-cat="desktops"] .ax-tree-label { color: #b18cf0; }
+.ax-tree-category[data-cat="remote"]   .ax-tree-cat-icon,
+.ax-tree-category[data-cat="remote"]   .ax-tree-label { color: #b18cf0; }
 .ax-tree-category[data-cat="messages"] .ax-tree-cat-icon,
 .ax-tree-category[data-cat="messages"] .ax-tree-label { color: #e87ab8; }
 .ax-tree-category[data-cat="drop"]     .ax-tree-cat-icon,
