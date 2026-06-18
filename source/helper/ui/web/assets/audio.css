@@ -2851,6 +2851,8 @@ a.ax-domain-link:hover {
     white-space: nowrap;
 }
 .ax-msg-doc:hover .ax-msg-doc-name { text-decoration: underline; }
+.ax-msg-torrent-name { cursor: pointer; }
+.ax-msg-torrent-name:hover { text-decoration: underline; }
 .ax-msg-doc-sub { color: var(--muted); font-size: 11px; }
 
 /* Torrent file: the same doc card as an inline file (only a transfer icon),

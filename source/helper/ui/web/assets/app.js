@@ -507,7 +507,7 @@ $(function () {
       return `<div class="ax-msg-doc ax-msg-torrent" data-infohash="${esc(f.info_hash)}" data-magnet="${esc(f.magnet || '')}">`
         + `<span class="ax-msg-doc-ic"><i class="bi bi-cloud-arrow-down-fill"></i></span>`
         + `<span class="ax-msg-doc-meta">`
-          + `<span class="ax-msg-doc-name">${tn}</span>`
+          + `<span class="ax-msg-doc-name ax-msg-torrent-name" title="открыть папку с файлом">${tn}</span>`
           + `<span class="ax-msg-doc-sub"><span class="ax-msg-doc-size">${esc(fmtBytes(f.size || 0))}</span><span class="ax-msg-torrent-status"></span></span>`
         + `</span>`
       + `</div>`;
@@ -1775,6 +1775,9 @@ $(function () {
       clearReplyTarget(); // a pending reply doesn't carry across conversations
       clearChatPending(); // nor a staged attachment
       loadConversation();
+      // Focus the composer so you can type right away. setTimeout: the tab was
+      // just un-hidden above, focus needs the element visible.
+      setTimeout(() => $('#chat-input').trigger('focus'), 0);
     }
     // Reconcile the thread panel with the URL.
     if (thread) showThread(thread); else closeThreadPanel();
@@ -2575,6 +2578,14 @@ $(function () {
     if (st && st.path) {
       $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ path: st.path }) });
     }
+  });
+  // Click the file name to open its folder — works for files we seed AND files
+  // we've downloaded; backend resolves the local path by info_hash. No local
+  // copy (not downloaded) → 404, silently ignored.
+  $('#tab-chat, #tab-note').on('click', '.ax-msg-torrent-name', function () {
+    const ih = $(this).closest('.ax-msg-torrent').attr('data-infohash');
+    if (!ih) return;
+    $.ajax({ url: '/api/files/reveal', method: 'POST', contentType: 'application/json', data: JSON.stringify({ info_hash: ih }) });
   });
   setInterval(pollTorrents, 2500);
 
