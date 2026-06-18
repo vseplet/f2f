@@ -93,7 +93,6 @@ type authSession struct {
 	scope       string
 	sub         string // attested peer pub
 	name        string
-	register    bool // true ⇒ first-time enrollment, else assertion
 	wa          *webauthn.SessionData
 	exp         time.Time
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/vseplet/f2f/source/helper/db/blocks"
 	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
@@ -159,18 +161,23 @@ func run(bind string, console bool, autostart bool) error {
 		}
 		return store.CampDir(id)
 	}
-	oidcCreds := oidc.NewCredStore(oidcDir)
 	oidcClients := oidc.NewClientStore(oidcDir)
 	oidcKeys := oidc.NewSignKeys(oidcDir)
-	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcCreds, oidcClients, oidcKeys)
-	proxySvc := proxy.New(dnsSvc, pkiSvc, oidcPort, busResolver{eng: eng}.PubForIP)
 
 	// Distributed DB substrate: one append-only signed log per camp
 	// (db.sqlite), replicated by anti-entropy over the bus. Block apps
 	// (notes now; docs/tasks/chat later) build on it. Push on every local
-	// commit; PullAll periodically (below) catches up offline gaps.
+	// commit; PullAll periodically (below) catches up offline gaps. Built
+	// before OIDC so the provider can read passkeys/profile from block.profile.
 	dbSvc := db.New(db.NewSQLiteStore(oidcDir))
 	blocksMgr := blocks.New(dbSvc)
+
+	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcClients, oidcKeys)
+	// Login creds + display name come solely from the synced block.profile
+	// (scope "profiles", keyed by peer pub) — there is no local passkeys.json.
+	oidcSvc.SetProfileSource(oidcProfiles{blocks: blocksMgr})
+	proxySvc := proxy.New(dnsSvc, pkiSvc, oidcPort, busResolver{eng: eng}.PubForIP)
+
 	channelsMgr := channels.New(blocksMgr) // channels are blocks in the "channels" scope
 	msgMgr := message.New(blocksMgr)       // messages are blocks in "message:<channelBid>"
 	dbSync := db.NewSync(dbSvc, dbBus{busSvc})
@@ -542,6 +549,58 @@ func (b oidcBackend) PeerName(pub string) string {
 		}
 	}
 	return ""
+}
+
+// profileFromBlocks reads a peer's block.profile (well-known "profiles" scope,
+// keyed by pub) and returns its public passkey credentials and display name
+// (first+last). Empty when there's no profile. Wired into OIDC via
+// SetProfileSource so login verifies against the synced profile, not the local
+// passkeys.json.
+func profileFromBlocks(b *blocks.Manager, pub string) ([]webauthn.Credential, string) {
+	blk := b.Block("profiles", pub)
+	if blk == nil || len(blk.Heads) == 0 {
+		return nil, ""
+	}
+	var c struct {
+		First    string                `json:"first"`
+		Last     string                `json:"last"`
+		Passkeys []webauthn.Credential `json:"passkeys"`
+	}
+	if err := json.Unmarshal(blk.Heads[len(blk.Heads)-1].Content, &c); err != nil {
+		return nil, ""
+	}
+	return c.Passkeys, strings.TrimSpace(c.First + " " + c.Last)
+}
+
+// oidcProfiles implements oidc.ProfileSource over the block engine: OIDC login
+// reads passkey creds, display names, and the enrolled-users list straight from
+// the synced block.profile (scope "profiles"), with no local passkeys.json.
+type oidcProfiles struct{ blocks *blocks.Manager }
+
+func (p oidcProfiles) Creds(pub string) []webauthn.Credential {
+	c, _ := profileFromBlocks(p.blocks, pub)
+	return c
+}
+
+func (p oidcProfiles) Name(pub string) string {
+	_, n := profileFromBlocks(p.blocks, pub)
+	return n
+}
+
+func (p oidcProfiles) WithCreds() map[string]int {
+	out := map[string]int{}
+	for _, b := range p.blocks.Blocks("profiles") {
+		if b == nil || b.Deleted || len(b.Heads) == 0 {
+			continue
+		}
+		var c struct {
+			Passkeys []webauthn.Credential `json:"passkeys"`
+		}
+		if json.Unmarshal(b.Heads[len(b.Heads)-1].Content, &c) == nil && len(c.Passkeys) > 0 {
+			out[b.BID] = len(c.Passkeys)
+		}
+	}
+	return out
 }
 
 // dbBus adapts *bus.Service to db.Bus. The only wrinkle is Handle: db.Bus

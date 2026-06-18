@@ -220,7 +220,10 @@ type PasskeyUser struct {
 // PasskeyUsers lists the peers with enrolled passkeys, named via the
 // backend roster.
 func (s *Service) PasskeyUsers() []PasskeyUser {
-	counts := s.creds.pubsWithCreds()
+	if s.profile == nil {
+		return nil
+	}
+	counts := s.profile.WithCreds()
 	out := make([]PasskeyUser, 0, len(counts))
 	for pub, n := range counts {
 		out = append(out, PasskeyUser{Pub: pub, Name: s.be.PeerName(pub), Credentials: n})
