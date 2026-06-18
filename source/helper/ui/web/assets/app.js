@@ -3494,9 +3494,10 @@ $(function () {
       + category('shells',    'terminals', shellList.length || null, shellsBody)
       + category('desktops',  'desktops',  vncList.length || null, desktopsBody)
       + category('messages',  'channels',  totalUnread || null, messagingBody)
-      + category('drop',      'drop',      allFiles.length,
-          section('available') + peerFilesBody
-          + section('sharing') + addRow('add/remove file', 'drop') + myFilesBody)
+      // drop section hidden from the sidebar for now — uncomment to restore:
+      // + category('drop',      'drop',      allFiles.length,
+      //     section('available') + peerFilesBody
+      //     + section('sharing') + addRow('add/remove file', 'drop') + myFilesBody)
       + category('domains',   'domains',   allDomains.length,
           addRow('add/remove domain', 'dns') + domainsBody
           + section('certificates') + trustedBody)

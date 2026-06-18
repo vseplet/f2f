@@ -135,7 +135,7 @@ func (s *Server) handleMessagesShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dst.Close()
-	pf, err := s.drop.ShareToScope(dstPath, bid) // seed pinned to this channel
+	pf, err := s.drop.Share(dstPath) // scope comes from the message block created below
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

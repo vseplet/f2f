@@ -106,7 +106,7 @@ func (s *Server) handleNotesShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dst.Close()
-	pf, err := s.drop.ShareToScope(dstPath, channel) // seed pinned to the note scope
+	pf, err := s.drop.Share(dstPath) // scope comes from the block.file created below
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

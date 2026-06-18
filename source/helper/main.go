@@ -133,8 +133,6 @@ func run(bind string, console bool, autostart bool) error {
 	pkiSvc.Register()
 	dnsSvc := dns.New(store, eng, busSvc)
 	dnsSvc.Register()
-	dropSvc := drop.New(eng, store.CampDir, busSvc)
-	dropSvc.Register()
 	callsSvc := calls.New(store, eng, busSvc)
 	callsSvc.Register()
 	tunnelSvc := tunnel.New(store, eng, busSvc)
@@ -181,6 +179,11 @@ func run(bind string, console bool, autostart bool) error {
 	// before OIDC so the provider can read passkeys/profile from block.profile.
 	dbSvc := db.New(db.NewSQLiteStore(campDir))
 	blocksMgr := blocks.New(dbSvc)
+
+	// File sharing: drop reads the blocks itself to learn which torrent files
+	// are referenced and in which channel scope (no file-scopes.json).
+	dropSvc := drop.New(eng, store.CampDir, busSvc, blocksMgr)
+	dropSvc.Register()
 
 	oidcSvc := oidc.New(oidcBackend{eng: eng}, oidcClients, oidcKeys)
 	// Login creds + display name come solely from the synced block.profile
