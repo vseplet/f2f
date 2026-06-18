@@ -32,6 +32,19 @@ $(function () {
 
   // ---- DOM ----
   const $bar = $('#ax-callbar');
+  // Ringtone for an incoming DM call (driven by renderBar: plays while the bar
+  // is in the 'incoming' state, stops on accept/decline/hangup/end).
+  const ringtone = new Audio('/sound/phone-call.mp3');
+  ringtone.loop = true;
+  ringtone.volume = 0.1;
+  function playRing() { if (ringtone.paused) ringtone.play().catch(() => {}); }
+  function stopRing() { ringtone.pause(); try { ringtone.currentTime = 0; } catch (_) {} }
+  // Ringback for the CALLER while waiting for pickup (the 'ringing' state).
+  const ringback = new Audio('/sound/charge.mp3');
+  ringback.loop = true;
+  ringback.volume = 0.1;
+  function playRingback() { if (ringback.paused) ringback.play().catch(() => {}); }
+  function stopRingback() { ringback.pause(); try { ringback.currentTime = 0; } catch (_) {} }
   const videoPeer = document.getElementById('call-video-peer');
   const videoSelf = document.getElementById('call-video-self');
   const tilePeer = document.getElementById('call-tile-peer');
@@ -464,12 +477,16 @@ $(function () {
         $bar.hide();
         $('#ax-callbar-incoming').css('display', 'none');
         $('#ax-callbar-ctrls').css('display', 'flex');
+        stopRing();
+        stopRingback();
         if (this.timer) { clearInterval(this.timer); this.timer = null; }
         return;
       }
       $bar.css('display', 'flex');
       const incoming = a.state === 'incoming'; // callee ringing — accept/decline
       const ringing = a.state === 'ringing';   // caller waiting for pickup
+      if (incoming) playRing(); else stopRing();
+      if (ringing) playRingback(); else stopRingback();
       $('#ax-callbar-incoming').css('display', incoming ? 'flex' : 'none');
       $('#ax-callbar-ctrls').css('display', incoming ? 'none' : 'flex');
       $('#ax-callbar-icon').attr('class', 'bi ' + (a.kind === 'group' ? 'bi-people-fill' : 'bi-telephone-fill'));
