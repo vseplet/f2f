@@ -350,6 +350,13 @@ $(function () {
   let chatNamesPending = false; // redraw the open chat once /api/status lands so
                                 // authors/title resolve to names, not pub prefixes
   const chatUnread = {};      // conversation key → unread count
+  // Soft chime when a new incoming message arrives (not our own echo/edit).
+  const msgSound = new Audio('/sound/quake-chat.mp3');
+  msgSound.volume = 0.3;
+  function playMsgSound() {
+    try { msgSound.currentTime = 0; } catch (_) {}
+    msgSound.play().catch(() => {});
+  }
 
   // nameForPub renders a peer pub as its display name (falls back to a fp-ish
   // prefix). Self resolves to "you". Drives message authorship in the UI.
@@ -1635,6 +1642,10 @@ $(function () {
         location.hash = '';
         return;
       }
+      // A new incoming text message (not our own echo, not an edit) → chime,
+      // whether the conversation is open or not. System lines (type !== 'text')
+      // and block/notif/notes events (returned above) don't ring.
+      if ((!m.type || m.type === 'text') && !m.mine && !m.edit_id) playMsgSound();
       // System lifecycle lines (create/add/remove) belong in the channel
       // view; render them too, not just text.
       if (chatConv && chatConv.kind === m.kind && chatConv.key === key) {

@@ -541,13 +541,14 @@ $(function () {
         this.myIP = (s && s.local_ip) || '';
         this.myName = (s && s.camp_name) || 'you';
       } catch (_) {}
-      // `target` is a messenger channel id ("<ownerPub>/<name>", started from
-      // a chat), or a call_id / sfu_host IP (clicked an existing meet row).
-      // A channel target binds: we join THAT channel's call or create one
-      // bound to it — never capture another channel's call. A specific
-      // target (digit-leading call_id or IP) is worth a few discovery
-      // retries because a peer's call may not have been polled yet.
-      const isChannel = (target || '').indexOf('/') > 0;
+      // `target` is a messenger channel id ("general" or "<fp16>-<rand>", started
+      // from a chat), or a call_id ("<channel>/<initiator>") / sfu_host IP
+      // (clicked an existing meet row). A channel target binds: we join THAT
+      // channel's call or create one bound to it — never capture another
+      // channel's call. A specific target (digit-leading call_id or IP) is worth
+      // a few discovery retries because a peer's call may not have been polled yet.
+      // A channel key has neither a "/" (call_id) nor dotted-quad (IP) shape.
+      const isChannel = !!target && !target.includes('/') && !/^\d+\.\d+\.\d+\.\d+$/.test(target);
       this.channel = isChannel ? target : '';
       const specific = /^\d/.test(target || '');
       const call = await this.findCall(target, specific ? 4 : 1, isChannel);
@@ -1094,11 +1095,11 @@ $(function () {
     const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
     const m = h.match(/^channel:(.+)$/);
     if (!m) return;
-    let key = m[1];
-    if (key === 'general') key = '*/general'; // de-alias to the real channel id
+    const key = m[1];
     const title = $('#chat-title').text().replace(/^# /, '');
-    // A "/"-bearing key is a room → group call; a bare peer pub is a DM.
-    if (key.includes('/')) Call.start('group', key, title || key);
+    // Same discriminator as convKind(): a channel key is "general" or a channel
+    // bid ("<fp16>-<rand>", has a dash); a bare peer pub (64 hex, no dash) is a DM.
+    if (key === 'general' || key.includes('-')) Call.start('group', key, title || key);
     else Call.start('dm', key);
   });
 
