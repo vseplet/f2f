@@ -1125,14 +1125,57 @@
                     </div>
                     <div class="ax-section-title ax-chat-header">
                         <span id="chat-title">— chat</span>
+                        <!-- resource buttons (left): this channel's shared resources -->
                         <button
                             type="button"
-                            id="chat-clear"
+                            id="chat-secrets"
                             class="ax-engine-btn ax-chat-call"
-                            title="clear messages (local only)"
-                            aria-label="clear messages"
+                            title="secrets shared here"
+                            aria-label="secrets"
                             style="display: none"
-                        ><i class="bi bi-eraser-fill"></i></button>
+                        ><i class="bi bi-key-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-files"
+                            class="ax-engine-btn ax-chat-call"
+                            title="files shared here"
+                            aria-label="files"
+                            style="display: none"
+                        ><i class="bi bi-folder-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-remote"
+                            class="ax-engine-btn ax-chat-call"
+                            title="remote access shared here"
+                            aria-label="remote access"
+                            style="display: none"
+                        ><i class="bi bi-pc-display-horizontal"></i></button>
+                        <button
+                            type="button"
+                            id="chat-domains"
+                            class="ax-engine-btn ax-chat-call"
+                            title="domains shared here"
+                            aria-label="domains"
+                            style="display: none"
+                        ><i class="bi bi-globe2"></i></button>
+                        <button
+                            type="button"
+                            id="chat-tunnel"
+                            class="ax-engine-btn ax-chat-call"
+                            title="tunnel shared here"
+                            aria-label="tunnel"
+                            style="display: none"
+                        ><i class="bi bi-hdd-network-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-oidc"
+                            class="ax-engine-btn ax-chat-call"
+                            title="apps shared here"
+                            aria-label="apps"
+                            style="display: none"
+                        ><i class="bi bi-person-badge-fill"></i></button>
+                        <span class="ax-chat-header-spacer"></span>
+                        <!-- notes / meta / comms (right) -->
                         <button
                             type="button"
                             id="chat-notes"
@@ -1149,6 +1192,14 @@
                             aria-label="members"
                             style="display: none"
                         ><i class="bi bi-people-fill"></i></button>
+                        <button
+                            type="button"
+                            id="chat-clear"
+                            class="ax-engine-btn ax-chat-call"
+                            title="clear messages (local only)"
+                            aria-label="clear messages"
+                            style="display: none"
+                        ><i class="bi bi-eraser-fill"></i></button>
                         <button
                             type="button"
                             id="chat-call"
