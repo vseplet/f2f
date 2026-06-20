@@ -3432,6 +3432,10 @@ a.ax-domain-link:hover {
 .ax-secrets-empty { color: var(--muted); font-size: 12px; }
 .ax-secrets-err { color: #e0686e; font-size: 12px; min-height: 1em; }
 .ax-sec-vault { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+/* a vault owned by another peer (read-only): amber left accent + "shared by" pill */
+.ax-sec-remote { border-left: 3px solid #e0a64e; background: color-mix(in srgb, #e0a64e 5%, transparent); }
+.ax-sec-shared-by { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #e0a64e; border: 1px solid #e0a64e; border-radius: 4px; padding: 1px 6px; }
+.ax-sec-via { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-right: 2px; }
 .ax-sec-vhead { display: flex; align-items: center; gap: 8px; }
 .ax-sec-vname { font-weight: 600; }
 .ax-sec-scope, .ax-sec-owner { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }

@@ -2269,11 +2269,23 @@ $(function () {
   }
   function renderEnv(oe, mine) {
     const e = oe.env, chans = e.channels || [];
-    let chips = chans.map(function (bid) {
-      return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(targetLabel(bid))
-        + (mine ? '<button type="button" class="ax-sec-chip-x" title="unshare">×</button>' : '') + '</span>';
-    }).join('');
-    if (!chans.length) chips = '<span class="ax-sec-scope">' + (mine ? 'private' : '') + '</span>';
+    let chips;
+    if (mine) {
+      chips = chans.map(function (bid) {
+        return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(targetLabel(bid))
+          + '<button type="button" class="ax-sec-chip-x" title="unshare">×</button></span>';
+      }).join('');
+      if (!chans.length) chips = '<span class="ax-sec-scope">private</span>';
+    } else {
+      // remote: show only the channel(s) WE receive it through (i.e. in our
+      // share targets) — that's the "via" — not the owner's other channels.
+      const via = chans.filter(function (b) { return secretTargets.some(function (t) { return t.bid === b; }); });
+      chips = via.length
+        ? '<span class="ax-sec-via">via</span>' + via.map(function (bid) {
+            return '<span class="ax-sec-chip">' + esc(targetLabel(bid)) + '</span>';
+          }).join('')
+        : '';
+    }
     let h = '<div class="ax-sec-env" data-eid="' + escA(e.id) + '"><div class="ax-sec-ehead">'
       + '<span class="ax-sec-ename">' + esc(e.name) + '</span>'
       + '<span class="ax-sec-chips">' + chips + '</span>';
@@ -2305,12 +2317,12 @@ $(function () {
         head += '<button type="button" class="ax-sec-env-add">+ env</button>'
           + '<button type="button" class="ax-sec-vdel" title="delete vault">✕</button>';
       } else {
-        head += '<span class="ax-sec-owner">' + esc(ov.owner_name || '') + '</span>';
+        head += '<span class="ax-sec-shared-by"><i class="bi bi-share-fill"></i> shared by ' + esc(ov.owner_name || 'peer') + '</span>';
       }
       head += '</div>';
       let body = (ov.environments || []).map(function (oe) { return renderEnv(oe, mine); }).join('');
       if (mine && !(ov.environments || []).length) body = '<div class="ax-secrets-empty">no environments — “+ env” to add one</div>';
-      $c.append('<div class="ax-sec-vault" data-vid="' + escA(v.id) + '">' + head + body + '</div>');
+      $c.append('<div class="ax-sec-vault' + (mine ? '' : ' ax-sec-remote') + '" data-vid="' + escA(v.id) + '">' + head + body + '</div>');
     });
   }
   $('#sec-vault-create').on('click', function () {
