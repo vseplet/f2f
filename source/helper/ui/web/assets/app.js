@@ -15,6 +15,7 @@ $(function () {
   // calls openSecrets() during init — a `let x=''` further down would re-run its
   // initializer AFTER that, clobbering the channel filter back to '' on reload.
   let secretFilter = '';       // channel bid the secrets tab is filtered to ('' = all)
+  let oidcFilter = '';         // channel bid the OIDC tab is filtered to ('' = all)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -1575,6 +1576,15 @@ $(function () {
   $('#chat-notes').on('click', function () {
     if (chatConv) location.hash = noteRoute(chatConv.key);
   });
+  // Apps whose login is gated by THIS conversation → OIDC tab, filtered to it.
+  $('#chat-oidc').on('click', function () {
+    if (!chatConv) return;
+    if (chatConv.kind === 'channel') { location.hash = 'oidc:' + chatConv.key; return; }
+    $.getJSON('/api/notes/scope?kind=dm&key=' + encodeURIComponent(chatConv.key)).done(function (d) {
+      const bid = (d && d.scope || '').replace(/^note:/, '');
+      if (bid) location.hash = 'oidc:' + bid;
+    });
+  });
   // Secrets shared in THIS conversation → secrets tab, filtered to it. A channel
   // key IS its bid; a DM's key is the peer pub, so resolve its dm-<hash> bid via
   // the shared scope endpoint (same chanBID the rest uses).
@@ -1734,7 +1744,17 @@ $(function () {
     if (tm) { activateTab(tm[1]); return; }
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
-    if (h === 'oidc') { activateTab('oidc'); openOIDC(); return; }
+    // oidc[:<channelKey>] — bare opens all apps; with a key, filters to apps
+    // whose login is gated by that channel.
+    const oidcM = h.match(/^oidc(?::(.+))?$/);
+    if (oidcM) {
+      activateTab('oidc');
+      let key = oidcM[1] || '';
+      if (key === 'general') key = GENERAL_ID;
+      oidcFilter = key;
+      openOIDC();
+      return;
+    }
     // secrets[:<channelKey>] — bare opens the full tree; with a key, filters to
     // the secrets shared in that channel.
     const secM = h.match(/^secrets(?::(.+))?$/);
@@ -1808,7 +1828,7 @@ $(function () {
       $('#chat-call, #chat-clear, #chat-notes').show(); // call + clear + notes: both DMs and channels
       $('#chat-members').toggle(kind === 'channel'); // members: channels only (a DM is implicitly two)
       // per-conversation resource buttons: both channels and DMs (a DM is a channel too)
-      $('#chat-secrets, #chat-files, #chat-remote, #chat-domains, #chat-tunnel, #chat-oidc').show();
+      $('#chat-secrets, #chat-remote, #chat-domains, #chat-tunnel, #chat-oidc').show();
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
       clearChatPending(); // nor a staged attachment
@@ -2091,6 +2111,17 @@ $(function () {
   function openOIDC() {
     $('#oidc-err').text('');
     $('#oidc-new').addClass('hidden').empty();
+    // Load share targets FIRST so the per-app "+ allow…" picker is populated
+    // when clients render (else the client fetch can win the race → no picker).
+    $.getJSON('/api/secrets/targets')
+      .done(function (t) { oidcTargets = t || []; })
+      .always(loadOIDC);
+  }
+  function loadOIDC() {
+    // Seed the new-app picker from the active channel filter (creating an app
+    // while viewing a channel pre-binds it there).
+    newAppChannels = oidcFilter ? [oidcFilter] : [];
+    renderNewAppChannels();
     $.getJSON('/api/oidc').done(function (d) {
       $('#oidc-issuer').text(d.issuer || '(not in a camp)');
       $('#oidc-discovery').text(d.discovery || '—');
@@ -2103,9 +2134,63 @@ $(function () {
     });
   }
 
+  function oidcTargetLabel(bid) {
+    const t = (oidcTargets || []).find(function (x) { return x.bid === bid; });
+    if (!t) return bid;
+    return (t.kind === 'dm' ? '@ ' : '# ') + (t.label || bid);
+  }
+  // renderOIDCChannels paints the per-app login allowlist: chips for each bound
+  // channel/DM (removable) + a "+ allow…" select. Empty = the app is locked.
+  function renderOIDCChannels($row, cl) {
+    const chans = cl.channels || [];
+    const $box = $row.find('.ax-oidc-chans');
+    let chips = chans.map(function (bid) {
+      return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(oidcTargetLabel(bid))
+        + '<button type="button" class="ax-oidc-chan-x" title="revoke">×</button></span>';
+    }).join('');
+    if (!chans.length) chips = '<span class="ax-oidc-locked">🔒 locked — no one can log in</span>';
+    const avail = (oidcTargets || []).filter(function (t) { return chans.indexOf(t.bid) === -1; });
+    let sel = '';
+    if (avail.length) {
+      sel = '<select class="ax-sec-share ax-oidc-allow" title="allow a channel to log in"><option value="">+ allow…</option>'
+        + avail.map(function (t) { return '<option value="' + escA(t.bid) + '">' + (t.kind === 'dm' ? '@ ' : '# ') + esc(t.label || t.bid) + '</option>'; }).join('')
+        + '</select>';
+    }
+    $box.html('<span class="ax-sec-chips">' + chips + '</span>' + sel);
+    function setChannels(next) {
+      secPost('/api/oidc/clients/channels', { id: cl.client_id, channels: next })
+        .done(openOIDC).fail(function (x) { $('#oidc-err').text('update failed: ' + (x.responseText || x.status)); });
+    }
+    $box.find('.ax-oidc-allow').on('change', function () {
+      const bid = $(this).val(); if (!bid) return;
+      setChannels(chans.concat([bid]));
+    });
+    $box.find('.ax-oidc-chan-x').on('click', function () {
+      const bid = $(this).closest('.ax-sec-chip').data('bid');
+      setChannels(chans.filter(function (b) { return b !== bid; }));
+    });
+  }
+
+  function renderOIDCFilterBar() {
+    $('#oidc-filterbar').remove();
+    if (!oidcFilter) return;
+    const t = (oidcTargets || []).find(function (x) { return x.bid === oidcFilter; });
+    const label = t ? (t.kind === 'dm' ? '@ ' : '# ') + (t.label || oidcFilter) : oidcFilter;
+    const html = '<div id="oidc-filterbar" class="ax-sec-filterbar">apps gated by '
+      + '<b>' + esc(label) + '</b><button type="button" id="oidc-filter-clear">show all ✕</button></div>';
+    $('#oidc-clients').before(html);
+  }
+  $(document).on('click', '#oidc-filter-clear', function () { location.hash = 'oidc'; });
+
   function renderOIDCClients(clients) {
+    renderOIDCFilterBar();
+    // When filtered to a channel, show only apps whose allowlist includes it.
+    if (oidcFilter) clients = clients.filter(function (cl) { return (cl.channels || []).indexOf(oidcFilter) !== -1; });
     const $c = $('#oidc-clients');
-    if (!clients.length) { $c.html('<div class="ax-oidc-empty">no applications yet</div>'); return; }
+    if (!clients.length) {
+      $c.html('<div class="ax-oidc-empty">' + (oidcFilter ? 'no apps gated by this channel' : 'no applications yet') + '</div>');
+      return;
+    }
     $c.empty();
     for (const cl of clients) {
       const kind = cl.confidential ? 'confidential' : 'public';
@@ -2117,6 +2202,8 @@ $(function () {
             '<span class="ax-oidc-ckind">' + kind + '</span>' + pkceTag +
             '<button class="ax-oidc-del" title="delete">✕</button>' +
           '</div>' +
+          '<div class="ax-oidc-clabel">login allowed for</div>' +
+          '<div class="ax-oidc-chans"></div>' +
           '<div class="ax-oidc-cid">client_id: <code></code></div>' +
           '<div class="ax-oidc-csecret">client_secret: <code></code></div>' +
           '<div class="ax-oidc-clabel">callback URLs</div>' +
@@ -2124,6 +2211,7 @@ $(function () {
           '<div class="ax-oidc-clabel ax-oidc-llabel">logout URLs</div>' +
           '<div class="ax-oidc-cred ax-oidc-lred"></div>' +
         '</div>');
+      renderOIDCChannels($row, cl);
       $row.find('.ax-oidc-cname').text(cl.client_name || '(unnamed)');
       $row.find('.ax-oidc-cid code').text(cl.client_id);
       if (cl.client_secret) {
@@ -2172,6 +2260,36 @@ $(function () {
     }
   }
 
+  // newAppChannels is the pending allowlist for the app being created. Seeded
+  // from the active channel filter so "add app" from a channel pre-binds it.
+  let newAppChannels = [];
+  function renderNewAppChannels() {
+    const $box = $('#oidc-new-chans');
+    let chips = newAppChannels.map(function (bid) {
+      return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(oidcTargetLabel(bid))
+        + '<button type="button" class="ax-oidc-newchan-x" title="remove">×</button></span>';
+    }).join('');
+    if (!newAppChannels.length) chips = '<span class="ax-oidc-locked">🔒 unless you pick one, no one can log in</span>';
+    const avail = (oidcTargets || []).filter(function (t) { return newAppChannels.indexOf(t.bid) === -1; });
+    let sel = '';
+    if (avail.length) {
+      sel = '<select class="ax-sec-share" id="oidc-new-allow"><option value="">+ allow…</option>'
+        + avail.map(function (t) { return '<option value="' + escA(t.bid) + '">' + (t.kind === 'dm' ? '@ ' : '# ') + esc(t.label || t.bid) + '</option>'; }).join('')
+        + '</select>';
+    }
+    $box.html('<span class="ax-sec-chips">' + chips + '</span>' + sel);
+  }
+  $(document).on('change', '#oidc-new-allow', function () {
+    const bid = $(this).val(); if (!bid) return;
+    if (newAppChannels.indexOf(bid) === -1) newAppChannels.push(bid);
+    renderNewAppChannels();
+  });
+  $(document).on('click', '.ax-oidc-newchan-x', function () {
+    const bid = $(this).closest('.ax-sec-chip').data('bid');
+    newAppChannels = newAppChannels.filter(function (b) { return b !== bid; });
+    renderNewAppChannels();
+  });
+
   function createOIDCClient() {
     $('#oidc-err').text('');
     const name = $('#oidc-name').val().trim();
@@ -2186,6 +2304,7 @@ $(function () {
         logout_uris: lines('#oidc-logout'),
         public: $('#oidc-public').is(':checked'),
         pkce: $('#oidc-pkce').is(':checked'),
+        channels: newAppChannels.slice(),
       }),
     }).done(function (d) {
       // Show the credentials once — the secret is never retrievable again.
@@ -2196,6 +2315,8 @@ $(function () {
       }
       $('#oidc-new').removeClass('hidden').html(html);
       $('#oidc-name').val(''); $('#oidc-redirects').val(''); $('#oidc-logout').val('');
+      newAppChannels = oidcFilter ? [oidcFilter] : [];
+      renderNewAppChannels();
       // Refresh only the list — don't clear the one-time secret panel.
       $.getJSON('/api/oidc').done(function (d) { renderOIDCClients(d.clients || []); });
     }).fail(function (x) {
@@ -2903,6 +3024,7 @@ $(function () {
   let vncSeen = {};        // /api/vnc/peers
   let oidcClients = [];    // /api/oidc clients, for the sidebar list
   let oidcUsers = [];      // /api/oidc passkey users, for the OIDC tab
+  let oidcTargets = [];    // /api/secrets/targets — channels+DMs to gate app login
   let secretVaults = [];   // /api/secrets vault names (ours), for the sidebar list
   function markSeen(seen, list) {
     if (!Array.isArray(list)) return;

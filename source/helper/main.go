@@ -225,6 +225,9 @@ func run(bind string, console bool, autostart bool) error {
 	// served to fellow members on demand over the bus, gated by IsMember.
 	secretsSvc := secrets.New(eng, store.CampDir, busSvc)
 	secretsSvc.SetMembershipCheck(channelsMgr.IsMember)
+	// Gate app login by channel membership: only members of an app's listed
+	// channels may authorize (same predicate as messages/secrets/drop).
+	oidcSvc.SetMembershipCheck(channelsMgr.IsMember)
 	secretsSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push

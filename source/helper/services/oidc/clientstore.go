@@ -32,6 +32,10 @@ type client struct {
 	// ForcePKCE requires PKCE even for a confidential client. Public
 	// clients always require PKCE regardless.
 	ForcePKCE bool `json:"pkce,omitempty"`
+	// Channels gates who may authorize into this app: only peers who are a
+	// member of at least one listed channel (bid) may complete /authorize.
+	// Empty = nobody can log in (the app is locked until bound to a channel).
+	Channels []string `json:"channels,omitempty"`
 }
 
 // needsPKCE reports whether /authorize must demand a code_challenge for
@@ -130,6 +134,7 @@ type ClientSpec struct {
 	LogoutURIs   []string
 	Confidential bool
 	ForcePKCE    bool
+	Channels     []string
 }
 
 // Create registers a new client from spec. Confidential clients get a
@@ -139,6 +144,7 @@ func (s *ClientStore) Create(spec ClientSpec) (*client, string, error) {
 		ID: randToken(16), Name: spec.Name,
 		RedirectURIs: spec.RedirectURIs, LogoutURIs: spec.LogoutURIs,
 		Confidential: spec.Confidential, ForcePKCE: spec.ForcePKCE,
+		Channels: spec.Channels,
 	}
 	var secret string
 	if spec.Confidential {
@@ -167,14 +173,36 @@ type ClientInfo struct {
 	LogoutURIs   []string `json:"logout_uris,omitempty"`
 	Confidential bool     `json:"confidential"`
 	PKCE         bool     `json:"pkce"`
+	Channels     []string `json:"channels"`
 	Secret       string   `json:"client_secret,omitempty"` // shown in the admin UI by request
 }
 
 func (c *client) info() ClientInfo {
 	return ClientInfo{
 		ID: c.ID, Name: c.Name, RedirectURIs: c.RedirectURIs, LogoutURIs: c.LogoutURIs,
-		Confidential: c.Confidential, PKCE: c.ForcePKCE, Secret: c.Secret,
+		Confidential: c.Confidential, PKCE: c.ForcePKCE, Channels: c.Channels, Secret: c.Secret,
 	}
+}
+
+// SetChannels replaces the channel allowlist of a client.
+func (s *ClientStore) SetChannels(id string, channels []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.load()
+	if err != nil {
+		return err
+	}
+	c, ok := m[id]
+	if !ok {
+		return fmt.Errorf("oidc: unknown client_id")
+	}
+	c.Channels = channels
+	return s.save(m)
+}
+
+// SetClientChannels replaces an app's channel allowlist.
+func (s *Service) SetClientChannels(id string, channels []string) error {
+	return s.clients.SetChannels(id, channels)
 }
 
 // ListClients returns the registry for the admin UI (no secrets).

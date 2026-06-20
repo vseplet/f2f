@@ -1136,14 +1136,6 @@
                         ><i class="bi bi-key-fill"></i></button>
                         <button
                             type="button"
-                            id="chat-files"
-                            class="ax-engine-btn ax-chat-call"
-                            title="files shared here"
-                            aria-label="files"
-                            style="display: none"
-                        ><i class="bi bi-folder-fill"></i></button>
-                        <button
-                            type="button"
                             id="chat-remote"
                             class="ax-engine-btn ax-chat-call"
                             title="remote access shared here"
@@ -1333,6 +1325,8 @@
                                 public client (SPA/native — no secret, PKCE required)</label>
                             <label class="ax-oidc-conf"><input type="checkbox" id="oidc-pkce">
                                 require PKCE (confidential clients — most server apps don't need it)</label>
+                            <div class="ax-oidc-label">login allowed for</div>
+                            <div id="oidc-new-chans" class="ax-oidc-chans"></div>
                             <button type="button" id="oidc-create" class="ax-engine-btn">create client</button>
                             <div id="oidc-new" class="ax-oidc-new hidden"></div>
                             <div id="oidc-err" class="ax-oidc-err"></div>

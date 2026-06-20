@@ -35,7 +35,11 @@ func newTestService(t *testing.T) (*Service, *identity.Identity) {
 	be := &fakeBackend{id: id, names: map[string]string{id.PubHex(): "alice"}}
 	dir := t.TempDir()
 	dirFn := func() string { return dir }
-	return New(be, NewClientStore(dirFn), NewSignKeys(dirFn)), id
+	svc := New(be, NewClientStore(dirFn), NewSignKeys(dirFn))
+	// Permissive membership gate for tests; gate behaviour is covered separately
+	// in TestAuthorizeChannelGate.
+	svc.SetMembershipCheck(func(string, string) bool { return true })
+	return svc, id
 }
 
 // rsaPub returns the service's RSA public key for verifying minted tokens.
@@ -107,7 +111,7 @@ func TestTokenAndUserinfo(t *testing.T) {
 	wantIss := srv.URL // httptest is plain http; issuer mirrors the request scheme
 
 	verifier, challenge := pkce()
-	c, _, _ := svc.clients.Create(ClientSpec{Name: "gitea", RedirectURIs: []string{"https://gitea.bob.f2f/cb"}})
+	c, _, _ := svc.clients.Create(ClientSpec{Name: "gitea", RedirectURIs: []string{"https://gitea.bob.f2f/cb"}, Channels: []string{"team"}})
 	svc.mu.Lock()
 	svc.codes["thecode"] = &authCode{
 		clientID: c.ID, redirectURI: "https://gitea.bob.f2f/cb",
@@ -171,7 +175,7 @@ func TestTokenAndUserinfo(t *testing.T) {
 // falls back to the local identity.
 func TestAuthorizeRendersPasskeyPage(t *testing.T) {
 	svc, _ := newTestService(t)
-	c, _, _ := svc.clients.Create(ClientSpec{Name: "myapp", RedirectURIs: []string{"https://app.bob.f2f/cb"}})
+	c, _, _ := svc.clients.Create(ClientSpec{Name: "myapp", RedirectURIs: []string{"https://app.bob.f2f/cb"}, Channels: []string{"team"}})
 	srv := httptest.NewServer(svc.Handler())
 	defer srv.Close()
 
@@ -205,7 +209,7 @@ func TestAuthorizeRendersPasskeyPage(t *testing.T) {
 func TestPKCEMismatchRejected(t *testing.T) {
 	svc, _ := newTestService(t)
 	_, challenge := pkce()
-	c, _, _ := svc.clients.Create(ClientSpec{Name: "cid", RedirectURIs: []string{"https://app.bob.f2f/cb"}})
+	c, _, _ := svc.clients.Create(ClientSpec{Name: "cid", RedirectURIs: []string{"https://app.bob.f2f/cb"}, Channels: []string{"team"}})
 	svc.mu.Lock()
 	svc.codes["thecode"] = &authCode{
 		clientID: c.ID, redirectURI: "https://app.bob.f2f/cb",
@@ -234,7 +238,7 @@ func TestConfidentialClientSecret(t *testing.T) {
 	srv := httptest.NewServer(svc.Handler())
 	defer srv.Close()
 
-	c, secret, _ := svc.clients.Create(ClientSpec{Name: "affine", RedirectURIs: []string{"https://affine.bob.f2f/cb"}, Confidential: true})
+	c, secret, _ := svc.clients.Create(ClientSpec{Name: "affine", RedirectURIs: []string{"https://affine.bob.f2f/cb"}, Confidential: true, Channels: []string{"team"}})
 	if secret == "" {
 		t.Fatal("confidential client got no secret")
 	}
@@ -279,4 +283,59 @@ func TestRegisterRejectsNonF2FRedirect(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for off-overlay redirect, got %d", resp.StatusCode)
 	}
+}
+
+// TestAuthorizeChannelGate covers the membership gate: a peer in one of the
+// app's channels reaches the passkey page; a peer in none is bounced with
+// access_denied (a 302 to the redirect_uri) and never sees the login page.
+func TestAuthorizeChannelGate(t *testing.T) {
+	svc, id := newTestService(t)
+	// Allow only members of "team"; the local subject (id) is a member of "team".
+	svc.SetMembershipCheck(func(bid, pub string) bool {
+		return bid == "team" && pub == id.PubHex()
+	})
+	srv := httptest.NewServer(svc.Handler())
+	defer srv.Close()
+	// don't follow the access_denied redirect (it points at a non-resolvable host)
+	cli := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	_, challenge := pkce()
+	get := func(c *client) *http.Response {
+		q := url.Values{
+			"client_id": {c.ID}, "redirect_uri": {"https://app.bob.f2f/cb"},
+			"response_type": {"code"}, "scope": {"openid"}, "state": {"s"},
+			"code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		}
+		resp, err := cli.Get(srv.URL + "/authorize?" + q.Encode())
+		if err != nil {
+			t.Fatalf("authorize: %v", err)
+		}
+		return resp
+	}
+
+	// member: app bound to "team" → 200 passkey page
+	member, _, _ := svc.clients.Create(ClientSpec{Name: "ok", RedirectURIs: []string{"https://app.bob.f2f/cb"}, Channels: []string{"team"}})
+	resp := get(member)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("member should reach passkey page, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// non-member: app bound to a channel the subject isn't in → access_denied
+	other, _, _ := svc.clients.Create(ClientSpec{Name: "no", RedirectURIs: []string{"https://app.bob.f2f/cb"}, Channels: []string{"strangers"}})
+	resp = get(other)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("non-member should be redirected, got %d", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "access_denied") {
+		t.Fatalf("expected access_denied redirect, got %q", loc)
+	}
+	resp.Body.Close()
+
+	// unbound app (no channels) → nobody may log in
+	locked, _, _ := svc.clients.Create(ClientSpec{Name: "locked", RedirectURIs: []string{"https://app.bob.f2f/cb"}})
+	resp = get(locked)
+	if resp.StatusCode != http.StatusFound || !strings.Contains(resp.Header.Get("Location"), "access_denied") {
+		t.Fatalf("unbound app must deny, got %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp.Body.Close()
 }

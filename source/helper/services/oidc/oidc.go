@@ -92,6 +92,11 @@ type Service struct {
 	// impossible. There is no local passkeys.json.
 	profile ProfileSource
 
+	// isMember gates /authorize by channel membership (wired via
+	// SetMembershipCheck over channels.IsMember). A peer may log into an app only
+	// if it belongs to at least one of the app's listed channels.
+	isMember func(bid, pub string) bool
+
 	mu       sync.Mutex
 	codes    map[string]*authCode
 	sessions map[string]*authSession // ceremony id (cookie) → in-flight /authorize
@@ -113,6 +118,26 @@ func New(be Backend, clients *ClientStore, keys *SignKeys) *Service {
 // SetProfileSource wires the synced block.profile as the source of login creds
 // and display name. Required for login to work (no profile source ⇒ no creds).
 func (s *Service) SetProfileSource(p ProfileSource) { s.profile = p }
+
+// SetMembershipCheck wires the channel-membership predicate (channels.IsMember)
+// used to gate /authorize. Without it, every login is denied (fail-closed).
+func (s *Service) SetMembershipCheck(fn func(bid, pub string) bool) { s.isMember = fn }
+
+// allowedTo reports whether peer pub may authorize into client c: it must be a
+// member of at least one of c's listed channels. No channels ⇒ denied. This is
+// the same membership gate that governs reading secrets — explicit, no implicit
+// owner bypass or open-to-camp fallback.
+func (s *Service) allowedTo(c *client, pub string) bool {
+	if s.isMember == nil {
+		return false
+	}
+	for _, bid := range c.Channels {
+		if s.isMember(bid, pub) {
+			return true
+		}
+	}
+	return false
+}
 
 // credsFor returns a peer's passkey credentials from its synced block.profile,
 // or nil if there's no profile source / no passkey.
@@ -300,6 +325,13 @@ func (s *Service) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	sub := s.attestedPeer(r)
 	if sub == "" {
 		http.Error(w, "no attested overlay identity", http.StatusUnauthorized)
+		return
+	}
+	// Channel gate: only a member of one of the app's listed channels may log
+	// in. Denied BEFORE the passkey ceremony — an unauthorized peer never even
+	// sees the login page. Sent back to the client as access_denied per spec.
+	if !s.allowedTo(c, sub) {
+		redirectErr(w, r, redirectURI, state, "access_denied", "not a member of this app's channels")
 		return
 	}
 
