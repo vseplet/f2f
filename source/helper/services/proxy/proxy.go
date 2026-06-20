@@ -52,6 +52,9 @@ type Service struct {
 	// peerByOverlayIP resolves a tunnel client IP to its pub for the
 	// attested-identity header. nil ⇒ no attestation injected.
 	peerByOverlayIP func(ip string) string
+	// isMember gates a domain by channel membership (channels.IsMember).
+	// Applied to tunnel-facing requests only. nil ⇒ every remote request denied.
+	isMember func(bid, pub string) bool
 
 	mu   sync.Mutex
 	srvs []*http.Server
@@ -66,6 +69,25 @@ type Service struct {
 // attestHeader); pass 0/nil to disable it.
 func New(dnsSvc *dns.Service, pkiSvc *pki.Service, oidcPort int, peerByOverlayIP func(ip string) string) *Service {
 	return &Service{dns: dnsSvc, pki: pkiSvc, oidcPort: oidcPort, peerByOverlayIP: peerByOverlayIP}
+}
+
+// SetMembershipCheck wires the channel-membership predicate (channels.IsMember)
+// used to gate domains for remote (tunnel-facing) requests.
+func (s *Service) SetMembershipCheck(fn func(bid, pub string) bool) { s.isMember = fn }
+
+// domainAllowed reports whether pub may reach a domain exposed to channels: it
+// must be a member of at least one. Empty channels / no predicate ⇒ denied
+// (fail-closed). The owner's own loopback requests bypass this (see caller).
+func (s *Service) domainAllowed(channels []string, pub string) bool {
+	if s.isMember == nil {
+		return false
+	}
+	for _, bid := range channels {
+		if s.isMember(bid, pub) {
+			return true
+		}
+	}
+	return false
 }
 
 // Start brings up the reverse-proxy listeners for camp campID, bound on
@@ -237,6 +259,7 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 	var (
 		port   int
 		upHost string
+		chans  []string
 	)
 	mine := s.dns.MyDomains()
 	if loopback {
@@ -244,16 +267,14 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 	}
 	for _, d := range mine {
 		if !dns.IsWildcardLabel(d.Name) && strings.EqualFold(d.Name, label) {
-			port = d.Port
-			upHost = d.Host
+			port, upHost, chans = d.Port, d.Host, d.Channels
 			break
 		}
 	}
 	if port == 0 {
 		for _, d := range mine {
 			if dns.IsWildcardLabel(d.Name) && dns.MatchesWildcard(d.Name, label) {
-				port = d.Port
-				upHost = d.Host
+				port, upHost, chans = d.Port, d.Host, d.Channels
 				break
 			}
 		}
@@ -263,6 +284,13 @@ func (s *Service) handleProxy(loopback bool, w http.ResponseWriter, r *http.Requ
 	}
 	if port == 0 {
 		http.Error(w, "no such domain published locally", http.StatusNotFound)
+		return
+	}
+	// Channel gate for remote peers. Loopback is the owner's own machine (the
+	// portal/self), never gated. A tunnel-facing request must come from a member
+	// of one of the domain's channels.
+	if !loopback && !s.domainAllowed(chans, attestedPub) {
+		http.Error(w, "not a member of this domain's channels", http.StatusForbidden)
 		return
 	}
 

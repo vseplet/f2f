@@ -62,6 +62,10 @@ type Entry struct {
 	Proto           string `json:"proto,omitempty"`
 	Health          string `json:"health,omitempty"`            // "ok" | "fail" | "" (unknown)
 	HealthCheckedAt int64  `json:"health_checked_at,omitempty"` // unix seconds
+	// Channels gates who may reach this domain through the reverse-proxy: only a
+	// peer who is a member of at least one listed channel (bid). Empty = no
+	// remote peer may reach it (the owner still reaches it on loopback).
+	Channels []string `json:"channels,omitempty"`
 }
 
 // UpstreamHost returns the effective host the reverse-proxy and
@@ -90,6 +94,10 @@ type Service struct {
 	store *config.Store
 	eng   *engine.Engine
 	bus   *bus.Service
+
+	// isMember gates domain discovery: a peer only learns of a domain it could
+	// reach (member of one of its channels). nil ⇒ nothing advertised.
+	isMember func(bid, pub string) bool
 
 	my atomic.Pointer[[]Entry]
 
@@ -206,11 +214,43 @@ func (s *Service) Register() {
 	if s.bus == nil {
 		return
 	}
-	domainsHandler := func(string, []byte) ([]byte, error) {
-		return json.Marshal(s.MyDomains())
+	// Serve only the domains the requester could actually reach (member of one
+	// of the domain's channels) — so a non-member never even learns the name.
+	domainsHandler := func(fromPub string, _ []byte) ([]byte, error) {
+		var out []Entry
+		for _, d := range s.MyDomains() {
+			// Reveal only the channels the requester is itself a member of — the
+			// ones it sees the domain through. Empty ⇒ hidden. Not a leak (it's
+			// already in those channels), and lets it group/filter by channel.
+			d.Channels = s.visibleChannels(d, fromPub)
+			if len(d.Channels) > 0 {
+				out = append(out, d)
+			}
+		}
+		return json.Marshal(out)
 	}
 	s.bus.Handle(busTypeDomains, domainsHandler)
 	s.bus.Handle(busTypeDomainsNext, domainsHandler) // accept the new name during rollout
+}
+
+// SetMembershipCheck wires the channel-membership predicate (channels.IsMember)
+// that gates domain discovery and (via the proxy) reachability.
+func (s *Service) SetMembershipCheck(fn func(bid, pub string) bool) { s.isMember = fn }
+
+// visibleChannels returns the subset of d's channels that pub is a member of —
+// i.e. the channels through which pub may discover/reach the domain. Empty ⇒ pub
+// has no access. No predicate ⇒ empty (fail-closed).
+func (s *Service) visibleChannels(d Entry, pub string) []string {
+	if s.isMember == nil {
+		return nil
+	}
+	var out []string
+	for _, bid := range d.Channels {
+		if s.isMember(bid, pub) {
+			out = append(out, bid)
+		}
+	}
+	return out
 }
 
 // Start opens the DNS server on a free loopback port, installs the

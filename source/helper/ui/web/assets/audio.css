@@ -453,7 +453,7 @@
 .ax-tree-category[data-cat="peers"]    .ax-tree-cat-icon,
 .ax-tree-category[data-cat="peers"]    .ax-tree-label { color: #5aa9e6; }
 .ax-tree-category[data-cat="remote"]   .ax-tree-cat-icon,
-.ax-tree-category[data-cat="remote"]   .ax-tree-label { color: #b18cf0; }
+.ax-tree-category[data-cat="remote"]   .ax-tree-label { color: #e8c14e; }
 .ax-tree-category[data-cat="messages"] .ax-tree-cat-icon,
 .ax-tree-category[data-cat="messages"] .ax-tree-label { color: #e87ab8; }
 .ax-tree-category[data-cat="drop"]     .ax-tree-cat-icon,
@@ -2488,8 +2488,8 @@ a.ax-domain-link:hover {
 .ax-frame #chat-secrets:hover { color: #a3e635; border-color: #a3e635; background: color-mix(in srgb, #a3e635 16%, transparent); }
 .ax-frame #chat-files { color: #e8c14e; }
 .ax-frame #chat-files:hover { color: #e8c14e; border-color: #e8c14e; background: color-mix(in srgb, #e8c14e 16%, transparent); }
-.ax-frame #chat-remote { color: #b18cf0; }
-.ax-frame #chat-remote:hover { color: #b18cf0; border-color: #b18cf0; background: color-mix(in srgb, #b18cf0 16%, transparent); }
+.ax-frame #chat-remote { color: #e8c14e; }
+.ax-frame #chat-remote:hover { color: #e8c14e; border-color: #e8c14e; background: color-mix(in srgb, #e8c14e 16%, transparent); }
 .ax-frame #chat-domains { color: #2fc7b0; }
 .ax-frame #chat-domains:hover { color: #2fc7b0; border-color: #2fc7b0; background: color-mix(in srgb, #2fc7b0 16%, transparent); }
 .ax-frame #chat-tunnel { color: #e08a4c; }
@@ -3406,6 +3406,11 @@ a.ax-domain-link:hover {
 .ax-oidc-chan-x, .ax-oidc-newchan-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
 .ax-oidc-chan-x:hover, .ax-oidc-newchan-x:hover { color: #e0686e; }
 .ax-oidc-locked { font-size: 12px; color: #e0a64e; }
+.ax-rem-toggle { background: transparent; border: 1px solid var(--border); border-radius: 6px; color: #e0a64e; cursor: pointer; font-size: 12px; padding: 5px 10px; }
+.ax-rem-toggle.on { color: var(--ok, #86b86b); border-color: var(--ok, #86b86b); background: color-mix(in srgb, var(--ok, #86b86b) 12%, transparent); }
+.ax-rem-chan-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
+.ax-rem-chan-x:hover { color: #e0686e; }
+.ax-dom-chans { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-left: 10px; }
 
 .ax-chat-input {
     display: flex;

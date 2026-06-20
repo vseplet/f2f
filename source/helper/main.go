@@ -228,6 +228,11 @@ func run(bind string, console bool, autostart bool) error {
 	// Gate app login by channel membership: only members of an app's listed
 	// channels may authorize (same predicate as messages/secrets/drop).
 	oidcSvc.SetMembershipCheck(channelsMgr.IsMember)
+	// Gate domains: a remote peer may reach a domain only if it's a member of
+	// one of the domain's channels (loopback/owner bypasses). The dns service
+	// applies the same gate to discovery (a non-member never learns the name).
+	proxySvc.SetMembershipCheck(channelsMgr.IsMember)
+	dnsSvc.SetMembershipCheck(channelsMgr.IsMember)
 	secretsSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
@@ -309,11 +314,13 @@ func run(bind string, console bool, autostart bool) error {
 	// Registers its bus handlers now; the web layer bridges a browser
 	// xterm.js WebSocket to a bus stream opened here.
 	shellSvc := shell.New(busSvc)
+	shellSvc.SetMembershipCheck(channelsMgr.IsMember)
 	shellSvc.Register()
 
 	// Remote-desktop bridge over the bus — proxies to the host's local VNC
 	// server (macOS Screen Sharing :5900 / x11vnc / …). noVNC in the UI.
 	vncSvc := vnc.New(busSvc)
+	vncSvc.SetMembershipCheck(channelsMgr.IsMember)
 	vncSvc.Register()
 
 	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, secretsSvc, blocksMgr, channelsMgr, msgMgr, bind)
@@ -390,6 +397,23 @@ func run(bind string, console bool, autostart bool) error {
 		{
 			name:  "secrets",
 			start: func(_ string, st engine.Status) error { secretsSvc.Start(st.CampID); return nil },
+		},
+		{
+			// Apply the persisted remote-access exposure (which channels may open
+			// our shell / desktop) from the camp config.
+			name: "remote",
+			start: func(_ string, st engine.Status) error {
+				if st.CampID == "" {
+					return nil
+				}
+				c, err := store.SnapshotCamp(st.CampID)
+				if err != nil || c == nil {
+					return err
+				}
+				shellSvc.SetChannels(c.Shell.Channels, c.Shell.Command)
+				vncSvc.SetChannels(c.Vnc.Channels, c.Vnc.Addr)
+				return nil
+			},
 		},
 		{
 			name: "calls",
