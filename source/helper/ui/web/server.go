@@ -37,6 +37,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
+	"github.com/vseplet/f2f/source/helper/services/secrets"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/services/vnc"
@@ -74,6 +75,7 @@ type Server struct {
 	shell    *shell.Service
 	vnc      *vnc.Service
 	oidc     *oidc.Service
+	secrets  *secrets.Service
 	blocks   *blocks.Manager
 	channels *channels.Manager
 	messages *message.Manager
@@ -94,7 +96,7 @@ type Server struct {
 	profRegSess map[string]*webauthn.SessionData
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, secretsSvc *secrets.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -111,6 +113,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		shell:       shellSvc,
 		vnc:         vncSvc,
 		oidc:        oidcSvc,
+		secrets:     secretsSvc,
 		blocks:      blocksMgr,
 		channels:    channelsMgr,
 		messages:    messagesMgr,
@@ -297,6 +300,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/messages/clear", s.handleMessagesClear)
 	mux.HandleFunc("GET /api/events", s.handleEventStream)
 	mux.HandleFunc("POST /api/db/query", s.handleDBQuery)
+
+	// Secrets (vaults). Local CRUD operates on the vaults we own; the
+	// channel view pulls members' channel-scoped vaults live over the bus.
+	mux.HandleFunc("GET /api/secrets", s.handleSecretsList)
+	mux.HandleFunc("GET /api/secrets/targets", s.handleSecretTargets)
+	mux.HandleFunc("POST /api/secrets/vault", s.handleSecretVault)
+	mux.HandleFunc("POST /api/secrets/vault/delete", s.handleSecretVaultDelete)
+	mux.HandleFunc("POST /api/secrets/env", s.handleSecretEnv)
+	mux.HandleFunc("POST /api/secrets/env/delete", s.handleSecretEnvDelete)
+	mux.HandleFunc("POST /api/secrets/entry", s.handleSecretEntry)
+	mux.HandleFunc("POST /api/secrets/entry/delete", s.handleSecretEntryDelete)
 	mux.HandleFunc("GET /api/camp/peers", s.handleCampPeers)
 
 	// Remote terminal (services/shell over the bus). /peers lists camp peers

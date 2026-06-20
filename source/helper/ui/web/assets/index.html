@@ -1297,6 +1297,31 @@
             </div>
             <!-- /#tab-oidc -->
 
+            <!-- Secrets vaults (services/secrets). Local CRUD on the vaults we
+                 own; the "shared in channel" picker pulls members' channel
+                 vaults live over the bus (read-only). -->
+            <div id="tab-secrets" class="tab-panel hidden">
+                <div class="ax-frame ax-secrets">
+                    <div class="ax-section-title">
+                        <span>Secrets</span>
+                        <span class="ax-meta">vaults — values stored in cleartext</span>
+                    </div>
+                    <div class="ax-secrets-body">
+                        <div class="ax-secrets-add">
+                            <div class="ax-secrets-label">New vault</div>
+                            <input id="sec-vault-name" class="ax-secrets-in" placeholder="vault name (e.g. prod-db)">
+                            <button type="button" id="sec-vault-create" class="ax-engine-btn">create vault</button>
+                        </div>
+
+                        <input id="sec-search" class="ax-secrets-in" placeholder="search vaults / keys…">
+                        <div id="sec-vaults" class="ax-secrets-vaults"></div>
+
+                        <div id="sec-err" class="ax-secrets-err"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-secrets -->
+
             <!-- Remote terminal (services/shell over the bus), rendered in the
                  main column like the other tabs. Opened from the sidebar
                  "machines" rows (term.js). -->

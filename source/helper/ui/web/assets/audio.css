@@ -364,7 +364,14 @@
     overflow-y: auto;
     overflow-x: hidden;
     padding: 14px 14px;
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--border) transparent; /* Firefox */
 }
+/* WebKit: thin, subtle bar instead of the default macOS one. */
+.ax-sidebar-scroll::-webkit-scrollbar { width: 8px; }
+.ax-sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+.ax-sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.ax-sidebar-scroll::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
 .ax-sidebar-resize {
     width: 4px;
     cursor: col-resize;
@@ -3408,3 +3415,66 @@ a.ax-domain-link:hover {
 }
 
 .ax-prof-ok { color: var(--ok, #86b86b); font-size: 13px; }
+
+/* Secrets vaults */
+.ax-secrets-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.ax-secrets-label { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; margin-bottom: 6px; }
+.ax-secrets-in {
+    box-sizing: border-box; background: var(--bg, #15161a); color: var(--fg, #e6e6e6);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+    font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
+}
+.ax-secrets-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ax-secrets-add .ax-secrets-label { width: 100%; margin: 0; }
+.ax-secrets-add #sec-vault-name { flex: 1; min-width: 160px; }
+#sec-search { width: 100%; }
+.ax-secrets-vaults { display: flex; flex-direction: column; gap: 10px; }
+.ax-secrets-empty { color: var(--muted); font-size: 12px; }
+.ax-secrets-err { color: #e0686e; font-size: 12px; min-height: 1em; }
+.ax-sec-vault { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+/* a vault owned by another peer (read-only): amber left accent + "shared by" pill */
+.ax-sec-remote { border-left: 3px solid #e0a64e; background: color-mix(in srgb, #e0a64e 5%, transparent); }
+.ax-sec-shared-by { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #e0a64e; border: 1px solid #e0a64e; border-radius: 4px; padding: 1px 6px; }
+.ax-sec-via { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-right: 2px; }
+.ax-sec-vhead { display: flex; align-items: center; gap: 8px; }
+.ax-sec-vname { font-weight: 600; }
+.ax-sec-scope, .ax-sec-owner { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.ax-sec-owner { border-color: transparent; }
+.ax-sec-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ax-sec-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--accent, #b18cf0); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.ax-sec-chip-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
+.ax-sec-chip-x:hover { color: #e0686e; }
+.ax-sec-share { background: var(--bg, #15161a); color: var(--fg, #e6e6e6); border: 1px solid var(--border); border-radius: 4px; font-size: 11px; padding: 2px 4px; }
+.ax-sec-env-add { background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 11px; padding: 1px 7px; }
+.ax-sec-env-add:hover { color: var(--accent); border-color: var(--accent); }
+.ax-sec-vdel { margin-left: auto; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; }
+.ax-sec-vdel:hover { color: #e0686e; }
+/* environment: a config inside a vault, indented, with its own share list */
+.ax-sec-env { margin: 8px 0 0 12px; padding-left: 10px; border-left: 2px solid var(--panel-2); }
+.ax-sec-ehead { display: flex; align-items: center; gap: 8px; }
+.ax-sec-ename { font-weight: 600; font-size: 12px; color: var(--accent, #b18cf0); }
+.ax-sec-edel { margin-left: auto; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
+.ax-sec-edel:hover { color: #e0686e; }
+.ax-sec-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.ax-sec-row { display: flex; align-items: center; gap: 8px; font-size: 12px; border-radius: 4px; padding: 1px 4px; margin: 0 -4px; }
+.ax-sec-row:hover { background: var(--panel-2); }
+.ax-sec-name { min-width: 120px; color: var(--fg); }
+.ax-sec-val { flex: 1; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ax-sec-val.shown { color: var(--fg); }
+.ax-sec-row button { background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 11px; padding: 1px 6px; }
+.ax-sec-row button:hover { color: var(--accent); border-color: var(--accent); }
+/* Row actions stay hidden until you hover the row (or reveal its value) — keeps
+   the list calm. The value column flexes to fill the freed space. */
+.ax-sec-row .ax-sec-reveal,
+.ax-sec-row .ax-sec-copy,
+.ax-sec-row .ax-sec-edit,
+.ax-sec-row .ax-sec-del { visibility: hidden; }
+.ax-sec-row:hover .ax-sec-reveal,
+.ax-sec-row:hover .ax-sec-copy,
+.ax-sec-row:hover .ax-sec-edit,
+.ax-sec-row:hover .ax-sec-del,
+.ax-sec-row .ax-sec-val.shown ~ button { visibility: visible; }
+.ax-sec-del:hover { color: #e0686e !important; border-color: #e0686e !important; }
+.ax-sec-add { display: flex; gap: 6px; margin-top: 8px; }
+.ax-sec-add input { flex: 1; box-sizing: border-box; background: var(--bg, #15161a); color: var(--fg, #e6e6e6); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--mono, ui-monospace, monospace); }
+.ax-sec-addbtn { flex: 0 0 auto !important; }
