@@ -1828,7 +1828,7 @@ $(function () {
       $('#chat-call, #chat-clear, #chat-notes').show(); // call + clear + notes: both DMs and channels
       $('#chat-members').toggle(kind === 'channel'); // members: channels only (a DM is implicitly two)
       // per-conversation resource buttons: both channels and DMs (a DM is a channel too)
-      $('#chat-secrets, #chat-files, #chat-remote, #chat-domains, #chat-tunnel, #chat-oidc').show();
+      $('#chat-secrets, #chat-remote, #chat-domains, #chat-tunnel, #chat-oidc').show();
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
       clearChatPending(); // nor a staged attachment
