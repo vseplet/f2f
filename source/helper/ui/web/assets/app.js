@@ -16,6 +16,7 @@ $(function () {
   // initializer AFTER that, clobbering the channel filter back to '' on reload.
   let secretFilter = '';       // channel bid the secrets tab is filtered to ('' = all)
   let oidcFilter = '';         // channel bid the OIDC tab is filtered to ('' = all)
+  let remoteFilter = '';       // channel bid the remote tab is filtered to ('' = all)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -1576,6 +1577,15 @@ $(function () {
   $('#chat-notes').on('click', function () {
     if (chatConv) location.hash = noteRoute(chatConv.key);
   });
+  // Remote access exposure for THIS conversation → remote tab, per-channel toggles.
+  $('#chat-remote').on('click', function () {
+    if (!chatConv) return;
+    if (chatConv.kind === 'channel') { location.hash = 'remote:' + chatConv.key; return; }
+    $.getJSON('/api/notes/scope?kind=dm&key=' + encodeURIComponent(chatConv.key)).done(function (d) {
+      const bid = (d && d.scope || '').replace(/^note:/, '');
+      if (bid) location.hash = 'remote:' + bid;
+    });
+  });
   // Apps whose login is gated by THIS conversation → OIDC tab, filtered to it.
   $('#chat-oidc').on('click', function () {
     if (!chatConv) return;
@@ -1744,6 +1754,17 @@ $(function () {
     if (tm) { activateTab(tm[1]); return; }
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
+    // remote[:<channelKey>] — bare shows both exposure pickers; with a key,
+    // per-channel terminal/desktop toggles.
+    const remM = h.match(/^remote(?::(.+))?$/);
+    if (remM) {
+      activateTab('remote');
+      let key = remM[1] || '';
+      if (key === 'general') key = GENERAL_ID;
+      remoteFilter = key;
+      openRemote();
+      return;
+    }
     // oidc[:<channelKey>] — bare opens all apps; with a key, filters to apps
     // whose login is gated by that channel.
     const oidcM = h.match(/^oidc(?::(.+))?$/);
@@ -2328,6 +2349,88 @@ $(function () {
   $('#oidc-copy').on('click', function () {
     const t = $('#oidc-issuer').text();
     if (t && navigator.clipboard) navigator.clipboard.writeText(t);
+  });
+
+  // ---- Remote access exposure (terminal / desktop → channels) ----
+  // I expose my shell/desktop to a set of channels; only members may connect.
+  let remoteExposure = { terminal: [], desktop: [] };
+  let remoteTargets = [];
+  function remTargetLabel(bid) {
+    const t = (remoteTargets || []).find(function (x) { return x.bid === bid; });
+    if (!t) return bid;
+    return (t.kind === 'dm' ? '@ ' : '# ') + (t.label || bid);
+  }
+  function openRemote() {
+    $('#rem-err').text('');
+    $.getJSON('/api/secrets/targets').done(function (t) { remoteTargets = t || []; })
+      .always(function () {
+        $.getJSON('/api/remote/exposure').done(function (e) {
+          remoteExposure = { terminal: (e && e.terminal) || [], desktop: (e && e.desktop) || [] };
+          renderRemote();
+        }).fail(function (x) { $('#rem-err').text('load failed: ' + (x.responseText || x.status)); });
+      });
+  }
+  function saveExposure() {
+    return secPost('/api/remote/exposure', { terminal: remoteExposure.terminal, desktop: remoteExposure.desktop })
+      .done(renderRemote).fail(function (x) { $('#rem-err').text('save failed: ' + (x.responseText || x.status)); });
+  }
+  function renderRemoteFilterBar() {
+    $('#rem-filterbar').remove();
+    if (!remoteFilter) return;
+    const t = (remoteTargets || []).find(function (x) { return x.bid === remoteFilter; });
+    const label = t ? (t.kind === 'dm' ? '@ ' : '# ') + (t.label || remoteFilter) : remoteFilter;
+    $('#rem-filterbar-slot').html('<div id="rem-filterbar" class="ax-sec-filterbar">remote access in '
+      + '<b>' + esc(label) + '</b><button type="button" id="rem-filter-clear">show all ✕</button></div>');
+  }
+  $(document).on('click', '#rem-filter-clear', function () { location.hash = 'remote'; });
+  // renderRemotePicker fills one section (terminal|desktop). Filtered → a single
+  // on/off toggle for that channel; unfiltered → chips + "+ share…".
+  function renderRemotePicker($box, kind) {
+    const list = remoteExposure[kind] || [];
+    if (remoteFilter) {
+      const on = list.indexOf(remoteFilter) !== -1;
+      $box.html('<button type="button" class="ax-rem-toggle ' + (on ? 'on' : '') + '" data-kind="' + kind + '">'
+        + (on ? '✓ open to ' + esc(remTargetLabel(remoteFilter)) : '🔒 closed — click to open here') + '</button>');
+      return;
+    }
+    let chips = list.map(function (bid) {
+      return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(remTargetLabel(bid))
+        + '<button type="button" class="ax-rem-chan-x" title="revoke">×</button></span>';
+    }).join('');
+    if (!list.length) chips = '<span class="ax-oidc-locked">🔒 closed — no one can connect</span>';
+    const avail = (remoteTargets || []).filter(function (t) { return list.indexOf(t.bid) === -1; });
+    let sel = '';
+    if (avail.length) {
+      sel = '<select class="ax-sec-share ax-rem-allow" data-kind="' + kind + '"><option value="">+ share…</option>'
+        + avail.map(function (t) { return '<option value="' + escA(t.bid) + '">' + (t.kind === 'dm' ? '@ ' : '# ') + esc(t.label || t.bid) + '</option>'; }).join('')
+        + '</select>';
+    }
+    $box.html('<span class="ax-sec-chips">' + chips + '</span>' + sel);
+  }
+  function renderRemote() {
+    renderRemoteFilterBar();
+    renderRemotePicker($('#rem-term'), 'terminal');
+    renderRemotePicker($('#rem-desk'), 'desktop');
+  }
+  $(document).on('change', '.ax-rem-allow', function () {
+    const bid = $(this).val(); if (!bid) return;
+    const kind = $(this).data('kind');
+    if (remoteExposure[kind].indexOf(bid) === -1) remoteExposure[kind] = remoteExposure[kind].concat([bid]);
+    saveExposure();
+  });
+  $(document).on('click', '.ax-rem-chan-x', function () {
+    const bid = $(this).closest('.ax-sec-chip').data('bid');
+    const kind = $(this).closest('.ax-oidc-chans').attr('id') === 'rem-desk' ? 'desktop' : 'terminal';
+    remoteExposure[kind] = remoteExposure[kind].filter(function (b) { return b !== bid; });
+    saveExposure();
+  });
+  $(document).on('click', '.ax-rem-toggle', function () {
+    const kind = $(this).data('kind');
+    const on = remoteExposure[kind].indexOf(remoteFilter) !== -1;
+    remoteExposure[kind] = on
+      ? remoteExposure[kind].filter(function (b) { return b !== remoteFilter; })
+      : remoteExposure[kind].concat([remoteFilter]);
+    saveExposure();
   });
 
   // ---- Secrets (Doppler-style: vault → environments → secrets) ----
@@ -3910,13 +4013,14 @@ $(function () {
     // remote access — terminals (services/shell) + desktops (services/vnc)
     // under one collapsible with section dividers.
     const remoteBody =
-      section('terminals') + shellsBody
+      addRow('expose my access →', 'remote')
+      + section('terminals') + shellsBody
       + section('desktops')  + desktopsBody;
 
     const treeHtml = (
       category('peers',     'network',   peers.length, peersBody)
       + category('messages',  'channels',  totalUnread || null, messagingBody)
-      + category('remote',    'remote access', (shellList.length + vncList.length) || null, remoteBody)
+      + category('remote',    'remote', (shellList.length + vncList.length) || null, remoteBody)
       // drop section hidden from the sidebar for now — uncomment to restore:
       // + category('drop',      'drop',      allFiles.length,
       //     section('available') + peerFilesBody

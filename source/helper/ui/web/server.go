@@ -317,6 +317,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Remote terminal (services/shell over the bus). /peers lists camp peers
 	// whose shell is open to us; /ws bridges a browser xterm.js to a bus
 	// stream. Loopback-only — never exposed on the tunnel listener.
+	mux.HandleFunc("GET /api/remote/exposure", s.handleRemoteExposure)
+	mux.HandleFunc("POST /api/remote/exposure", s.handleRemoteSetExposure)
 	mux.HandleFunc("GET /api/shell/peers", s.handleShellPeers)
 	mux.HandleFunc("GET /api/shell/ws", s.handleShellWS)
 

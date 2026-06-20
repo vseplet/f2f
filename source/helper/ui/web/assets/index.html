@@ -1367,6 +1367,27 @@
             </div>
             <!-- /#tab-secrets -->
 
+            <!-- Remote-access exposure: which channels may open MY terminal /
+                 desktop. Bare #remote shows both channel pickers; #remote:<bid>
+                 filters to per-channel toggles. -->
+            <div id="tab-remote" class="tab-panel hidden">
+                <div class="ax-frame ax-secrets">
+                    <div class="ax-section-title">
+                        <span>Remote access</span>
+                        <span class="ax-meta">who may open your terminal / desktop</span>
+                    </div>
+                    <div class="ax-secrets-body">
+                        <div id="rem-filterbar-slot"></div>
+                        <div class="ax-secrets-label">share my terminal with</div>
+                        <div id="rem-term" class="ax-oidc-chans"></div>
+                        <div class="ax-secrets-label">share my desktop with</div>
+                        <div id="rem-desk" class="ax-oidc-chans"></div>
+                        <div id="rem-err" class="ax-secrets-err"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-remote -->
+
             <!-- Remote terminal (services/shell over the bus), rendered in the
                  main column like the other tabs. Opened from the sidebar
                  "machines" rows (term.js). -->

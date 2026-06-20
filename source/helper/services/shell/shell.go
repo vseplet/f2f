@@ -15,10 +15,11 @@
 //   - client→server: framed messages — [op byte][uint32 len][payload]
 //     op 'd' = stdin data; op 'r' = resize (payload: cols,rows uint16 BE)
 //
-// SECURITY: opening a shell is remote code execution. The PTY runs the
-// system `login` by default, so OS auth still applies. Access is gated by
-// SetPolicy(enabled, allowed). NOTE: for now the default is PERMISSIVE
-// (any authenticated camp peer) to ease testing — tighten before shipping.
+// SECURITY: opening a shell is remote code execution. The PTY runs the system
+// `login` by default, so OS auth still applies. Access is gated by channel
+// membership — only members of a channel the owner exposed the shell to
+// (SetChannels + SetMembershipCheck) may open it. Fail-closed: no channels ⇒
+// nobody may connect.
 package shell
 
 import (
@@ -74,24 +75,45 @@ type statusResp struct {
 type Service struct {
 	bus *bus.Service
 
-	pmu     sync.Mutex
-	enabled bool
-	allow   map[string]bool // pub → allowed; empty = allow-all (testing)
-	command string
+	pmu      sync.Mutex
+	channels []string                    // expose the shell to members of these channels (bids)
+	isMember func(bid, pub string) bool  // injected channel-membership predicate
+	command  string
 
 	mu       sync.Mutex
 	sessions map[string]*session
 }
 
-// New constructs the service. Default policy is PERMISSIVE (enabled, no
-// allowlist) for testing; call SetPolicy to lock it down.
+// New constructs the service. Access is DENIED until channels are exposed via
+// SetChannels and a membership predicate is wired with SetMembershipCheck.
 func New(b *bus.Service) *Service {
 	return &Service{
 		bus:      b,
-		enabled:  true,
-		allow:    map[string]bool{},
 		sessions: map[string]*session{},
 	}
+}
+
+// SetMembershipCheck wires the channel-membership predicate (channels.IsMember).
+func (s *Service) SetMembershipCheck(fn func(bid, pub string) bool) {
+	s.pmu.Lock()
+	defer s.pmu.Unlock()
+	s.isMember = fn
+}
+
+// SetChannels exposes the shell to members of the given channels (bids); empty
+// closes it to everyone. Command overrides the PTY program ("" = system login).
+func (s *Service) SetChannels(channels []string, command string) {
+	s.pmu.Lock()
+	defer s.pmu.Unlock()
+	s.channels = append([]string(nil), channels...)
+	s.command = command
+}
+
+// Channels returns the current exposure list (copy).
+func (s *Service) Channels() []string {
+	s.pmu.Lock()
+	defer s.pmu.Unlock()
+	return append([]string(nil), s.channels...)
 }
 
 // Register wires the bus handlers. Call once after constructing the bus.
@@ -100,33 +122,21 @@ func (s *Service) Register() {
 	s.bus.Handle(TypeStatus, s.handleStatus)
 }
 
-// SetPolicy updates the access policy (from the per-camp config). enabled
-// is the master switch; allowed is the pub allowlist (empty = allow any
-// authenticated peer); command overrides the PTY program.
-func (s *Service) SetPolicy(enabled bool, allowed []string, command string) {
-	s.pmu.Lock()
-	defer s.pmu.Unlock()
-	s.enabled = enabled
-	s.command = command
-	s.allow = make(map[string]bool, len(allowed))
-	for _, p := range allowed {
-		if p != "" {
-			s.allow[p] = true
-		}
-	}
-}
-
-// allowed reports whether fromPub may open a shell here.
+// allowed reports whether fromPub may open a shell here: it must be a member of
+// at least one exposed channel. No channels / no membership predicate ⇒ denied
+// (fail-closed) — the same explicit gate as secrets and OIDC.
 func (s *Service) allowed(fromPub string) bool {
 	s.pmu.Lock()
 	defer s.pmu.Unlock()
-	if !s.enabled || fromPub == "" {
+	if fromPub == "" || s.isMember == nil {
 		return false
 	}
-	if len(s.allow) == 0 {
-		return true // permissive testing default
+	for _, bid := range s.channels {
+		if s.isMember(bid, fromPub) {
+			return true
+		}
 	}
-	return s.allow[fromPub]
+	return false
 }
 
 func (s *Service) cmdArgs() []string {

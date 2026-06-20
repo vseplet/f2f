@@ -89,9 +89,10 @@ type Camp struct {
 // authentication still applies). Enabled/Allowed will gate access once we
 // flip off the testing default.
 type Shell struct {
-	Enabled bool     `json:"enabled"`
-	Allowed []string `json:"allowed,omitempty"` // peer pubs allowed to open a shell
-	Command string   `json:"command,omitempty"` // PTY program; empty = system login
+	Enabled  bool     `json:"enabled"`
+	Allowed  []string `json:"allowed,omitempty"`  // (legacy) peer pubs allowed to open a shell
+	Channels []string `json:"channels,omitempty"` // expose the shell to members of these channels (bids)
+	Command  string   `json:"command,omitempty"`  // PTY program; empty = system login
 }
 
 // Vnc is the per-camp policy for the remote-desktop bridge (services/vnc),
@@ -99,9 +100,10 @@ type Shell struct {
 // Sharing on :5900). Auth is handled by that VNC server; Enabled/Allowed
 // gate who can reach it. Addr overrides the local VNC endpoint.
 type Vnc struct {
-	Enabled bool     `json:"enabled"`
-	Allowed []string `json:"allowed,omitempty"` // peer pubs allowed to open a desktop
-	Addr    string   `json:"addr,omitempty"`    // local VNC server; empty = 127.0.0.1:5900
+	Enabled  bool     `json:"enabled"`
+	Allowed  []string `json:"allowed,omitempty"`  // (legacy) peer pubs allowed to open a desktop
+	Channels []string `json:"channels,omitempty"` // expose the desktop to members of these channels (bids)
+	Addr     string   `json:"addr,omitempty"`     // local VNC server; empty = 127.0.0.1:5900
 }
 
 // DefaultCampServerURL and DefaultCampStunAddr are the production

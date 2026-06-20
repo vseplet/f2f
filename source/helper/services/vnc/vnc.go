@@ -7,9 +7,10 @@
 // Layering mirrors services/shell: peer↔peer over the bus, and the local web
 // layer bridges a browser noVNC WebSocket to a bus stream opened here.
 //
-// SECURITY: a desktop is full graphical control of the machine. Access is
-// gated by SetPolicy(enabled, allowed) AND by the VNC server's own auth
-// (password / login). NOTE: permissive-by-default for now to ease testing.
+// SECURITY: a desktop is full graphical control of the machine. Access is gated
+// by channel membership — only members of a channel the owner exposed the
+// desktop to may connect — AND by the VNC server's own auth (password / login).
+// Fail-closed: no channels ⇒ nobody may connect.
 package vnc
 
 import (
@@ -40,16 +41,16 @@ type statusResp struct {
 type Service struct {
 	bus *bus.Service
 
-	mu      sync.Mutex
-	enabled bool
-	allow   map[string]bool
-	addr    string
+	mu       sync.Mutex
+	channels []string                   // expose the desktop to members of these channels (bids)
+	isMember func(bid, pub string) bool // injected channel-membership predicate
+	addr     string
 }
 
-// New constructs the service. Default policy is PERMISSIVE (enabled, no
-// allowlist) for testing; call SetPolicy to lock it down.
+// New constructs the service. Access is DENIED until channels are exposed via
+// SetChannels and a membership predicate is wired with SetMembershipCheck.
 func New(b *bus.Service) *Service {
-	return &Service{bus: b, enabled: true, allow: map[string]bool{}}
+	return &Service{bus: b}
 }
 
 // Register wires the bus handlers. Call once after constructing the bus.
@@ -58,31 +59,43 @@ func (s *Service) Register() {
 	s.bus.Handle(TypeStatus, s.handleStatus)
 }
 
-// SetPolicy updates the access policy (from the per-camp config). addr
-// overrides the local VNC endpoint (empty = 127.0.0.1:5900).
-func (s *Service) SetPolicy(enabled bool, allowed []string, addr string) {
+// SetMembershipCheck wires the channel-membership predicate (channels.IsMember).
+func (s *Service) SetMembershipCheck(fn func(bid, pub string) bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.enabled = enabled
-	s.addr = addr
-	s.allow = make(map[string]bool, len(allowed))
-	for _, p := range allowed {
-		if p != "" {
-			s.allow[p] = true
-		}
-	}
+	s.isMember = fn
 }
 
+// SetChannels exposes the desktop to members of the given channels (bids);
+// empty closes it. addr overrides the local VNC endpoint ("" = 127.0.0.1:5900).
+func (s *Service) SetChannels(channels []string, addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels = append([]string(nil), channels...)
+	s.addr = addr
+}
+
+// Channels returns the current exposure list (copy).
+func (s *Service) Channels() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.channels...)
+}
+
+// allowed reports whether fromPub may open a desktop here: member of at least
+// one exposed channel. Fail-closed (no channels / no predicate ⇒ denied).
 func (s *Service) allowed(fromPub string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.enabled || fromPub == "" {
+	if fromPub == "" || s.isMember == nil {
 		return false
 	}
-	if len(s.allow) == 0 {
-		return true // permissive testing default
+	for _, bid := range s.channels {
+		if s.isMember(bid, fromPub) {
+			return true
+		}
 	}
-	return s.allow[fromPub]
+	return false
 }
 
 func (s *Service) target() string {
