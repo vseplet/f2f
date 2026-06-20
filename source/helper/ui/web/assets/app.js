@@ -17,6 +17,7 @@ $(function () {
   let secretFilter = '';       // channel bid the secrets tab is filtered to ('' = all)
   let oidcFilter = '';         // channel bid the OIDC tab is filtered to ('' = all)
   let remoteFilter = '';       // channel bid the remote tab is filtered to ('' = all)
+  let domainFilter = '';       // channel bid the domains tab is filtered to ('' = all)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -1577,6 +1578,15 @@ $(function () {
   $('#chat-notes').on('click', function () {
     if (chatConv) location.hash = noteRoute(chatConv.key);
   });
+  // Domains reachable by THIS conversation → domains tab, filtered to it.
+  $('#chat-domains').on('click', function () {
+    if (!chatConv) return;
+    if (chatConv.kind === 'channel') { location.hash = 'dns:' + chatConv.key; return; }
+    $.getJSON('/api/notes/scope?kind=dm&key=' + encodeURIComponent(chatConv.key)).done(function (d) {
+      const bid = (d && d.scope || '').replace(/^note:/, '');
+      if (bid) location.hash = 'dns:' + bid;
+    });
+  });
   // Remote access exposure for THIS conversation → remote tab, per-channel toggles.
   $('#chat-remote').on('click', function () {
     if (!chatConv) return;
@@ -1750,7 +1760,19 @@ $(function () {
     // invite ("add peer") → camp tab; the invite flow will live there.
     if (h === 'invite') { activateTab('camp'); return; }
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
-    const tm = h.match(/^(tunnel|dns|drop)(?::.*)?$/);
+    // dns[:<channelKey>] — bare shows all my domains; with a key, filters to
+    // domains reachable by that channel.
+    const dnsM = h.match(/^dns(?::(.+))?$/);
+    if (dnsM) {
+      activateTab('dns');
+      let key = dnsM[1] || '';
+      if (key === 'general') key = GENERAL_ID;
+      domainFilter = key;
+      refreshMyDomains();
+      renderKnownDomains();
+      return;
+    }
+    const tm = h.match(/^(tunnel|drop)(?::.*)?$/);
     if (tm) { activateTab(tm[1]); return; }
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
@@ -4715,7 +4737,14 @@ $(function () {
   // Backend is the source of truth — engine persists the list in the
   // per-camp config and re-publishes it on start. UI just reads /api/my-domains.
   let myDomains = [];
+  let domainTargets = []; // channels+DMs that may be granted reach to a domain
+  function domTargetLabel(bid) {
+    const t = (domainTargets || []).find((x) => x.bid === bid);
+    if (!t) return bid;
+    return (t.kind === 'dm' ? '@ ' : '# ') + (t.label || bid);
+  }
   function refreshMyDomains() {
+    $.getJSON('/api/secrets/targets', (t) => { domainTargets = t || []; });
     $.getJSON('/api/my-domains', (list) => {
       myDomains = Array.isArray(list) ? list : [];
       renderMyDomains();
@@ -4724,12 +4753,20 @@ $(function () {
   function renderMyDomains() {
     const $list = $('#my-domains-list');
     $list.empty();
-    $('#my-domains-meta').text(myDomains.length);
-    if (myDomains.length === 0) {
-      $list.append('<div class="ax-list-empty">no domains yet. publish one below.</div>');
+    let shown = myDomains;
+    if (domainFilter) {
+      shown = myDomains.filter((d) => (d.channels || []).indexOf(domainFilter) !== -1);
+      const t = (domainTargets || []).find((x) => x.bid === domainFilter);
+      const label = t ? (t.kind === 'dm' ? '@ ' : '# ') + (t.label || domainFilter) : domainFilter;
+      $list.append('<div class="ax-sec-filterbar">domains reachable by <b>' + esc(label)
+        + '</b><button type="button" id="dom-filter-clear">show all ✕</button></div>');
+    }
+    $('#my-domains-meta').text(shown.length);
+    if (shown.length === 0) {
+      $list.append('<div class="ax-list-empty">' + (domainFilter ? 'no domains reachable by this channel' : 'no domains yet. publish one below.') + '</div>');
       return;
     }
-    myDomains.forEach((d) => {
+    shown.forEach((d) => {
       const isWildcard = (d.name || '').startsWith('*.');
       const fqdn = d.name + '.' + campLabelOrPlaceholder() + '.f2f';
       const $row = $('<div class="ax-intercept">');
@@ -4749,6 +4786,33 @@ $(function () {
       if (d.port) {
         $head.append($('<span class="ax-pill ax-pill-peer">').text('→ ' + target));
       }
+      // "reachable by" — channel allowlist for remote peers (owner always
+      // reaches it on loopback). Empty = no remote peer may reach it. Inline in
+      // the head row, after the target pill.
+      const chans = d.channels || [];
+      const $ch = $('<span class="ax-dom-chans">');
+      function saveDomChannels(next) {
+        myDomains = myDomains.map((e) => e.name === d.name ? Object.assign({}, e, { channels: next }) : e);
+        putMyDomains(myDomains);
+      }
+      if (!chans.length) {
+        $ch.append($('<span class="ax-oidc-locked">').text('🔒 no remote access'));
+      }
+      chans.forEach((bid) => {
+        const $chip = $('<span class="ax-sec-chip">').text(domTargetLabel(bid));
+        $('<button type="button" class="ax-rem-chan-x" title="revoke">×</button>')
+          .on('click', () => saveDomChannels(chans.filter((b) => b !== bid)))
+          .appendTo($chip);
+        $ch.append($chip);
+      });
+      const avail = (domainTargets || []).filter((t) => chans.indexOf(t.bid) === -1);
+      if (avail.length) {
+        const $sel = $('<select class="ax-sec-share"><option value="">+ allow…</option></select>');
+        avail.forEach((t) => $sel.append($('<option>').val(t.bid).text((t.kind === 'dm' ? '@ ' : '# ') + (t.label || t.bid))));
+        $sel.on('change', function () { if (this.value) saveDomChannels(chans.concat([this.value])); });
+        $ch.append($sel);
+      }
+      $head.append($ch);
       const $rm = $('<button class="ax-list-remove">remove</button>');
       $rm.on('click', (e) => {
         e.stopPropagation();
@@ -4761,6 +4825,7 @@ $(function () {
       $list.append($row);
     });
   }
+  $(document).on('click', '#dom-filter-clear', function () { location.hash = 'dns'; });
   function putMyDomains(list) {
     $.ajax({
       url: '/api/my-domains',
@@ -4832,12 +4897,15 @@ $(function () {
     // Collect from livePeers — includes peers persisted in the
     // catalog with their last-known domains, even when currently
     // offline. Backend doesn't reset the list on poll failure.
-    const rows = [];
+    let rows = [];
     livePeers.forEach((p) => {
       if (p.self) return;
       const ds = Array.isArray(p.domains) ? p.domains : [];
       ds.forEach((d) => rows.push({ peer: p.name, peerTunnel: p.overlay_v4 || '', online: p.online !== false, ...d }));
     });
+    if (domainFilter) {
+      rows = rows.filter((r) => (r.channels || []).indexOf(domainFilter) !== -1);
+    }
     $('#known-domains-meta').text(rows.length);
     if (rows.length === 0) {
       $list.append('<div class="ax-list-empty">no domains published by any peer yet.</div>');

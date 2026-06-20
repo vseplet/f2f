@@ -3410,6 +3410,7 @@ a.ax-domain-link:hover {
 .ax-rem-toggle.on { color: var(--ok, #86b86b); border-color: var(--ok, #86b86b); background: color-mix(in srgb, var(--ok, #86b86b) 12%, transparent); }
 .ax-rem-chan-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
 .ax-rem-chan-x:hover { color: #e0686e; }
+.ax-dom-chans { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-left: 10px; }
 
 .ax-chat-input {
     display: flex;

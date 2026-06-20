@@ -863,6 +863,11 @@ func (s *Server) handleSetMyDomains(w http.ResponseWriter, r *http.Request) {
 		if h := strings.TrimSpace(e.Host); h != "" {
 			entry.Host = h
 		}
+		for _, ch := range e.Channels {
+			if ch = strings.TrimSpace(ch); ch != "" {
+				entry.Channels = append(entry.Channels, ch)
+			}
+		}
 		cleaned = append(cleaned, entry)
 	}
 	if err := s.dns.SetMyDomains(cleaned); err != nil {

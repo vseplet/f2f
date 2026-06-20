@@ -228,6 +228,11 @@ func run(bind string, console bool, autostart bool) error {
 	// Gate app login by channel membership: only members of an app's listed
 	// channels may authorize (same predicate as messages/secrets/drop).
 	oidcSvc.SetMembershipCheck(channelsMgr.IsMember)
+	// Gate domains: a remote peer may reach a domain only if it's a member of
+	// one of the domain's channels (loopback/owner bypasses). The dns service
+	// applies the same gate to discovery (a non-member never learns the name).
+	proxySvc.SetMembershipCheck(channelsMgr.IsMember)
+	dnsSvc.SetMembershipCheck(channelsMgr.IsMember)
 	secretsSvc.Register()
 
 	// Notification hub — fans UI notifications out over SSE. Peers can push
