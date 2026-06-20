@@ -11,6 +11,10 @@ $(function () {
   let profileChecked = false;  // /api/profile fetched this session
   let profileRequired = false; // router pins the user to the profile page until saved
   let onboardPkDone = false;   // passkey created during the onboarding page
+  // Declared up here (not in the secrets module below) because applyRoute()
+  // calls openSecrets() during init — a `let x=''` further down would re-run its
+  // initializer AFTER that, clobbering the channel filter back to '' on reload.
+  let secretFilter = '';       // channel bid the secrets tab is filtered to ('' = all)
 
   // Tab switching. The terminal-styled tabbar at the top is the only UI:
   // we toggle .ax-tab-active on the clicked button and swap visible panels.
@@ -1571,6 +1575,17 @@ $(function () {
   $('#chat-notes').on('click', function () {
     if (chatConv) location.hash = noteRoute(chatConv.key);
   });
+  // Secrets shared in THIS conversation → secrets tab, filtered to it. A channel
+  // key IS its bid; a DM's key is the peer pub, so resolve its dm-<hash> bid via
+  // the shared scope endpoint (same chanBID the rest uses).
+  $('#chat-secrets').on('click', function () {
+    if (!chatConv) return;
+    if (chatConv.kind === 'channel') { location.hash = 'secrets:' + chatConv.key; return; }
+    $.getJSON('/api/notes/scope?kind=dm&key=' + encodeURIComponent(chatConv.key)).done(function (d) {
+      const bid = (d && d.scope || '').replace(/^note:/, '');
+      if (bid) location.hash = 'secrets:' + bid;
+    });
+  });
   // Clear the open conversation's messages — LOCAL only (memory + SQLite);
   // peers keep their copies.
   $('#chat-clear').on('click', function () {
@@ -1720,7 +1735,16 @@ $(function () {
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
     if (h === 'oidc') { activateTab('oidc'); openOIDC(); return; }
-    if (h === 'secrets') { activateTab('secrets'); openSecrets(); return; }
+    // secrets[:<channelKey>] — bare opens the full tree; with a key, filters to
+    // the secrets shared in that channel.
+    const secM = h.match(/^secrets(?::(.+))?$/);
+    if (secM) {
+      activateTab('secrets');
+      let key = secM[1] || '';
+      if (key === 'general') key = GENERAL_ID;
+      openSecrets(key);
+      return;
+    }
     // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
@@ -1782,7 +1806,9 @@ $(function () {
       chatNamesPending = true; // names may not be loaded yet (e.g. hard reload)
       setChatTitle();
       $('#chat-call, #chat-clear, #chat-notes').show(); // call + clear + notes: both DMs and channels
-      $('#chat-members').toggle(kind === 'channel'); // members button: channels only
+      $('#chat-members').toggle(kind === 'channel'); // members: channels only (a DM is implicitly two)
+      // per-conversation resource buttons: both channels and DMs (a DM is a channel too)
+      $('#chat-secrets, #chat-files, #chat-remote, #chat-domains, #chat-tunnel, #chat-oidc').show();
       $('#chat-members-panel').addClass('hidden').empty();
       clearReplyTarget(); // a pending reply doesn't carry across conversations
       clearChatPending(); // nor a staged attachment
@@ -2211,13 +2237,49 @@ $(function () {
     }
     return [];
   }
-  function openSecrets() {
+  // secretFilter is declared in the top-level state block (see profileRequired)
+  // so init's openSecrets() isn't clobbered by a re-run initializer here.
+  function openSecrets(channelBid) {
+    secretFilter = channelBid || '';
     $('#sec-err').text(''); $('#sec-search').val('');
-    $.getJSON('/api/secrets/targets').done(function (t) { secretTargets = t || []; }).always(loadSecrets);
+    $.getJSON('/api/secrets/targets').done(function (t) { secretTargets = t || []; })
+      .always(function () { renderSecretFilterBar(); loadSecrets(); });
   }
+  function renderSecretFilterBar() {
+    // A banner naming the active channel filter, with a way back to all secrets.
+    const on = !!secretFilter;
+    // In filtered mode, creating a vault auto-shares a "default" env to this
+    // channel (so it shows up here) — reflect that on the button.
+    $('#sec-vault-create').text(on ? 'create & share here' : 'create vault');
+    if (!on) { $('#sec-filterbar').remove(); return; }
+    const label = (function () {
+      const t = secretTargets.find(function (x) { return x.bid === secretFilter; });
+      return t ? (t.kind === 'dm' ? '@ ' : '# ') + (t.label || secretFilter) : secretFilter;
+    })();
+    const html = '<div id="sec-filterbar" class="ax-sec-filterbar">secrets shared in '
+      + '<b>' + esc(label) + '</b><button type="button" id="sec-filter-clear">show all ✕</button></div>';
+    if ($('#sec-filterbar').length) $('#sec-filterbar').replaceWith(html);
+    else $('#sec-search').before(html);
+  }
+  $('#sec-vaults').closest('.ax-secrets-body').on('click', '#sec-filter-clear', function () {
+    location.hash = 'secrets';
+  });
   // loadSecrets fetches our tree plus, for each share target, the environments
   // members shared to it (live over the bus); merges remote by owner+vault.
+  // When filtered to a channel, it fetches only that channel's shared envs.
   function loadSecrets() {
+    if (secretFilter) {
+      $.getJSON('/api/secrets?channel=' + encodeURIComponent(secretFilter))
+        .done(function (list) {
+          const merged = [];
+          (list || []).forEach(function (ov) {
+            if (ov.mine) merged.push(ov); else mergeRemote(merged, ov);
+          });
+          secretAll = merged;
+          renderSecretList();
+        }).fail(function (x) { $('#sec-err').text('load failed: ' + (x.responseText || x.status)); });
+      return;
+    }
     const reqs = [$.getJSON('/api/secrets')];
     (secretTargets || []).forEach(function (t) {
       reqs.push($.getJSON('/api/secrets?channel=' + encodeURIComponent(t.bid)));
@@ -2328,8 +2390,15 @@ $(function () {
   $('#sec-vault-create').on('click', function () {
     const name = $('#sec-vault-name').val().trim();
     if (!name) return;
-    secPost('/api/secrets/vault', { name: name })
-      .done(function () { $('#sec-vault-name').val(''); loadSecrets(); }).fail(secErr);
+    secPost('/api/secrets/vault', { name: name }).done(function (v) {
+      $('#sec-vault-name').val('');
+      // When viewing a channel, give the new vault a default environment shared
+      // to it — otherwise it wouldn't appear in the filtered view at all.
+      if (secretFilter && v && v.id) {
+        secPost('/api/secrets/env', { vault_id: v.id, name: 'default', channels: [secretFilter] })
+          .done(loadSecrets).fail(secErr);
+      } else { loadSecrets(); }
+    }).fail(secErr);
   });
   $('#sec-vaults').on('click', '.ax-sec-env-add', function () {
     const vid = $(this).closest('.ax-sec-vault').data('vid');
@@ -2834,6 +2903,7 @@ $(function () {
   let vncSeen = {};        // /api/vnc/peers
   let oidcClients = [];    // /api/oidc clients, for the sidebar list
   let oidcUsers = [];      // /api/oidc passkey users, for the OIDC tab
+  let secretVaults = [];   // /api/secrets vault names (ours), for the sidebar list
   function markSeen(seen, list) {
     if (!Array.isArray(list)) return;
     const now = Date.now();
@@ -3741,7 +3811,11 @@ $(function () {
                   cl.client_name || (cl.client_id || '').slice(0, 8),
                   cl.confidential ? '' : 'public', null, 'oidc')).join('')
               : empty('no applications')))
-      + category('secrets',   'secrets',   null, addRow('manage →', 'secrets'))
+      + category('secrets',   'secrets',   secretVaults.length || null,
+          addRow('manage →', 'secrets')
+          + (secretVaults.length
+              ? secretVaults.map(v => row('online', v.name, '', null, 'secrets')).join('')
+              : empty('no vaults')))
       // + category('policies',  'policies',  null, empty('not configured')) // hidden for now
       // + category('apps',      'apps',      null, empty('coming soon')) // hidden for now
     );
@@ -5078,12 +5152,20 @@ $(function () {
       if (lastStatus) renderSidebarTree(lastStatus);
     }).fail(() => {});
   }
+  function refreshSecretVaults() {
+    $.getJSON('/api/secrets', (list) => {
+      secretVaults = (list || []).filter(o => o.mine).map(o => o.vault);
+      if (lastStatus) renderSidebarTree(lastStatus);
+    }).fail(() => {});
+  }
   refreshShellPeers();
   refreshVncPeers();
   refreshOIDC();
+  refreshSecretVaults();
   setInterval(refreshShellPeers, 5000);
   setInterval(refreshVncPeers, 5000);
   setInterval(refreshOIDC, 5000);
+  setInterval(refreshSecretVaults, 5000);
   setInterval(refreshStatus, 3000);
   setInterval(refreshCampPeers, 3000);
   setInterval(refreshMyDomains, 5000);

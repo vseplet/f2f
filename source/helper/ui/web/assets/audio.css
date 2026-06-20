@@ -39,6 +39,18 @@
     --warn:          #d97a3a;
 }
 
+/* One thin, in-theme scrollbar everywhere — instead of styling each scroll
+   container separately (and the default macOS bar leaking through the ones we
+   forget). WebKit + Firefox. */
+* {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+
 .ax-frame {
     background: var(--frame);
     color: var(--text);
@@ -364,14 +376,7 @@
     overflow-y: auto;
     overflow-x: hidden;
     padding: 14px 14px;
-    scrollbar-width: thin; /* Firefox */
-    scrollbar-color: var(--border) transparent; /* Firefox */
 }
-/* WebKit: thin, subtle bar instead of the default macOS one. */
-.ax-sidebar-scroll::-webkit-scrollbar { width: 8px; }
-.ax-sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
-.ax-sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-.ax-sidebar-scroll::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
 .ax-sidebar-resize {
     width: 4px;
     cursor: col-resize;
@@ -2467,15 +2472,30 @@ a.ax-domain-link:hover {
     align-items: center;
     gap: 8px;
 }
-/* The title eats the free space so the action buttons stay grouped together
-   at the right edge (members, then the call button rightmost). */
+/* Title sits left with the resource buttons (notes/secrets) right after it; a
+   spacer then pushes the meta/comms buttons (members/clear/call) to the right. */
 .ax-chat-header #chat-title {
-    flex: 1;
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.ax-chat-header-spacer { flex: 1; }
+/* Each per-channel resource button wears its sidebar category colour, so it
+   reads as "that resource" rather than the green of the call/notes buttons. */
+.ax-frame #chat-secrets { color: #a3e635; }
+.ax-frame #chat-secrets:hover { color: #a3e635; border-color: #a3e635; background: color-mix(in srgb, #a3e635 16%, transparent); }
+.ax-frame #chat-files { color: #e8c14e; }
+.ax-frame #chat-files:hover { color: #e8c14e; border-color: #e8c14e; background: color-mix(in srgb, #e8c14e 16%, transparent); }
+.ax-frame #chat-remote { color: #b18cf0; }
+.ax-frame #chat-remote:hover { color: #b18cf0; border-color: #b18cf0; background: color-mix(in srgb, #b18cf0 16%, transparent); }
+.ax-frame #chat-domains { color: #2fc7b0; }
+.ax-frame #chat-domains:hover { color: #2fc7b0; border-color: #2fc7b0; background: color-mix(in srgb, #2fc7b0 16%, transparent); }
+.ax-frame #chat-tunnel { color: #e08a4c; }
+.ax-frame #chat-tunnel:hover { color: #e08a4c; border-color: #e08a4c; background: color-mix(in srgb, #e08a4c 16%, transparent); }
+.ax-frame #chat-oidc { color: #7c5cff; }
+.ax-frame #chat-oidc:hover { color: #7c5cff; border-color: #7c5cff; background: color-mix(in srgb, #7c5cff 16%, transparent); }
 /* Clear-messages is destructive — muted by default, danger on hover, not the
    green of the call/members buttons. */
 .ax-frame #chat-clear { color: var(--muted); }
@@ -3440,6 +3460,10 @@ a.ax-domain-link:hover {
 .ax-sec-vname { font-weight: 600; }
 .ax-sec-scope, .ax-sec-owner { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 .ax-sec-owner { border-color: transparent; }
+.ax-sec-filterbar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 6px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent, #b18cf0); border-radius: 6px; }
+.ax-sec-filterbar b { color: var(--fg); font-weight: 600; }
+.ax-sec-filterbar #sec-filter-clear { margin-left: auto; background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 11px; padding: 1px 7px; }
+.ax-sec-filterbar #sec-filter-clear:hover { color: var(--accent); border-color: var(--accent); }
 .ax-sec-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .ax-sec-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--accent, #b18cf0); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 .ax-sec-chip-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
