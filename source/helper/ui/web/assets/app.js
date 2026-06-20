@@ -1720,6 +1720,7 @@ $(function () {
     // query → the read-only SQL console over messenger.db.
     if (h === 'query') { activateTab('query'); openQuery(); return; }
     if (h === 'oidc') { activateTab('oidc'); openOIDC(); return; }
+    if (h === 'secrets') { activateTab('secrets'); openSecrets(); return; }
     // "channel:new" → prompt for a name, create EMPTY (just us), open it and
     // pop the members panel so the user adds people deliberately — no
     // surprise "everyone's already in".
@@ -2181,6 +2182,198 @@ $(function () {
     const t = $('#oidc-issuer').text();
     if (t && navigator.clipboard) navigator.clipboard.writeText(t);
   });
+
+  // ---- Secrets (Doppler-style: vault → environments → secrets) ----
+  // We own vaults; each environment carries its own secrets AND its own share
+  // list (channels/DMs). Environments shared to a channel are pulled live from
+  // fellow members over the bus (read-only). Values are cleartext (v1).
+  function escA(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function secPost(url, body) {
+    return $.ajax({ url: url, method: 'POST', contentType: 'application/json', data: JSON.stringify(body) });
+  }
+  function secErr(x) { $('#sec-err').text('error: ' + (x.responseText || x.status)); }
+  let secretAll = [];      // merged: my tree + members' shared environments
+  let secretTargets = [];  // [{bid,label,kind}] share targets (channels + DMs)
+
+  function targetLabel(bid) {
+    const t = secretTargets.find(function (x) { return x.bid === bid; });
+    if (!t) return bid;
+    return (t.kind === 'dm' ? '@ ' : '# ') + (t.label || bid);
+  }
+  // shared-channel list of one of OUR environments (from the merged cache).
+  function envChannels(eid) {
+    for (const ov of secretAll) {
+      if (!ov.mine) continue;
+      for (const oe of (ov.environments || [])) if (oe.env.id === eid) return (oe.env.channels || []).slice();
+    }
+    return [];
+  }
+  function openSecrets() {
+    $('#sec-err').text(''); $('#sec-search').val('');
+    $.getJSON('/api/secrets/targets').done(function (t) { secretTargets = t || []; }).always(loadSecrets);
+  }
+  // loadSecrets fetches our tree plus, for each share target, the environments
+  // members shared to it (live over the bus); merges remote by owner+vault.
+  function loadSecrets() {
+    const reqs = [$.getJSON('/api/secrets')];
+    (secretTargets || []).forEach(function (t) {
+      reqs.push($.getJSON('/api/secrets?channel=' + encodeURIComponent(t.bid)));
+    });
+    Promise.allSettled(reqs).then(function (res) {
+      let merged = [];
+      if (res[0].status === 'fulfilled') merged = merged.concat(res[0].value || []);
+      else $('#sec-err').text('load failed');
+      for (let i = 1; i < res.length; i++) {
+        if (res[i].status !== 'fulfilled') continue;
+        (res[i].value || []).forEach(function (ov) { if (!ov.mine) mergeRemote(merged, ov); });
+      }
+      secretAll = merged;
+      renderSecretList();
+    });
+  }
+  // A remote vault may arrive via several channels with different env subsets —
+  // union them under one owner+vault entry, deduping environments by id.
+  function mergeRemote(merged, ov) {
+    const ex = merged.find(function (o) { return !o.mine && o.owner === ov.owner && o.vault.id === ov.vault.id; });
+    if (!ex) { merged.push(ov); return; }
+    (ov.environments || []).forEach(function (oe) {
+      if (!ex.environments.some(function (e) { return e.env.id === oe.env.id; })) ex.environments.push(oe);
+    });
+  }
+  function renderSecretList() {
+    const q = ($('#sec-search').val() || '').toLowerCase();
+    const list = secretAll.filter(function (ov) {
+      if (!q) return true;
+      let parts = [ov.vault.name, ov.owner_name || ''];
+      (ov.environments || []).forEach(function (oe) {
+        parts.push(oe.env.name);
+        (oe.env.channels || []).forEach(function (b) { parts.push(targetLabel(b)); });
+        (oe.secrets || []).forEach(function (s) { parts.push(s.name); });
+      });
+      return parts.join(' ').toLowerCase().indexOf(q) !== -1;
+    });
+    renderTree($('#sec-vaults'), list);
+  }
+  function secretRow(sec, editable) {
+    return '<div class="ax-sec-row" data-sid="' + escA(sec.id) + '">' +
+      '<span class="ax-sec-name">' + esc(sec.name) + '</span>' +
+      '<code class="ax-sec-val" data-val="' + escA(sec.value) + '">••••••••</code>' +
+      '<button type="button" class="ax-sec-reveal" title="reveal">show</button>' +
+      '<button type="button" class="ax-sec-copy" title="copy">copy</button>' +
+      (editable ? '<button type="button" class="ax-sec-edit">edit</button>' +
+                  '<button type="button" class="ax-sec-del" title="delete">✕</button>' : '') +
+      '</div>';
+  }
+  function renderEnv(oe, mine) {
+    const e = oe.env, chans = e.channels || [];
+    let chips = chans.map(function (bid) {
+      return '<span class="ax-sec-chip" data-bid="' + escA(bid) + '">' + esc(targetLabel(bid))
+        + (mine ? '<button type="button" class="ax-sec-chip-x" title="unshare">×</button>' : '') + '</span>';
+    }).join('');
+    if (!chans.length) chips = '<span class="ax-sec-scope">' + (mine ? 'private' : '') + '</span>';
+    let h = '<div class="ax-sec-env" data-eid="' + escA(e.id) + '"><div class="ax-sec-ehead">'
+      + '<span class="ax-sec-ename">' + esc(e.name) + '</span>'
+      + '<span class="ax-sec-chips">' + chips + '</span>';
+    if (mine) {
+      const avail = (secretTargets || []).filter(function (t) { return chans.indexOf(t.bid) === -1; });
+      if (avail.length) {
+        h += '<select class="ax-sec-share" title="share environment"><option value="">+ share…</option>'
+          + avail.map(function (t) { return '<option value="' + escA(t.bid) + '">' + (t.kind === 'dm' ? '@ ' : '# ') + esc(t.label || t.bid) + '</option>'; }).join('')
+          + '</select>';
+      }
+      h += '<button type="button" class="ax-sec-edel" title="delete environment">✕</button>';
+    }
+    h += '</div><div class="ax-sec-list">';
+    (oe.secrets || []).forEach(function (sec) { h += secretRow(sec, mine); });
+    h += '</div>';
+    if (mine) {
+      h += '<div class="ax-sec-add"><input class="ax-sec-k" placeholder="key">'
+        + '<input class="ax-sec-v" placeholder="value"><button type="button" class="ax-sec-addbtn">add</button></div>';
+    }
+    return h + '</div>';
+  }
+  function renderTree($c, owned) {
+    $c.empty();
+    if (!owned.length) { $c.html('<div class="ax-secrets-empty">none</div>'); return; }
+    owned.forEach(function (ov) {
+      const v = ov.vault, mine = !!ov.mine;
+      let head = '<div class="ax-sec-vhead"><span class="ax-sec-vname">' + esc(v.name) + '</span>';
+      if (mine) {
+        head += '<button type="button" class="ax-sec-env-add">+ env</button>'
+          + '<button type="button" class="ax-sec-vdel" title="delete vault">✕</button>';
+      } else {
+        head += '<span class="ax-sec-owner">' + esc(ov.owner_name || '') + '</span>';
+      }
+      head += '</div>';
+      let body = (ov.environments || []).map(function (oe) { return renderEnv(oe, mine); }).join('');
+      if (mine && !(ov.environments || []).length) body = '<div class="ax-secrets-empty">no environments — “+ env” to add one</div>';
+      $c.append('<div class="ax-sec-vault" data-vid="' + escA(v.id) + '">' + head + body + '</div>');
+    });
+  }
+  $('#sec-vault-create').on('click', function () {
+    const name = $('#sec-vault-name').val().trim();
+    if (!name) return;
+    secPost('/api/secrets/vault', { name: name })
+      .done(function () { $('#sec-vault-name').val(''); loadSecrets(); }).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-env-add', function () {
+    const vid = $(this).closest('.ax-sec-vault').data('vid');
+    const name = prompt('environment name (e.g. dev / staging / prod)');
+    if (!name || !name.trim()) return;
+    secPost('/api/secrets/env', { vault_id: vid, name: name.trim() }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-vdel', function () {
+    if (!confirm('delete this vault, all its environments and secrets?')) return;
+    secPost('/api/secrets/vault/delete', { id: $(this).closest('.ax-sec-vault').data('vid') }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-edel', function () {
+    if (!confirm('delete this environment and its secrets?')) return;
+    secPost('/api/secrets/env/delete', { id: $(this).closest('.ax-sec-env').data('eid') }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('change', '.ax-sec-share', function () {
+    const bid = $(this).val();
+    if (!bid) return;
+    const eid = $(this).closest('.ax-sec-env').data('eid');
+    const ch = envChannels(eid);
+    if (ch.indexOf(bid) === -1) ch.push(bid);
+    secPost('/api/secrets/env', { id: eid, channels: ch }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-chip-x', function () {
+    const bid = $(this).closest('.ax-sec-chip').data('bid');
+    const eid = $(this).closest('.ax-sec-env').data('eid');
+    const ch = envChannels(eid).filter(function (b) { return b !== bid; });
+    secPost('/api/secrets/env', { id: eid, channels: ch }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-addbtn', function () {
+    const $e = $(this).closest('.ax-sec-env');
+    const k = $e.find('.ax-sec-k').val().trim();
+    if (!k) return;
+    secPost('/api/secrets/entry', { env_id: $e.data('eid'), name: k, value: $e.find('.ax-sec-v').val() })
+      .done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-edit', function () {
+    const $row = $(this).closest('.ax-sec-row');
+    const name = $row.find('.ax-sec-name').text();
+    const nv = prompt('value for "' + name + '"', $row.find('.ax-sec-val').attr('data-val'));
+    if (nv === null) return;
+    secPost('/api/secrets/entry', { id: $row.data('sid'), name: name, value: nv }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-del', function () {
+    secPost('/api/secrets/entry/delete', { id: $(this).closest('.ax-sec-row').data('sid') }).done(loadSecrets).fail(secErr);
+  });
+  $('#sec-vaults').on('click', '.ax-sec-reveal', function () {
+    const $val = $(this).siblings('.ax-sec-val');
+    if ($val.hasClass('shown')) { $val.removeClass('shown').text('••••••••'); $(this).text('show'); }
+    else { $val.addClass('shown').text($val.attr('data-val')); $(this).text('hide'); }
+  });
+  $('#sec-vaults').on('click', '.ax-sec-copy', function () {
+    const v = $(this).siblings('.ax-sec-val').attr('data-val');
+    if (navigator.clipboard) navigator.clipboard.writeText(v);
+  });
+  $('#sec-search').on('input', renderSecretList);
 
   // renderThread paints the open thread: the root message, an "N replies"
   // divider, then the replies (oldest-first), all with edits applied. If the
@@ -3536,7 +3729,7 @@ $(function () {
                   cl.client_name || (cl.client_id || '').slice(0, 8),
                   cl.confidential ? '' : 'public', null, 'oidc')).join('')
               : empty('no applications')))
-      + category('secrets',   'secrets',   null, empty('coming soon'))
+      + category('secrets',   'secrets',   null, addRow('manage →', 'secrets'))
       // + category('policies',  'policies',  null, empty('not configured')) // hidden for now
       // + category('apps',      'apps',      null, empty('coming soon')) // hidden for now
     );

@@ -42,6 +42,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
+	"github.com/vseplet/f2f/source/helper/services/secrets"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/services/vnc"
@@ -219,6 +220,13 @@ func run(bind string, console bool, autostart bool) error {
 	// members of the channel; the drop catalog asks the channel registry.
 	dropSvc.SetMembershipCheck(channelsMgr.IsMember)
 
+	// Secrets vault store. Not on the block log (secrets must be mutable +
+	// truly deletable); a separate per-camp sqlite. Channel-scoped vaults are
+	// served to fellow members on demand over the bus, gated by IsMember.
+	secretsSvc := secrets.New(eng, store.CampDir, busSvc)
+	secretsSvc.SetMembershipCheck(channelsMgr.IsMember)
+	secretsSvc.Register()
+
 	// Notification hub — fans UI notifications out over SSE. Peers can push
 	// notifications to us over the bus ("notify" type); we also surface peer
 	// presence (bus link up/down) and inbound chat/call activity below.
@@ -305,7 +313,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc := vnc.New(busSvc)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, blocksMgr, channelsMgr, msgMgr, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, secretsSvc, blocksMgr, channelsMgr, msgMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
 	dbSvc.OnApply(srv.OnFrameApplied)
@@ -375,6 +383,10 @@ func run(bind string, console bool, autostart bool) error {
 			},
 			stop: dropSvc.Stop,
 			run:  dropSvc.PollPeers,
+		},
+		{
+			name:  "secrets",
+			start: func(_ string, st engine.Status) error { secretsSvc.Start(st.CampID); return nil },
 		},
 		{
 			name: "calls",
