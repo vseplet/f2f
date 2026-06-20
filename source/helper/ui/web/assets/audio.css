@@ -3456,12 +3456,24 @@ a.ax-domain-link:hover {
 .ax-sec-edel { margin-left: auto; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 .ax-sec-edel:hover { color: #e0686e; }
 .ax-sec-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
-.ax-sec-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ax-sec-row { display: flex; align-items: center; gap: 8px; font-size: 12px; border-radius: 4px; padding: 1px 4px; margin: 0 -4px; }
+.ax-sec-row:hover { background: var(--panel-2); }
 .ax-sec-name { min-width: 120px; color: var(--fg); }
 .ax-sec-val { flex: 1; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ax-sec-val.shown { color: var(--fg); }
 .ax-sec-row button { background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 11px; padding: 1px 6px; }
 .ax-sec-row button:hover { color: var(--accent); border-color: var(--accent); }
+/* Row actions stay hidden until you hover the row (or reveal its value) — keeps
+   the list calm. The value column flexes to fill the freed space. */
+.ax-sec-row .ax-sec-reveal,
+.ax-sec-row .ax-sec-copy,
+.ax-sec-row .ax-sec-edit,
+.ax-sec-row .ax-sec-del { visibility: hidden; }
+.ax-sec-row:hover .ax-sec-reveal,
+.ax-sec-row:hover .ax-sec-copy,
+.ax-sec-row:hover .ax-sec-edit,
+.ax-sec-row:hover .ax-sec-del,
+.ax-sec-row .ax-sec-val.shown ~ button { visibility: visible; }
 .ax-sec-del:hover { color: #e0686e !important; border-color: #e0686e !important; }
 .ax-sec-add { display: flex; gap: 6px; margin-top: 8px; }
 .ax-sec-add input { flex: 1; box-sizing: border-box; background: var(--bg, #15161a); color: var(--fg, #e6e6e6); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--mono, ui-monospace, monospace); }
