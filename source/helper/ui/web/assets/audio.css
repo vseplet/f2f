@@ -3010,9 +3010,21 @@ a.ax-domain-link:hover {
 /* Channel notes editor — a clean, full-pane writing surface (whitepaper-
    style): borderless textarea, transparent background, roomy line-height,
    auto-saved. Lives in its own main-window tab (#tab-note). */
+/* The notes tab-panel is a flex column that clips, so the note frame (flex:1)
+   fills it and #note-blocks scrolls INTERNALLY — bar at the frame's inner edge,
+   like chat — instead of the whole tab-panel scrolling (bar at the panel edge,
+   over a dark bg, slightly left of chat's). */
+#tab-note.tab-panel:not(.hidden) {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
 .ax-frame.ax-note {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
 }
 /* Same header layout as the chat frame — flex row with a gap so the action
    buttons don't touch. */
