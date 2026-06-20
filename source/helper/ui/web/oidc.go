@@ -37,6 +37,7 @@ func (s *Server) handleOIDCCreateClient(w http.ResponseWriter, r *http.Request) 
 		LogoutURIs   []string `json:"logout_uris"`
 		Public       bool     `json:"public"`
 		PKCE         bool     `json:"pkce"`
+		Channels     []string `json:"channels"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -48,6 +49,7 @@ func (s *Server) handleOIDCCreateClient(w http.ResponseWriter, r *http.Request) 
 		LogoutURIs:   req.LogoutURIs,
 		Confidential: !req.Public, // UI offers "Public Client"; default confidential
 		ForcePKCE:    req.PKCE,
+		Channels:     req.Channels,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -60,6 +62,23 @@ func (s *Server) handleOIDCCreateClient(w http.ResponseWriter, r *http.Request) 
 		"confidential":  info.Confidential,
 		"client_secret": secret, // plaintext
 	})
+}
+
+// handleOIDCSetChannels replaces an app's channel allowlist (who may log in).
+func (s *Server) handleOIDCSetChannels(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID       string   `json:"id"`
+		Channels []string `json:"channels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("id required"))
+		return
+	}
+	if err := s.oidc.SetClientChannels(req.ID, req.Channels); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleOIDCDeleteClient removes a registered application by id.

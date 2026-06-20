@@ -270,6 +270,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/log/stream", s.handleLogStream)
 	mux.HandleFunc("GET /api/oidc", s.handleOIDCInfo)
 	mux.HandleFunc("POST /api/oidc/clients", s.handleOIDCCreateClient)
+	mux.HandleFunc("POST /api/oidc/clients/channels", s.handleOIDCSetChannels)
 	mux.HandleFunc("DELETE /api/oidc/clients/{id}", s.handleOIDCDeleteClient)
 	// Notes are generic blocks (text) in a "note:<conv>" scope — the block
 	// engine surfaced under a meaningful entity name. No public /api/blocks.

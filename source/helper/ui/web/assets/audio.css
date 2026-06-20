@@ -3402,6 +3402,10 @@ a.ax-domain-link:hover {
 .ax-oidc-csecret { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .ax-oidc-cred { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: var(--muted); white-space: pre-wrap; margin-top: 2px; }
 .ax-oidc-clabel { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-top: 8px; opacity: 0.7; }
+.ax-oidc-chans { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.ax-oidc-chan-x, .ax-oidc-newchan-x { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; }
+.ax-oidc-chan-x:hover, .ax-oidc-newchan-x:hover { color: #e0686e; }
+.ax-oidc-locked { font-size: 12px; color: #e0a64e; }
 
 .ax-chat-input {
     display: flex;
