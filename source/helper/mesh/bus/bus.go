@@ -228,7 +228,29 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 			s.mu.Unlock()
 			clog.Info("bus", "QUIC listening on %s", addr)
 			s.acceptLoop(ctx, ln)
-			return
+			// acceptLoop only returns when the listener is gone. A clean shutdown
+			// (ctx cancelled by Stop) → exit. Otherwise the listener died under us
+			// (e.g. the overlay socket blipped) — and without rebinding we'd
+			// silently stop accepting NEW bus conns forever while already-
+			// established ones linger: peers see "dial: deadline" though the node
+			// looks alive (their Initials arrive, we never answer). Rebind.
+			if ctx.Err() != nil {
+				return
+			}
+			clog.Warn("bus", "QUIC listener on %s closed unexpectedly — rebinding", addr)
+			s.mu.Lock()
+			_ = ln.Close()
+			_ = pc.Close()
+			if s.ln == ln {
+				s.ln, s.lnConn = nil, nil
+			}
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1 * time.Second): // brief backoff, then rebind
+			}
+			continue
 		}
 		clog.Warn("bus", "listen %s: %v — retrying in 3s", addr, err)
 		select {
