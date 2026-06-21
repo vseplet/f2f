@@ -116,7 +116,7 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 		if req.Paged {
 			// Windowed roster: a slice per reply, rotating, so a big camp never
 			// overflows one UDP datagram. Client accumulates until CycleEnd.
-			peers, cycleEnd, total := hub.listWindow(campID, rosterWindow)
+			peers, cycleEnd, total := hub.listWindow(campID, pub, rosterWindow)
 			reply.Peers, reply.Paged, reply.CycleEnd, reply.Total = peers, true, cycleEnd, total
 		} else {
 			reply.Peers = hub.list(campID) // legacy: full list (old clients)

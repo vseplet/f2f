@@ -16,11 +16,16 @@ import (
 type peer struct {
 	info     rendezvous.PeerInfo
 	lastSeen time.Time
+	// cursor is this peer's own round-robin offset into the roster for windowed
+	// delivery. Per-peer (not per-camp) so each client's independent polls walk
+	// the whole roster contiguously — a shared cursor would let concurrent
+	// pollers advance past windows a given client never sees, wrongly aging out
+	// peers whose window it missed.
+	cursor int
 }
 
 type campState struct {
-	peers  map[string]*peer // keyed by pub
-	cursor int              // round-robin offset for windowed roster delivery
+	peers map[string]*peer // keyed by pub
 }
 
 // Hub is the whole server state: an in-memory map of camps, each a map
@@ -97,14 +102,16 @@ func (h *Hub) list(campID string) []rendezvous.PeerInfo {
 	return out
 }
 
-// listWindow returns up to `window` peers of a camp's roster, starting at the
-// per-camp cursor and advancing it, so successive announce replies rotate
-// across the whole roster (bounding each reply's size). cycleEnd is true on the
-// window that completes one full pass; the client treats the union of windows
-// up to a cycleEnd as the authoritative roster. A window >= roster size (small
-// camps) returns the full list every time with cycleEnd=true. Order is stable
-// (sorted by pub) so the rotation deterministically covers every peer.
-func (h *Hub) listWindow(campID string, window int) (peers []rendezvous.PeerInfo, cycleEnd bool, total int) {
+// listWindow returns up to `window` peers of a camp's roster for the requesting
+// peer (reqPub), starting at THAT peer's own cursor and advancing it, so the
+// peer's independent polls rotate contiguously over the whole roster. cycleEnd
+// is true on the window that completes one full pass; the client treats the
+// union of windows up to a cycleEnd as the authoritative roster. A window >=
+// roster size (small camps) returns the full list every time with cycleEnd=true.
+// Order is stable (sorted by pub) so the rotation deterministically covers every
+// peer. The cursor is per-peer (not per-camp) — a shared cursor would let
+// concurrent pollers advance past windows a given client never sees.
+func (h *Hub) listWindow(campID, reqPub string, window int) (peers []rendezvous.PeerInfo, cycleEnd bool, total int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c := h.camps[campID]
@@ -118,18 +125,23 @@ func (h *Hub) listWindow(campID string, window int) (peers []rendezvous.PeerInfo
 	sort.Strings(pubs)
 	total = len(pubs)
 	if total == 0 {
-		c.cursor = 0
 		return nil, true, 0
 	}
+	rp := c.peers[reqPub] // the requester (always present: upsert ran first)
 	if window <= 0 || window >= total {
 		out := make([]rendezvous.PeerInfo, 0, total)
 		for _, pub := range pubs {
 			out = append(out, c.peers[pub].info)
 		}
-		c.cursor = 0
+		if rp != nil {
+			rp.cursor = 0
+		}
 		return out, true, total
 	}
-	start := c.cursor
+	start := 0
+	if rp != nil {
+		start = rp.cursor
+	}
 	if start >= total {
 		start = 0
 	}
@@ -142,10 +154,12 @@ func (h *Hub) listWindow(campID string, window int) (peers []rendezvous.PeerInfo
 	for _, pub := range pubs[start:end] {
 		out = append(out, c.peers[pub].info)
 	}
-	if cycleEnd {
-		c.cursor = 0
-	} else {
-		c.cursor = end
+	if rp != nil {
+		if cycleEnd {
+			rp.cursor = 0
+		} else {
+			rp.cursor = end
+		}
 	}
 	return out, cycleEnd, total
 }
