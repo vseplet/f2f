@@ -1,4 +1,4 @@
-.PHONY: build kill dev camp-run camp-deploy camp-logs help
+.PHONY: build kill dev remote camp-run camp-deploy camp-logs help
 
 # wails CLI lives under $GOPATH/bin — use it directly so a stale PATH
 # doesn't make `wails` "not found" while it's actually installed.
@@ -13,6 +13,7 @@ SUDO := $(if $(filter 0,$(shell id -u)),,sudo)
 help:
 	@echo "f2f targets:"
 	@echo "  make dev                  run helper (cross-platform: works inside a linux VM too)"
+	@echo "  make remote               TUI to expose this node's terminal/desktop to channels"
 	@echo "  make build                build release binary at ./f2f-mac"
 	@echo "  make kill                 kill any running f2f-mac process"
 	@echo "  make camp-run             run camp server locally (go run)"
@@ -23,6 +24,10 @@ help:
 F2F_LOG ?= info
 dev:
 	-$(SUDO) F2F_LOG=$(F2F_LOG) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper --console $(ARGS)
+
+# No sudo: the remote TUI only talks to the running helper's loopback API.
+remote:
+	go run ./source/helper remote $(ARGS)
 
 build:
 	go build -o f2f-mac ./source/mac

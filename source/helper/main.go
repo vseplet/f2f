@@ -84,6 +84,16 @@ func main() {
 		return
 	}
 
+	// `f2f remote …` — interactive TUI to expose this node's terminal/desktop
+	// to channels. Talks to the running helper's loopback API; no engine here.
+	if len(args) > 0 && args[0] == "remote" {
+		if err := cli.RunRemote(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `f2f up [flags]` — non-interactive: bring up the last-used camp
 	// (login items / headless). Bare `f2f` shows the interactive picker.
 	autostart := false
