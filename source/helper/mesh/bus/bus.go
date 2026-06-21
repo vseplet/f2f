@@ -43,16 +43,19 @@ import (
 )
 
 // busDropTracer is a minimal qlogwriter.Recorder wired into the QUIC transport
-// (only when F2F_BUS_QLOG is set) to surface transport-level packet drops into
-// our normal log. A silently-ignored inbound Initial — the symptom when two
-// nodes can't form a bus conn though packets arrive — shows up here with its
-// reason (payload_decrypt_error / key_unavailable / unknown_connection_id / …).
+// to surface transport-level packet drops into our normal log. A silently-
+// ignored inbound Initial — the symptom when two nodes can't form a bus conn
+// though packets arrive — shows up here with its reason (payload_decrypt_error /
+// key_unavailable / unknown_connection_id / …). Any other transport event is
+// logged at debug so a drop that fires under a different event type isn't lost.
 type busDropTracer struct{}
 
 func (busDropTracer) RecordEvent(ev qlogwriter.Event) {
 	if pd, ok := ev.(qlog.PacketDropped); ok {
-		clog.Info("bus", "qlog: packet dropped (%dB) — %s", pd.Raw.Length, pd.Trigger)
+		clog.Warn("bus", "qlog: packet dropped (%dB) — %s", pd.Raw.Length, pd.Trigger)
+		return
 	}
+	clog.Debug("bus", "qlog: transport event %T", ev)
 }
 func (busDropTracer) Close() error { return nil }
 
@@ -234,14 +237,12 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 		pc, err := lc.ListenPacket(ctx, "udp", addr)
 		var ln *quic.Listener
 		if err == nil {
-			if os.Getenv("F2F_BUS_QLOG") != "" {
-				// Diagnostic: wrap the socket in a Transport so we get a tracer
-				// hook for dropped packets (quic.Listen has none). Opt-in only.
-				tr := &quic.Transport{Conn: pc, Tracer: busDropTracer{}}
-				ln, err = tr.Listen(s.tlsServer, s.quicConf)
-			} else {
-				ln, err = quic.Listen(pc, s.tlsServer, s.quicConf)
-			}
+			// Always wrap the socket in a Transport so the drop tracer is live:
+			// a silently-ignored inbound Initial (packets arrive on f2f0, server
+			// never replies — the two-nodes-can't-pair symptom) surfaces here with
+			// its reason. quic.Listen has no tracer hook, so we can't use it.
+			tr := &quic.Transport{Conn: pc, Tracer: busDropTracer{}}
+			ln, err = tr.Listen(s.tlsServer, s.quicConf)
 			if err != nil {
 				_ = pc.Close()
 			}
