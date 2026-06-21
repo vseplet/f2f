@@ -28,6 +28,12 @@ const (
 	maxNameLen   = 64
 	maxCampIDLen = 128
 	maxPayload   = 1024
+	// rosterWindow is how many peers a paged announce reply carries. Each
+	// PeerInfo is ~0.3 KB of JSON; kept small so a reply (plus the `you` field)
+	// fits in a single un-fragmented UDP datagram (≤ MTU) — fragmented UDP is
+	// dropped by some middleboxes on the path to the fly.io camp. Camps smaller
+	// than this get the whole roster in one reply (cycleEnd every time).
+	rosterWindow = 3
 )
 
 // pickBindAddress mirrors the TS server: on fly.io UDP only reaches a
@@ -106,7 +112,15 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 			log.Printf("join: %s@%s pub=%s from %s", name, campID, short(pub), src)
 		}
 
-		reply := rendezvous.AnnouncedResp{T: "announced", You: info, Peers: hub.list(campID)}
+		reply := rendezvous.AnnouncedResp{T: "announced", You: info}
+		if req.Paged {
+			// Windowed roster: a slice per reply, rotating, so a big camp never
+			// overflows one UDP datagram. Client accumulates until CycleEnd.
+			peers, cycleEnd, total := hub.listWindow(campID, pub, rosterWindow)
+			reply.Peers, reply.Paged, reply.CycleEnd, reply.Total = peers, true, cycleEnd, total
+		} else {
+			reply.Peers = hub.list(campID) // legacy: full list (old clients)
+		}
 		if data, err := json.Marshal(reply); err == nil {
 			conn.WriteToUDP(data, src)
 		}
