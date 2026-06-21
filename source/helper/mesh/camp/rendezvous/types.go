@@ -42,6 +42,11 @@ type AnnounceReq struct {
 	// Pub is the local Ed25519 public key in hex. Empty in static --peer
 	// mode (no identity); always set in camp mode now.
 	Pub string `json:"pub,omitempty"`
+	// Paged opts into windowed roster delivery: the server returns a slice
+	// of the roster per reply, rotating across replies, so a big camp never
+	// overflows a single UDP datagram. Old clients omit it and keep getting
+	// the full list — backward-compatible.
+	Paged bool `json:"paged,omitempty"`
 }
 
 // AnnouncedResp is what camp sends back on success. The client parses
@@ -52,6 +57,16 @@ type AnnouncedResp struct {
 	T     string     `json:"t"` // "announced"
 	You   PeerInfo   `json:"you"`
 	Peers []PeerInfo `json:"peers,omitempty"`
+	// Paged is set when the server returned a roster WINDOW (not the full
+	// list). The client then accumulates windows and only reconciles its
+	// peer set when CycleEnd marks the last window of a full rotation.
+	Paged bool `json:"paged,omitempty"`
+	// CycleEnd marks the window that completes one full pass over the roster.
+	// Only meaningful when Paged. The client treats the union of windows seen
+	// up to (and including) a CycleEnd as the authoritative roster.
+	CycleEnd bool `json:"cycle_end,omitempty"`
+	// Total is the full roster size (informational; for the UI/debug).
+	Total int `json:"total,omitempty"`
 }
 
 // AnnounceErr is the error reply (bad_name, bad_camp_id, camp_full,

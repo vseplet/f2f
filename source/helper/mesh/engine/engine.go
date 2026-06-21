@@ -1777,7 +1777,11 @@ func (e *Engine) interceptPeerForLocked(_ netip.Addr) string {
 
 func (e *Engine) peerToTunLoop(ctx context.Context) {
 	defer e.workers.Done()
-	buf := make([]byte, utun.MTU)
+	// Sized for the largest datagram we may receive, not just data packets:
+	// control replies (the camp announce roster) can exceed the tunnel MTU. A
+	// data packet is still ≤ MTU; reading into a bigger buffer is harmless
+	// (n-based). Undersizing here silently truncated the announce roster.
+	buf := make([]byte, 65535)
 	for {
 		n, from, err := e.udp.ReadFromUDP(buf)
 		if err != nil {

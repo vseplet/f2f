@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -18,7 +19,8 @@ type peer struct {
 }
 
 type campState struct {
-	peers map[string]*peer // keyed by pub
+	peers  map[string]*peer // keyed by pub
+	cursor int              // round-robin offset for windowed roster delivery
 }
 
 // Hub is the whole server state: an in-memory map of camps, each a map
@@ -93,6 +95,59 @@ func (h *Hub) list(campID string) []rendezvous.PeerInfo {
 		out = append(out, p.info)
 	}
 	return out
+}
+
+// listWindow returns up to `window` peers of a camp's roster, starting at the
+// per-camp cursor and advancing it, so successive announce replies rotate
+// across the whole roster (bounding each reply's size). cycleEnd is true on the
+// window that completes one full pass; the client treats the union of windows
+// up to a cycleEnd as the authoritative roster. A window >= roster size (small
+// camps) returns the full list every time with cycleEnd=true. Order is stable
+// (sorted by pub) so the rotation deterministically covers every peer.
+func (h *Hub) listWindow(campID string, window int) (peers []rendezvous.PeerInfo, cycleEnd bool, total int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.camps[campID]
+	if c == nil {
+		return nil, true, 0
+	}
+	pubs := make([]string, 0, len(c.peers))
+	for pub := range c.peers {
+		pubs = append(pubs, pub)
+	}
+	sort.Strings(pubs)
+	total = len(pubs)
+	if total == 0 {
+		c.cursor = 0
+		return nil, true, 0
+	}
+	if window <= 0 || window >= total {
+		out := make([]rendezvous.PeerInfo, 0, total)
+		for _, pub := range pubs {
+			out = append(out, c.peers[pub].info)
+		}
+		c.cursor = 0
+		return out, true, total
+	}
+	start := c.cursor
+	if start >= total {
+		start = 0
+	}
+	end := start + window
+	cycleEnd = end >= total
+	if end > total {
+		end = total
+	}
+	out := make([]rendezvous.PeerInfo, 0, end-start)
+	for _, pub := range pubs[start:end] {
+		out = append(out, c.peers[pub].info)
+	}
+	if cycleEnd {
+		c.cursor = 0
+	} else {
+		c.cursor = end
+	}
+	return out, cycleEnd, total
 }
 
 // evictStale drops peers idle past the cutoff and removes empty camps.

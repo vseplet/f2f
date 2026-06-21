@@ -30,10 +30,12 @@ type AnnounceClient struct {
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
-	// onPeers, if set, is called with the roster carried in each
-	// announce reply. Set once before Run (the announce-delivered peer
-	// list replaces the HTTP poll).
-	onPeers func([]PeerInfo)
+	// onPeers, if set, is called with the roster carried in each announce
+	// reply. Set once before Run. paged/cycleEnd come from windowed delivery:
+	// when paged, the slice is a WINDOW (not the full roster) and the consumer
+	// must accumulate windows, reconciling only on cycleEnd. When !paged the
+	// slice is the full roster (legacy server / small camp) — reconcile now.
+	onPeers func(peers []PeerInfo, paged, cycleEnd bool)
 
 	// Liveness counters for the UI's camp-health section. lastSentMs is
 	// stamped right before WriteToUDP; lastReplyMs is stamped when a
@@ -99,7 +101,7 @@ func (a *AnnounceClient) SetName(name string) { a.name.Store(&name) }
 
 // OnPeers registers the callback invoked with the roster carried in
 // announce replies. Set once before Run.
-func (a *AnnounceClient) OnPeers(fn func([]PeerInfo)) { a.onPeers = fn }
+func (a *AnnounceClient) OnPeers(fn func(peers []PeerInfo, paged, cycleEnd bool)) { a.onPeers = fn }
 
 // LastSentMs / LastReplyMs / LastRTTMs report the UDP-side liveness
 // timestamps. Zero means "never". Read concurrently from the UI.
@@ -119,7 +121,7 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 	defer func() { _ = a.conn.SetReadDeadline(time.Time{}) }()
 
 	backoff := 300 * time.Millisecond
-	buf := make([]byte, 4096)
+	buf := make([]byte, 65535) // hold a full announce reply (roster can exceed MTU)
 	for time.Now().Before(deadline) {
 		if err := a.sendAnnounce(); err != nil {
 			return PeerInfo{}, err
@@ -141,7 +143,7 @@ func (a *AnnounceClient) AnnounceOnce(timeout time.Duration) (PeerInfo, error) {
 				}
 				return PeerInfo{}, fmt.Errorf("read: %w", err)
 			}
-			info, _, perr, isAnnounceReply := parseAnnounceReply(buf[:n])
+			info, _, _, _, perr, isAnnounceReply := parseAnnounceReply(buf[:n])
 			if !isAnnounceReply {
 				continue // some other UDP noise; keep reading until deadline
 			}
@@ -191,7 +193,7 @@ func (a *AnnounceClient) Run(ctx context.Context, every time.Duration) {
 // announce-protocol message (so the loop should not treat it as tunnel
 // data); false to fall through.
 func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
-	info, peers, perr, isAnnounceReply := parseAnnounceReply(pkt)
+	info, peers, paged, cycleEnd, perr, isAnnounceReply := parseAnnounceReply(pkt)
 	if !isAnnounceReply {
 		return false
 	}
@@ -205,30 +207,29 @@ func (a *AnnounceClient) HandlePacket(pkt []byte) bool {
 		a.lastRTTMs.Store(now - sent)
 	}
 	a.self.Store(&info)
-	if len(peers) > 0 && a.onPeers != nil {
-		a.onPeers(peers)
+	// A paged window can legitimately be empty (cursor past the end on a tiny
+	// camp) but still carry cycleEnd — deliver it so the consumer can close the
+	// cycle. Non-paged empty rosters are skipped as before.
+	if a.onPeers != nil && (paged || len(peers) > 0) {
+		a.onPeers(peers, paged, cycleEnd)
 	}
 	return true
 }
 
-func parseAnnounceReply(pkt []byte) (info PeerInfo, peers []PeerInfo, perr error, isAnnounceReply bool) {
+func parseAnnounceReply(pkt []byte) (info PeerInfo, peers []PeerInfo, paged, cycleEnd bool, perr error, isAnnounceReply bool) {
 	var head struct {
 		T string `json:"t"`
 	}
 	if err := json.Unmarshal(pkt, &head); err != nil {
-		return PeerInfo{}, nil, nil, false
+		return PeerInfo{}, nil, false, false, nil, false
 	}
 	switch head.T {
 	case "announced":
-		var msg struct {
-			T     string     `json:"t"`
-			You   PeerInfo   `json:"you"`
-			Peers []PeerInfo `json:"peers"`
-		}
+		var msg AnnouncedResp
 		if err := json.Unmarshal(pkt, &msg); err != nil {
-			return PeerInfo{}, nil, fmt.Errorf("decode announced: %w", err), true
+			return PeerInfo{}, nil, false, false, fmt.Errorf("decode announced: %w", err), true
 		}
-		return msg.You, msg.Peers, nil, true
+		return msg.You, msg.Peers, msg.Paged, msg.CycleEnd, nil, true
 	case "error":
 		var msg struct {
 			T       string `json:"t"`
@@ -236,9 +237,9 @@ func parseAnnounceReply(pkt []byte) (info PeerInfo, peers []PeerInfo, perr error
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(pkt, &msg)
-		return PeerInfo{}, nil, fmt.Errorf("camp: %s: %s", msg.Code, msg.Message), true
+		return PeerInfo{}, nil, false, false, fmt.Errorf("camp: %s: %s", msg.Code, msg.Message), true
 	}
-	return PeerInfo{}, nil, nil, false
+	return PeerInfo{}, nil, false, false, nil, false
 }
 
 func (a *AnnounceClient) sendAnnounce() error {
@@ -256,6 +257,7 @@ func (a *AnnounceClient) sendAnnounce() error {
 		Name:   name,
 		CampID: a.campID,
 		Pub:    a.pub,
+		Paged:  true, // opt into windowed roster (server falls back to full list if old)
 	})
 	if err != nil {
 		return err

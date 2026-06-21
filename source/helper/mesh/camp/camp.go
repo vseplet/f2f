@@ -58,6 +58,11 @@ type Service struct {
 	announceDone  chan struct{}
 	unregisterUDP func()
 
+	// cycleAcc accumulates peers across a paged roster's windows (keyed by
+	// pub). Reconciled into the engine only when a window marks cycleEnd —
+	// see onUpdate. Touched solely on the announce/read-loop goroutine.
+	cycleAcc map[string]rendezvous.PeerInfo
+
 	// snapshot holds the latest roster (defensive copy). Read lock-free
 	// via atomic for the /api/status hot path.
 	snapshot atomic.Pointer[[]rendezvous.PeerInfo]
@@ -153,7 +158,9 @@ func (s *Service) Start(c *config.Camp) error {
 	announceDone := make(chan struct{})
 	go func() {
 		defer close(announceDone)
-		ac.Run(ctx, 20*time.Second) // sends immediately on entry, then every 20s
+		ac.Run(ctx, 4*time.Second) // sends immediately, then every 4s; with paged
+		//                            windows (rosterWindow) a full roster cycle
+		//                            completes in ceil(N/window) ticks.
 	}()
 
 	s.mu.Lock()
@@ -253,7 +260,38 @@ func (s *Service) AnnounceStats() (sentMs, replyMs, rttMs int64) {
 // the UI hot path, pushes the roster into the engine so the live peers
 // map reconciles, and persists the roster into the per-camp catalog so
 // the UI sees known nodes (incl. currently-offline) on the next start.
-func (s *Service) onUpdate(peers []rendezvous.PeerInfo) {
+func (s *Service) onUpdate(peers []rendezvous.PeerInfo, paged, cycleEnd bool) {
+	if !paged {
+		// Legacy / small-camp full list — authoritative, reconcile now.
+		s.applyRoster(peers)
+		return
+	}
+	// Paged: each reply is a WINDOW. Accumulate across windows; reconcile the
+	// engine's peer set only when a window completes the rotation (cycleEnd),
+	// so a peer is dropped only after it failed to appear in a whole cycle —
+	// never on a window that simply doesn't include it.
+	if s.cycleAcc == nil {
+		s.cycleAcc = map[string]rendezvous.PeerInfo{}
+	}
+	for _, p := range peers {
+		if p.Pub != "" {
+			s.cycleAcc[p.Pub] = p
+		}
+	}
+	if !cycleEnd {
+		return
+	}
+	full := make([]rendezvous.PeerInfo, 0, len(s.cycleAcc))
+	for _, p := range s.cycleAcc {
+		full = append(full, p)
+	}
+	s.cycleAcc = nil
+	s.applyRoster(full)
+}
+
+// applyRoster pushes an authoritative roster into the engine (reconciling the
+// live peer map), refreshes the UI snapshot, and persists the catalog.
+func (s *Service) applyRoster(peers []rendezvous.PeerInfo) {
 	dup := append([]rendezvous.PeerInfo(nil), peers...)
 	s.snapshot.Store(&dup)
 	s.eng.ApplyCampRoster(toRoster(peers)) // map wire shape → engine's neutral type
