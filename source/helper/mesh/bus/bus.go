@@ -36,28 +36,9 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
 )
-
-// busDropTracer is a minimal qlogwriter.Recorder wired into the QUIC transport
-// to surface transport-level packet drops into our normal log. A silently-
-// ignored inbound Initial — the symptom when two nodes can't form a bus conn
-// though packets arrive — shows up here with its reason (payload_decrypt_error /
-// key_unavailable / unknown_connection_id / …). Any other transport event is
-// logged at debug so a drop that fires under a different event type isn't lost.
-type busDropTracer struct{}
-
-func (busDropTracer) RecordEvent(ev qlogwriter.Event) {
-	if pd, ok := ev.(qlog.PacketDropped); ok {
-		clog.Warn("bus", "qlog: packet dropped (%dB) — %s", pd.Raw.Length, pd.Trigger)
-		return
-	}
-	clog.Debug("bus", "qlog: transport event %T", ev)
-}
-func (busDropTracer) Close() error { return nil }
 
 const (
 	alpn = "f2f-bus"
@@ -144,12 +125,6 @@ func New(r Resolver) (*Service, error) {
 		return nil, fmt.Errorf("bus: cert: %w", err)
 	}
 	qc := &quic.Config{MaxIdleTimeout: 90 * time.Second, KeepAlivePeriod: 20 * time.Second}
-	// Per-connection qlog when QLOGDIR is set (nil otherwise — no cost). This is
-	// the layer that records a handshake/decrypt failure of a conn that DID form;
-	// the transport drop-tracer (busDropTracer) only sees pre-conn drops. Use
-	// both to tell "Initial dropped before any conn" from "conn formed, then
-	// handshake failed".
-	qc.Tracer = qlog.DefaultConnectionTracer
 	s := &Service{
 		resolver:       r,
 		tlsServer:      &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
@@ -237,13 +212,7 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 		pc, err := lc.ListenPacket(ctx, "udp", addr)
 		var ln *quic.Listener
 		if err == nil {
-			// Always wrap the socket in a Transport so the drop tracer is live:
-			// a silently-ignored inbound Initial (packets arrive on f2f0, server
-			// never replies — the two-nodes-can't-pair symptom) surfaces here with
-			// its reason. quic.Listen has no tracer hook, so we can't use it.
-			tr := &quic.Transport{Conn: pc, Tracer: busDropTracer{}}
-			ln, err = tr.Listen(s.tlsServer, s.quicConf)
-			if err != nil {
+			if ln, err = quic.Listen(pc, s.tlsServer, s.quicConf); err != nil {
 				_ = pc.Close()
 			}
 		}
@@ -259,29 +228,7 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 			s.mu.Unlock()
 			clog.Info("bus", "QUIC listening on %s", addr)
 			s.acceptLoop(ctx, ln)
-			// acceptLoop only returns when the listener is gone. A clean shutdown
-			// (ctx cancelled by Stop) → exit. Otherwise the listener died under us
-			// (e.g. the overlay socket blipped) — and without rebinding we'd
-			// silently stop accepting NEW bus conns forever while already-
-			// established ones linger: peers see "dial: deadline" though the node
-			// looks alive (their Initials arrive, we never answer). Rebind.
-			if ctx.Err() != nil {
-				return
-			}
-			clog.Warn("bus", "QUIC listener on %s closed unexpectedly — rebinding", addr)
-			s.mu.Lock()
-			_ = ln.Close()
-			_ = pc.Close()
-			if s.ln == ln {
-				s.ln, s.lnConn = nil, nil
-			}
-			s.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(1 * time.Second): // brief backoff, then rebind
-			}
-			continue
+			return
 		}
 		clog.Warn("bus", "listen %s: %v — retrying in 3s", addr, err)
 		select {
