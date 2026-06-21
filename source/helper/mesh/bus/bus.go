@@ -141,6 +141,12 @@ func New(r Resolver) (*Service, error) {
 		return nil, fmt.Errorf("bus: cert: %w", err)
 	}
 	qc := &quic.Config{MaxIdleTimeout: 90 * time.Second, KeepAlivePeriod: 20 * time.Second}
+	// Per-connection qlog when QLOGDIR is set (nil otherwise — no cost). This is
+	// the layer that records a handshake/decrypt failure of a conn that DID form;
+	// the transport drop-tracer (busDropTracer) only sees pre-conn drops. Use
+	// both to tell "Initial dropped before any conn" from "conn formed, then
+	// handshake failed".
+	qc.Tracer = qlog.DefaultConnectionTracer
 	s := &Service{
 		resolver:       r,
 		tlsServer:      &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13},
