@@ -136,6 +136,10 @@ type Domain struct {
 	Host  string `json:"host,omitempty"`
 	Port  int    `json:"port,omitempty"`
 	Proto string `json:"proto,omitempty"`
+	// Channels is the reachable-by allowlist: only members of these channel bids
+	// may reach the domain through the reverse-proxy (empty = everyone). Persisted
+	// so the gating survives a restart.
+	Channels []string `json:"channels,omitempty"`
 }
 
 type Firewall struct {
