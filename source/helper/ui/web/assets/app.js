@@ -5107,16 +5107,19 @@ $(function () {
 
   // ---- my CA (DNS tab) ----
   function refreshMyCA() {
+    // .ax-section-status is display:none until it also has .live — add it so the
+    // populated row actually shows (otherwise the CA is in the DOM but hidden).
     $.getJSON('/api/my-ca', (data) => {
+      const $el = $('#my-ca-info').addClass('live');
       if (!data || !data.common_name) {
-        $('#my-ca-info').text('not running');
+        $el.text('not running');
         return;
       }
-      $('#my-ca-info').html(
+      $el.html(
         '<strong>' + $('<span>').text(data.common_name).html() + '</strong>' +
         ' <span class="muted">fp ' + (data.fingerprint || '—') + '</span>'
       );
-    }).fail(() => { $('#my-ca-info').text('—'); });
+    }).fail(() => { $('#my-ca-info').addClass('live').text('—'); });
   }
 
   // ---- trusted peer CAs (DNS tab) ----
