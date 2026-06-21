@@ -36,9 +36,25 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/qlog"
+	"github.com/quic-go/quic-go/qlogwriter"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
 )
+
+// busDropTracer is a minimal qlogwriter.Recorder wired into the QUIC transport
+// (only when F2F_BUS_QLOG is set) to surface transport-level packet drops into
+// our normal log. A silently-ignored inbound Initial — the symptom when two
+// nodes can't form a bus conn though packets arrive — shows up here with its
+// reason (payload_decrypt_error / key_unavailable / unknown_connection_id / …).
+type busDropTracer struct{}
+
+func (busDropTracer) RecordEvent(ev qlogwriter.Event) {
+	if pd, ok := ev.(qlog.PacketDropped); ok {
+		clog.Info("bus", "qlog: packet dropped (%dB) — %s", pd.Raw.Length, pd.Trigger)
+	}
+}
+func (busDropTracer) Close() error { return nil }
 
 const (
 	alpn = "f2f-bus"
@@ -212,7 +228,15 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 		pc, err := lc.ListenPacket(ctx, "udp", addr)
 		var ln *quic.Listener
 		if err == nil {
-			if ln, err = quic.Listen(pc, s.tlsServer, s.quicConf); err != nil {
+			if os.Getenv("F2F_BUS_QLOG") != "" {
+				// Diagnostic: wrap the socket in a Transport so we get a tracer
+				// hook for dropped packets (quic.Listen has none). Opt-in only.
+				tr := &quic.Transport{Conn: pc, Tracer: busDropTracer{}}
+				ln, err = tr.Listen(s.tlsServer, s.quicConf)
+			} else {
+				ln, err = quic.Listen(pc, s.tlsServer, s.quicConf)
+			}
+			if err != nil {
 				_ = pc.Close()
 			}
 		}
