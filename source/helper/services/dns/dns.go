@@ -168,7 +168,7 @@ func (s *Service) SetPinned(domain string, v4s []string) {
 		return
 	}
 	_ = platform.FlushDNSCache()
-	clog.Info("dns", "pinned %s → %s", domain, strings.Join(v4s, ", "))
+	clog.Debug("dns", "pinned %s → %s", domain, strings.Join(v4s, ", "))
 }
 
 // RemovePinned drops a pinned domain and its OS resolver entry.
@@ -308,7 +308,7 @@ func (s *Service) seedFromStore() error {
 	}
 	mine := make([]Entry, 0, len(camp.MyDomains))
 	for _, d := range camp.MyDomains {
-		mine = append(mine, Entry{Name: d.Name, Host: d.Host, Port: d.Port, Proto: d.Proto})
+		mine = append(mine, Entry{Name: d.Name, Host: d.Host, Port: d.Port, Proto: d.Proto, Channels: d.Channels})
 	}
 	s.my.Store(&mine)
 
@@ -763,10 +763,11 @@ func toCampDomains(list []Entry) []config.Domain {
 	out := make([]config.Domain, 0, len(list))
 	for _, d := range list {
 		out = append(out, config.Domain{
-			Name:  d.Name,
-			Host:  d.Host,
-			Port:  d.Port,
-			Proto: d.Proto,
+			Name:     d.Name,
+			Host:     d.Host,
+			Port:     d.Port,
+			Proto:    d.Proto,
+			Channels: d.Channels,
 		})
 	}
 	return out
