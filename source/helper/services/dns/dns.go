@@ -168,7 +168,7 @@ func (s *Service) SetPinned(domain string, v4s []string) {
 		return
 	}
 	_ = platform.FlushDNSCache()
-	clog.Info("dns", "pinned %s → %s", domain, strings.Join(v4s, ", "))
+	clog.Debug("dns", "pinned %s → %s", domain, strings.Join(v4s, ", "))
 }
 
 // RemovePinned drops a pinned domain and its OS resolver entry.

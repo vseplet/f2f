@@ -756,7 +756,7 @@ func (s *Service) refreshOnce() {
 			info.Prefixes = append(info.Prefixes, p.String())
 		}
 		newPinned := append([]string(nil), info.Prefixes...)
-		clog.Info("tunnel", "refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
+		clog.Debug("tunnel", "refreshed routes for %s → %s", d.spec, strings.Join(info.Prefixes, ", "))
 		s.mu.Unlock()
 		s.pinDomain(d.spec, newPinned)
 	}
