@@ -63,6 +63,15 @@ type Service struct {
 	// see onUpdate. Touched solely on the announce/read-loop goroutine.
 	cycleAcc map[string]rendezvous.PeerInfo
 
+	// rosterSeen / rosterMiss give grace to peers that miss a cycle: a single
+	// lost UDP window-reply leaves cycleAcc incomplete, and dropping those peers
+	// immediately churns the whole roster (peer leaves → bus tears its conn →
+	// reappears next cycle). Instead carry a peer forward for rosterGraceCycles
+	// missed cycles before truly dropping it. Touched only on the announce
+	// goroutine, like cycleAcc.
+	rosterSeen map[string]rendezvous.PeerInfo // last-known info per pub
+	rosterMiss map[string]int                 // consecutive cycles a known pub was absent
+
 	// snapshot holds the latest roster (defensive copy). Read lock-free
 	// via atomic for the /api/status hot path.
 	snapshot atomic.Pointer[[]rendezvous.PeerInfo]
@@ -281,13 +290,40 @@ func (s *Service) onUpdate(peers []rendezvous.PeerInfo, paged, cycleEnd bool) {
 	if !cycleEnd {
 		return
 	}
-	full := make([]rendezvous.PeerInfo, 0, len(s.cycleAcc))
-	for _, p := range s.cycleAcc {
-		full = append(full, p)
+	// Cycle complete. Apply grace so a single lost window-reply doesn't evict the
+	// peers it carried: a known peer absent this cycle is carried forward until it
+	// has missed rosterGraceCycles cycles in a row, then truly dropped.
+	if s.rosterSeen == nil {
+		s.rosterSeen = map[string]rendezvous.PeerInfo{}
+		s.rosterMiss = map[string]int{}
+	}
+	for pub, p := range s.cycleAcc { // present now → refresh, reset miss-count
+		s.rosterSeen[pub] = p
+		s.rosterMiss[pub] = 0
+	}
+	for pub := range s.rosterSeen { // absent now → bump, drop past the grace
+		if _, present := s.cycleAcc[pub]; present {
+			continue
+		}
+		s.rosterMiss[pub]++
+		if s.rosterMiss[pub] > rosterGraceCycles {
+			delete(s.rosterSeen, pub)
+			delete(s.rosterMiss, pub)
+		}
 	}
 	s.cycleAcc = nil
+	full := make([]rendezvous.PeerInfo, 0, len(s.rosterSeen))
+	for _, p := range s.rosterSeen {
+		full = append(full, p)
+	}
 	s.applyRoster(full)
 }
+
+// rosterGraceCycles is how many full roster cycles a known peer may be absent
+// (e.g. its paged window-reply was lost) before we evict it. At a ~4s announce
+// and a few windows per cycle this is tens of seconds — long enough to ride out
+// UDP loss, short enough that a peer that truly left disappears promptly.
+const rosterGraceCycles = 2
 
 // applyRoster pushes an authoritative roster into the engine (reconciling the
 // live peer map), refreshes the UI snapshot, and persists the catalog.
