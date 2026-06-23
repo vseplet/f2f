@@ -44,15 +44,16 @@ func RunRemote(args []string) error {
 	if err != nil {
 		return fmt.Errorf("can't reach helper at %s (is it running?): %w", *bind, err)
 	}
-	if len(chans) == 0 {
-		return errors.New("no channels yet — join or create one first")
-	}
 	cur, err := fetchExposure(base)
 	if err != nil {
 		return err
 	}
 
 	sort.Slice(chans, func(i, j int) bool { return chans[i].Name < chans[j].Name })
+	// general is the implicit camp-wide channel (everyone is a member); /api/channels
+	// returns only created channel blocks, so prepend it. Also guarantees the picker
+	// is never empty (a node with no created channels can still expose to general).
+	chans = append([]remoteChannel{{ID: "general", Name: "general"}}, chans...)
 	termSet, deskSet := toSet(cur.Terminal), toSet(cur.Desktop)
 	termOpts := make([]huh.Option[string], len(chans))
 	deskOpts := make([]huh.Option[string], len(chans))
