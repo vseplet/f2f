@@ -633,15 +633,18 @@ func (s *Service) restoreFromStore() {
 			clog.Info("config", "intercept %q via %s skipped (peer not in catalog)", it.Spec, it.Peer)
 			continue
 		}
+		// Domain intercepts resolve on the exit peer over the bus, which
+		// isn't up at startup (it comes up after hole punch, later in
+		// OnStarted). Attempting addLocked here just burns a 5s dial
+		// timeout per domain before falling through to pending anyway —
+		// with a dozen intercepts that's a minute of dead time before
+		// the portal banner. Register them pending straight away and let
+		// the RefreshDomainRoutes ticker install routes once peers link.
+		if isDomainSpec(it.Spec) {
+			s.addPendingLocked(it.Spec, it.Peer)
+			continue
+		}
 		if _, err := s.addLocked(it.Spec, it.Peer); err != nil {
-			if isDomainSpec(it.Spec) {
-				// Exit peer probably not reachable yet (bus comes up
-				// after hole punch). Keep the entry route-less; the
-				// RefreshDomainRoutes ticker retries every minute.
-				s.addPendingLocked(it.Spec, it.Peer)
-				clog.Info("config", "intercept %q via %s pending (%v); will retry", it.Spec, it.Peer, err)
-				continue
-			}
 			clog.Warn("config", "restore intercept %q via %s: %v", it.Spec, it.Peer, err)
 		}
 	}

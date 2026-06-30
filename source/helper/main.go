@@ -38,7 +38,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/proxy"
@@ -245,50 +244,6 @@ func run(bind string, console bool, autostart bool) error {
 	dnsSvc.SetMembershipCheck(channelsMgr.IsMember)
 	secretsSvc.Register()
 
-	// Notification hub — fans UI notifications out over SSE. Peers can push
-	// notifications to us over the bus ("notify" type); we also surface peer
-	// presence (bus link up/down) and inbound chat/call activity below.
-	notifySvc := notify.New(store.CampDir, func() string { return eng.Status().CampID })
-	defer notifySvc.Close()
-	busSvc.Handle("notify", notifySvc.FromBus)
-	busSvc.Handle("notify.push", notifySvc.FromBus) // new name, accepted during the wire rollout
-
-	// peerName resolves a peer pub to its display name (falls back to a short
-	// fingerprint) from the live roster — used to title presence/chat alerts.
-	peerName := func(pub string) string {
-		for _, p := range eng.Status().Peers {
-			if p.Pub == pub {
-				if p.Name != "" {
-					return p.Name
-				}
-				break
-			}
-		}
-		if len(pub) > 12 {
-			return pub[:12]
-		}
-		return pub
-	}
-
-	// Peer presence: the bus reports a reachability change as "up"/"down".
-	// Surface it as a peer notification routed to that peer's DM.
-	busSvc.Events = func(_, peerPub, text string) {
-		up := text == "up"
-		state := "offline"
-		if up {
-			state = "online"
-		}
-		notifySvc.Push(notify.Notification{
-			Kind:  "peer",
-			Title: peerName(peerPub) + " " + state,
-			From:  peerPub,
-			Route: "channel:" + peerPub, // a DM is the degenerate channel
-		})
-	}
-
-	// Inbound-message notifications are raised by the web layer when a remote
-	// message frame syncs in (OnFrameApplied), so no messenger bridge here.
-
 	// gossip: replicate our fabric-level NodeState (platform + peer-view)
 	// across the mesh. Source assembles it from engine.Status() + runtime.
 	gossipSvc := gossip.New(busSvc, func() gossip.NodeState {
@@ -333,7 +288,7 @@ func run(bind string, console bool, autostart bool) error {
 	vncSvc.SetMembershipCheck(channelsMgr.IsMember)
 	vncSvc.Register()
 
-	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, notifySvc, gossipSvc, shellSvc, vncSvc, oidcSvc, secretsSvc, blocksMgr, channelsMgr, msgMgr, bind)
+	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, gossipSvc, shellSvc, vncSvc, oidcSvc, secretsSvc, blocksMgr, channelsMgr, msgMgr, bind)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
 	dbSvc.OnApply(srv.OnFrameApplied)

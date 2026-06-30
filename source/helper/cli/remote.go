@@ -44,29 +44,43 @@ func RunRemote(args []string) error {
 	if err != nil {
 		return fmt.Errorf("can't reach helper at %s (is it running?): %w", *bind, err)
 	}
-	if len(chans) == 0 {
-		return errors.New("no channels yet — join or create one first")
-	}
 	cur, err := fetchExposure(base)
 	if err != nil {
 		return err
 	}
 
 	sort.Slice(chans, func(i, j int) bool { return chans[i].Name < chans[j].Name })
-	termSet, deskSet := toSet(cur.Terminal), toSet(cur.Desktop)
+	// Normalize into a deduped list with the camp-wide "general" offered exactly
+	// once at the top. /api/channels returns only created blocks, but an older peer
+	// can also surface a "general" entry — collapsing both into the canonical
+	// GeneralBID avoids two options sharing value "general" (huh can't toggle a
+	// duplicate-valued option, which read as "can't select general").
+	seen := map[string]bool{"general": true}
+	dedup := []remoteChannel{{ID: "general", Name: "general"}}
+	for _, c := range chans {
+		if c.Name == "general" || c.ID == "" || seen[c.ID] {
+			continue
+		}
+		seen[c.ID] = true
+		dedup = append(dedup, c)
+	}
+	chans = dedup
+
+	// huh pre-selects from the bound slice and writes the result back into it —
+	// per-option .Selected() does NOT compose with .Value() (the empty binding
+	// wins and toggles never persist). So seed the bindings with current exposure.
+	pickTerm := append([]string{}, cur.Terminal...)
+	pickDesk := append([]string{}, cur.Desktop...)
 	termOpts := make([]huh.Option[string], len(chans))
 	deskOpts := make([]huh.Option[string], len(chans))
 	for i, c := range chans {
 		label := "#" + c.Name
-		termOpts[i] = huh.NewOption(label, c.ID).Selected(termSet[c.ID])
-		deskOpts[i] = huh.NewOption(label, c.ID).Selected(deskSet[c.ID])
+		termOpts[i] = huh.NewOption(label, c.ID)
+		deskOpts[i] = huh.NewOption(label, c.ID)
 	}
-
-	var pickTerm, pickDesk []string
-	// One group → both lists on one screen; tab/↑↓ between them, space toggles.
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewMultiSelect[string]().
-			Title("terminal — каналы, которым открыт мой shell").
+			Title("terminal — каналы, которым открыт мой shell (space — выбрать, enter — применить)").
 			Options(termOpts...).
 			Value(&pickTerm),
 		huh.NewMultiSelect[string]().
