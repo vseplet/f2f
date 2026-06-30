@@ -92,87 +92,8 @@ $(function () {
     try { localStorage.setItem(SIDEBAR_KEY, String($sidebar.outerWidth())); } catch (_) {}
   });
 
-  // ---- Right notifications sidebar ----
-  // Symmetric to the left tree but feeds off a moving log of events.
-  // Width + collapsed state persist independently. Mock data for now;
-  // a real notification service will push entries through the same
-  // renderNotifications() function once it ships.
-  const $notif = $('#ax-notifications');
-  const $notifResize = $('#ax-notifications-resize');
-  const NOTIF_KEY = 'f2f:notif-width';
-  const NOTIF_EXPANDED_KEY = 'f2f:notif-expanded-width';
-  const notifDefault = 260;
-  function applyNotifWidth(px) {
-    const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px));
-    $notif.css('width', clamped + 'px');
-    $notif.toggleClass('ax-collapsed', clamped < SIDEBAR_COLLAPSE_THRESHOLD);
-  }
-  try {
-    const saved = parseInt(localStorage.getItem(NOTIF_KEY) || '', 10);
-    applyNotifWidth(Number.isFinite(saved) ? saved : notifDefault);
-  } catch (_) { applyNotifWidth(notifDefault); }
-  let lastNotifExpanded = parseInt(localStorage.getItem(NOTIF_EXPANDED_KEY) || '', 10);
-  if (!Number.isFinite(lastNotifExpanded) || lastNotifExpanded < SIDEBAR_COLLAPSE_THRESHOLD) {
-    lastNotifExpanded = notifDefault;
-  }
-  $notifResize.on('mousedown', function (e) {
-    e.preventDefault();
-    $notifResize.addClass('dragging');
-    const startX = e.clientX;
-    const startW = $notif.outerWidth();
-    function onMove(ev) {
-      // Resize handle is on the LEFT of the right panel — drag right
-      // shrinks the panel, drag left grows it. Sign flips.
-      applyNotifWidth(startW - (ev.clientX - startX));
-    }
-    function onUp() {
-      $notifResize.removeClass('dragging');
-      $(document).off('mousemove.nres mouseup.nres');
-      try { localStorage.setItem(NOTIF_KEY, String($notif.outerWidth())); } catch (_) {}
-    }
-    $(document).on('mousemove.nres', onMove).on('mouseup.nres', onUp);
-  });
-  $('#ax-notifications-toggle').on('click', function () {
-    if ($notif.hasClass('ax-collapsed')) {
-      applyNotifWidth(lastNotifExpanded);
-    } else {
-      lastNotifExpanded = $notif.outerWidth();
-      try { localStorage.setItem(NOTIF_EXPANDED_KEY, String(lastNotifExpanded)); } catch (_) {}
-      applyNotifWidth(SIDEBAR_MIN);
-    }
-    try { localStorage.setItem(NOTIF_KEY, String($notif.outerWidth())); } catch (_) {}
-  });
-  function updateNotifGlyph() {
-    // Mirror of the left toggle: › when open (click to collapse right),
-    // ‹ when collapsed (click to expand back).
-    $('#ax-notifications-toggle').text($notif.hasClass('ax-collapsed') ? '‹' : '›');
-  }
-  new MutationObserver(updateNotifGlyph)
-    .observe($notif[0], { attributes: true, attributeFilter: ['class'] });
-  updateNotifGlyph();
-
-  // Notifications mock. kind ∈ {ok, warn, info, muted} drives the
-  // accent bar colour: ok = something good happened, warn = needs
-  // attention, info = passive, muted = stale/closed. group is the
-  // day-bucket header the cards live under.
-  // Each notification has a stable `id` so we can find/remove it after
-  // render. Real notification service will mint these server-side; for
-  // now we generate from the index at module load time.
-  // Live notifications from the backend (/api/notifications + SSE). Newest
-  // first. Sources: inbound messages, calls, and peer presence (up/down).
-  let notifications = [];
-  let selectedNotifId = null;
-
-  function notifPeerName(pub) {
-    if (!pub) return '';
-    const p = ((lastStatus && lastStatus.peers) || []).find(x => x.pub === pub);
-    return p ? (p.name || pub.slice(0, 12)) : pub.slice(0, 12);
-  }
-  function notifAccent(n) {
-    const t = (n.title || '').toLowerCase();
-    if (/fail|down|denied|blocked|offline|error/.test(t)) return 'warn';
-    return ({ message: 'info', call: 'ok', cert: 'warn', peer: 'info', system: 'muted' })[n.kind] || 'info';
-  }
+  // notifWhen renders a compact relative timestamp ("now", "5s", "3m", "2h",
+  // "1d") — still used by the note editor's "last edited" labels.
   function notifWhen(ts) {
     if (!ts) return '';
     const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -182,108 +103,6 @@ $(function () {
     const h = Math.floor(m / 60); if (h < 24) return h + 'h';
     return Math.floor(h / 24) + 'd';
   }
-
-  function renderNotifications() {
-    const banner = notifPermPrompt();
-    const q = ($('#ax-notifications-search').val() || '').trim().toLowerCase();
-    const items = q
-      ? notifications.filter(n => (n.title + ' ' + (n.body || '') + ' ' + notifPeerName(n.from)).toLowerCase().includes(q))
-      : notifications;
-    if (!items.length) {
-      $('#ax-notifications-list').html(banner + empty('no notifications'));
-      return;
-    }
-    const parts = items.map(n => {
-      const selected = n.id === selectedNotifId ? ' selected' : '';
-      const meta = n.body || notifPeerName(n.from);
-      return `<div class="ax-notif ${esc(notifAccent(n))}${selected}" data-id="${esc(n.id)}" title="${esc(n.title)}">`
-        + `<div class="ax-notif-accent"></div>`
-        + `<div class="ax-notif-body">`
-          + `<div class="ax-notif-title">${esc(n.title)}</div>`
-          + (meta ? `<div class="ax-notif-meta">${esc(meta)}</div>` : '')
-        + `</div>`
-        + `<div class="ax-notif-time">${esc(notifWhen(n.ts))}</div>`
-        + `<button type="button" class="ax-notif-close" title="dismiss" aria-label="dismiss">×</button>`
-      + `</div>`;
-    });
-    $('#ax-notifications-list').html(banner + parts.join(''));
-  }
-  // Clear all — wipes the backend store for the active camp, then the local
-  // list. New notifications keep streaming in over SSE afterwards.
-  $('#ax-notifications-clear').on('click', function () {
-    $.ajax({ url: '/api/notifications', method: 'DELETE' }).always(function () {
-      notifications = [];
-      selectedNotifId = null;
-      renderNotifications();
-    });
-  });
-  $('#ax-notifications-search').on('input', renderNotifications);
-  $('#ax-notifications-search').on('keydown', function (e) {
-    if (e.key === 'Escape') { $(this).val('').trigger('input').blur(); }
-  });
-  // Dismiss (×) — local-only: drop from the live list.
-  $('#ax-notifications-list').on('click', '.ax-notif-close', function (e) {
-    e.stopPropagation();
-    const $card = $(this).closest('.ax-notif');
-    const id = $card.data('id');
-    $card.addClass('removing');
-    setTimeout(function () {
-      notifications = notifications.filter(n => String(n.id) !== String(id));
-      if (selectedNotifId === id) selectedNotifId = null;
-      renderNotifications();
-    }, 180);
-  });
-  $('#ax-notifications-list').on('click', '.ax-notif', function () {
-    const id = $(this).data('id');
-    selectedNotifId = (selectedNotifId === String(id)) ? null : String(id);
-    const n = notifications.find(x => String(x.id) === String(id));
-    if (n && n.route) location.hash = n.route;
-    renderNotifications();
-  });
-
-  // Seed from the buffer, then stream new ones over SSE.
-  $.getJSON('/api/notifications', function (list) {
-    notifications = (Array.isArray(list) ? list : []).slice().reverse(); // newest-first
-    renderNotifications();
-  });
-  // Native OS notifications (Web Notifications API). Chrome silently drops a
-  // permission request that isn't tied to a user gesture, so we don't ask on
-  // load — instead notifPermPrompt() renders an "enable" banner the user
-  // clicks (a real gesture), handled below. A toast is only raised when the
-  // tab is hidden; an in-view sidebar already shows the entry.
-  const canNotify = 'Notification' in window;
-  function notifPermPrompt() {
-    if (!canNotify || Notification.permission === 'granted') return '';
-    if (Notification.permission === 'denied') {
-      return `<div class="ax-notif-perm muted">${esc('desktop notifications blocked — allow them in the browser site settings')}</div>`;
-    }
-    return `<div class="ax-notif-perm" id="ax-notif-enable">enable desktop notifications</div>`;
-  }
-  // Gesture-driven permission request (reliable, unlike an on-load ask).
-  $('#ax-notifications-list').on('click', '#ax-notif-enable', function () {
-    if (!canNotify) return;
-    Promise.resolve(Notification.requestPermission()).then(renderNotifications);
-  });
-  function osNotify(n) {
-    if (!canNotify || Notification.permission !== 'granted') return;
-    if (!document.hidden) return; // tab is focused — the sidebar already shows it
-    let note;
-    try {
-      note = new Notification(n.title || 'f2f', {
-        body: n.body || '',
-        tag: 'f2f:' + (n.id || ''), // collapse rapid repeats from the same event
-      });
-    } catch (_) { return; }
-    note.onclick = function () {
-      window.focus();
-      if (n.route) location.hash = n.route;
-      note.close();
-    };
-  }
-
-  // Notifications arrive over the unified chat stream (type:'notif') — see
-  // openChatStream — so there's no separate EventSource here.
-  setInterval(renderNotifications, 30000); // refresh relative timestamps
 
   // Category collapse: click the row toggles .collapsed on the category;
   // the CSS adjacent-sibling selector hides .ax-tree-children.
@@ -1661,15 +1480,6 @@ $(function () {
         if (m.scope && m.scope.indexOf('channel:') === 0) { fetchChannels(); return; }
         // Otherwise it's a note scope — live-refresh the open note editor.
         if (m.scope && noteConv && !$('#tab-note').hasClass('hidden') && m.scope === noteScopeOf(noteConv)) refreshPreservingEdit();
-        return;
-      }
-      // Notification events ride this stream too (one connection for all push).
-      if (m.type === 'notif') {
-        const n = m.n;
-        notifications.unshift(n);
-        if (notifications.length > 200) notifications.length = 200;
-        renderNotifications();
-        osNotify(n);
         return;
       }
       // peer is the conversation key for both kinds (channel bid / DM peer pub).

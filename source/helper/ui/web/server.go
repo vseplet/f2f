@@ -34,7 +34,6 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/dns"
 	"github.com/vseplet/f2f/source/helper/services/drop"
 	"github.com/vseplet/f2f/source/helper/services/firewall"
-	"github.com/vseplet/f2f/source/helper/services/notify"
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/secrets"
@@ -70,7 +69,6 @@ type Server struct {
 	camp     *camp.Service
 	dns      *dns.Service
 	db       *db.Service
-	notify   *notify.Service
 	gossip   *gossip.Service
 	shell    *shell.Service
 	vnc      *vnc.Service
@@ -96,7 +94,7 @@ type Server struct {
 	profRegSess map[string]*webauthn.SessionData
 }
 
-func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, notifySvc *notify.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, secretsSvc *secrets.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
+func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSvc *pki.Service, dnsSvc *dns.Service, dropSvc *drop.Service, callsSvc *calls.Service, tunnelSvc *tunnel.Service, campSvc *camp.Service, dbSvc *db.Service, gossipSvc *gossip.Service, shellSvc *shell.Service, vncSvc *vnc.Service, oidcSvc *oidc.Service, secretsSvc *secrets.Service, blocksMgr *blocks.Manager, channelsMgr *channels.Manager, messagesMgr *message.Manager, addr string) *Server {
 	s := &Server{
 		engine:      eng,
 		store:       store,
@@ -108,7 +106,6 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		tunnel:      tunnelSvc,
 		camp:        campSvc,
 		db:          dbSvc,
-		notify:      notifySvc,
 		gossip:      gossipSvc,
 		shell:       shellSvc,
 		vnc:         vncSvc,
@@ -150,23 +147,6 @@ func (s *Server) RegisterBus(b *bus.Service) {
 					_ = s.engine.SetActivePeer(fromPub)
 					break
 				}
-			}
-		}
-		// A fresh offer is the start of a new p2p call — ring it as a
-		// notification. ICE-restart offers carry no "fresh" flag, so they
-		// don't re-ring an established call.
-		if s.notify != nil && fromPub != "" {
-			var sig struct {
-				Kind  string `json:"kind"`
-				Fresh bool   `json:"fresh"`
-			}
-			if json.Unmarshal(payload, &sig) == nil && sig.Kind == "offer" && sig.Fresh {
-				s.notify.Push(notify.Notification{
-					Kind:  "call",
-					Title: s.peerName(fromPub) + " is calling",
-					From:  fromPub,
-					Route: "channel:" + fromPub, // a DM is the degenerate channel
-				})
 			}
 		}
 		s.signals.broadcast(payload)
@@ -368,11 +348,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/signal/outbox", s.handleSignalOutbox)
 	mux.HandleFunc("GET /api/signal/stream", s.handleSignalStream)
 
-	// Notifications: recent list + live SSE stream for the UI.
-	mux.HandleFunc("GET /api/notifications", s.handleNotifications)
-	mux.HandleFunc("DELETE /api/notifications", s.handleClearNotifications)
-	mux.HandleFunc("GET /api/notifications/stream", s.handleNotificationsStream)
-
 	// Mesh: fabric-level NodeStates (platform + peer-view) replicated via gossip.
 	mux.HandleFunc("GET /api/mesh", s.handleMesh)
 
@@ -537,63 +512,10 @@ func (s *Server) handleSignalStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleNotifications returns the buffered notifications (oldest-first).
-func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.notify.Recent())
-}
-
-// handleClearNotifications drops every notification in the active camp.
-func (s *Server) handleClearNotifications(w http.ResponseWriter, r *http.Request) {
-	if err := s.notify.Clear(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // handleMesh returns every peer's gossip NodeState — the mesh-wide topology
 // (who-sees-whom) + platform inventory.
 func (s *Server) handleMesh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.gossip.All())
-}
-
-// handleNotificationsStream pushes new notifications to the browser over SSE.
-func (s *Server) handleNotificationsStream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	ch, unsubscribe := s.notify.Subscribe()
-	defer unsubscribe()
-
-	keepalive := time.NewTicker(20 * time.Second)
-	defer keepalive.Stop()
-	fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case n, ok := <-ch:
-			if !ok {
-				return
-			}
-			if b, err := json.Marshal(n); err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", b)
-				flusher.Flush()
-			}
-		case <-keepalive.C:
-			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
-		}
-	}
 }
 
 // topologyNode and topologyEdge feed the d3 force graph in the UI. The

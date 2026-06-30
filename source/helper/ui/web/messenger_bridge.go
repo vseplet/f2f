@@ -9,7 +9,6 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
-	"github.com/vseplet/f2f/source/helper/services/notify"
 )
 
 var errNotInCamp = fmt.Errorf("not in a camp")
@@ -82,9 +81,8 @@ func (s *Server) emitMessage(channelBID, msgBID, op string) {
 }
 
 // OnFrameApplied is the db OnApply hook: a frame just synced in from a peer.
-// It live-refreshes open block views, pushes a message to the messenger UI, and
-// raises an inbound-message notification (local writes echo from the API
-// handlers instead and never notify).
+// It live-refreshes open block views and pushes a message to the messenger UI
+// (local writes echo from the API handlers instead).
 func (s *Server) OnFrameApplied(e *db.Frame) {
 	s.NotifyBlockChange(e.Scope)
 	if !strings.HasPrefix(e.Scope, message.ScopePrefix) {
@@ -99,45 +97,12 @@ func (s *Server) OnFrameApplied(e *db.Frame) {
 	}
 	bid := strings.TrimPrefix(e.Scope, message.ScopePrefix)
 	s.emitMessage(bid, fo.BID, fo.Op)
-	s.notifyInbound(bid, fo.BID, fo.Op)
-}
-
-// notifyInbound raises a toast for a freshly-arrived peer message.
-func (s *Server) notifyInbound(channelBID, msgBID, op string) {
-	if op != "create" || s.notify == nil {
-		return
-	}
-	m := s.messages.Get(channelBID, msgBID)
-	if m == nil || m.From == s.selfPub() {
-		return // our own echo, not an inbound event
-	}
-	preview := m.Body
-	if preview == "" && m.File != nil {
-		preview = "📎 " + m.File.Name
-	}
-	title, route := "", "channel:"+channelBID
-	if strings.HasPrefix(channelBID, "dm-") {
-		peer := s.dmPeer(channelBID)
-		title, route = s.peerName(peer), "channel:"+peer
-	} else {
-		title = "#" + channelBID
-		if c := s.channels.Get(channelBID); c != nil && c.Name != "" {
-			title = "#" + c.Name
-		}
-	}
-	s.notify.Push(notify.Notification{
-		Kind:  "message",
-		Title: title,
-		Body:  s.peerName(m.From) + ": " + preview,
-		From:  m.From,
-		Route: route,
-	})
 }
 
 // handleEventStream is the single always-on server→browser push stream:
-// messages (msgEvents), block-scope changes (blockEvents) and notifications.
-// One long-lived SSE per browser (extra persistent connections starve the
-// HTTP/1.1 per-host budget). Call signalling and the diag log stay separate.
+// messages (msgEvents) and block-scope changes (blockEvents). One long-lived
+// SSE per browser (extra persistent connections starve the HTTP/1.1 per-host
+// budget). Call signalling and the diag log stay separate.
 func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -153,8 +118,6 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	defer munsub()
 	bch, bunsub := s.blockEvents.subscribe()
 	defer bunsub()
-	nch, nunsub := s.notify.Subscribe()
-	defer nunsub()
 
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
@@ -177,14 +140,6 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data) // {"type":"blocks","scope":…}
 			flusher.Flush()
-		case n, ok := <-nch:
-			if !ok {
-				return
-			}
-			if nb, err := json.Marshal(n); err == nil {
-				fmt.Fprintf(w, "data: {\"type\":\"notif\",\"n\":%s}\n\n", nb)
-				flusher.Flush()
-			}
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
