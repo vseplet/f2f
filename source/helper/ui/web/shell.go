@@ -27,8 +27,8 @@ var shellUpgrader = websocket.Upgrader{
 // is a UI-only HTTP endpoint: the browser asks its local f2f, which probes
 // each peer over the BUS (shell.status) — no peer↔peer HTTP.
 func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	type peerShell struct {
@@ -73,8 +73,8 @@ func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
 // control ({"t":"resize","cols":C,"rows":R}). Server→browser: binary frames
 // are raw terminal output.
 func (s *Server) handleShellWS(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	q := r.URL.Query()

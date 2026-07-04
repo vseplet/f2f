@@ -1225,12 +1225,21 @@ func (s *Server) handleRevealFile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func isLoopback(remoteAddr string) bool {
+// isLocalRequest is the guard for the sensitive UI-only endpoints (remote
+// shell / desktop). It accepts loopback plus RFC1918 / ULA private ranges so
+// the UI works when bound to a LAN IP (--bind), while still refusing requests
+// that arrive from a public address or over the overlay. A trusted LAN is the
+// assumed boundary — do not widen this to public ranges.
+func isLocalRequest(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		return false
 	}
-	return host == "127.0.0.1" || host == "::1"
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // Camp lifecycle (start / stop / create / switch) is owned by package
