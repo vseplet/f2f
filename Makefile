@@ -4,6 +4,12 @@
 # doesn't make `wails` "not found" while it's actually installed.
 WAILS ?= $(shell go env GOPATH)/bin/wails
 
+# Resolve go's absolute path here (in make's shell, which has the user's
+# PATH). The dev/build targets run it via sudo, and sudo's secure_path
+# usually omits /usr/local/go/bin — so a bare `go` becomes "command not
+# found" under sudo even though it's on the invoking user's PATH.
+GO ?= $(shell command -v go)
+
 # SUDO is empty when we're already root, otherwise "sudo". Prevents
 # nested sudo when a user types `sudo make dev` — that nesting
 # overwrites SUDO_USER with "root" and the helper writes config under
@@ -23,7 +29,7 @@ help:
 # `make dev F2F_LOG=debug` enables debug logging.
 F2F_LOG ?= info
 dev:
-	-$(SUDO) F2F_LOG=$(F2F_LOG) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets go run ./source/helper --console $(ARGS)
+	-$(SUDO) F2F_LOG=$(F2F_LOG) F2F_DEV_ASSETS=$(CURDIR)/source/helper/ui/web/assets $(GO) run ./source/helper --console $(ARGS)
 
 # No sudo: the remote TUI only talks to the running helper's loopback API.
 remote:
