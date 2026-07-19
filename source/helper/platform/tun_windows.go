@@ -4,7 +4,9 @@ package platform
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
+	"time"
 
 	wgtun "github.com/amnezia-vpn/amneziawg-go/tun"
 )
@@ -47,7 +49,31 @@ func IfconfigP2P(iface, localIP, peerIP string) error {
 	if err != nil {
 		return fmt.Errorf("netsh set address %s on %s: %w: %s", localIP, iface, err, out)
 	}
-	return nil
+	return waitAddrBindable(localIP, 15*time.Second)
+}
+
+// waitAddrBindable blocks until addr can actually be bound to.
+//
+// netsh returns as soon as Windows accepts the configuration, but the address
+// stays unusable for a moment while the stack plumbs it through. Services that
+// bind the overlay IP the instant the tunnel opens (proxy :80/:443, torrent
+// :6881, the QUIC bus) otherwise fail with WSAEADDRNOTAVAIL — "The requested
+// address is not valid in its context" — and only the ones that happen to retry
+// recover. Binding a throwaway socket is the same operation they perform, so it
+// tests exactly the condition that matters.
+func waitAddrBindable(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		ln, err := net.ListenPacket("udp", net.JoinHostPort(addr, "0"))
+		if err == nil {
+			_ = ln.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("address %s not bindable after %s: %w", addr, timeout, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // IfDisableMulticast is a no-op on Windows: wintun adapters carry no multicast
