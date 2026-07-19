@@ -38,6 +38,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/identity"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 const (
@@ -101,7 +102,7 @@ type Service struct {
 
 	mu             sync.Mutex
 	ln             *quic.Listener
-	lnConn         net.PacketConn // the UDP socket we own under ln (closed hard on Stop)
+	lnConn         net.PacketConn  // the UDP socket we own under ln (closed hard on Stop)
 	ctx            context.Context // service lifetime; accept loops on dialed conns ride it
 	cancel         context.CancelFunc
 	running        bool
@@ -239,14 +240,14 @@ func (s *Service) listenLoop(ctx context.Context, addr string) {
 	}
 }
 
-// reuseAddrControl sets SO_REUSEADDR on the bus listener socket so it can
-// rebind overlayIP:Port immediately after a restart drops the old socket.
-// Only REUSEADDR (not REUSEPORT) — two real instances should still conflict,
-// which is a useful "already running" signal rather than silent port-sharing.
+// reuseAddrControl lets the bus listener socket rebind overlayIP:Port
+// immediately after a restart drops the old socket. The socket option itself
+// is an OS primitive (and a no-op on Windows, where the same flag would let
+// another process hijack the address) — see platform.SetReuseAddr.
 func reuseAddrControl(network, address string, c syscall.RawConn) error {
 	var serr error
 	if err := c.Control(func(fd uintptr) {
-		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		serr = platform.SetReuseAddr(fd)
 	}); err != nil {
 		return err
 	}
