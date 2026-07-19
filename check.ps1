@@ -126,6 +126,75 @@ if ($status -and $status.peers) {
     }
 } else { Warn2 "no peer list" }
 
+# --- intercepts --------------------------------------------------------------
+# An intercept only works if the OS actually sends that address into f2f. Ask
+# Windows the same question the stack asks when it picks a route, per address.
+
+Section "intercepts"
+if ($status -and $status.intercepts -and $status.intercepts.Count -gt 0) {
+    foreach ($ic in $status.intercepts) {
+        Info "$($ic.spec) via $($ic.peer)"
+        if (-not $ic.prefixes -or $ic.prefixes.Count -eq 0) {
+            Bad "  no resolved prefixes (route install failed?)"
+            continue
+        }
+        foreach ($pfx in $ic.prefixes) {
+            $ip = ($pfx -split '/')[0]
+            $rt = Find-NetRoute -RemoteIPAddress $ip -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $rt)                          { Bad   "  $pfx -> no route" }
+            elseif ($rt.InterfaceAlias -like "f2f*") { Ok  "  $pfx -> $($rt.InterfaceAlias)" }
+            else                                   { Bad   "  $pfx -> $($rt.InterfaceAlias)  <-- BYPASSES the tunnel" }
+        }
+        # What the name resolves to right now may differ from what we routed:
+        # a CDN hands out different addresses over time, and anything not in the
+        # list above leaves through the normal interface.
+        $live = Resolve-DnsName $ic.spec -Type A -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress } | Select-Object -Expand IPAddress
+        foreach ($a in $live) {
+            $routed = $ic.prefixes | Where-Object { $_ -like "$a/*" }
+            if ($routed) { Ok "  resolves to $a (routed)" }
+            else         { Bad "  resolves to $a  <-- NOT in the routed set" }
+        }
+    }
+} else {
+    Info "no intercepts configured"
+}
+
+# --- IPv6 leak ---------------------------------------------------------------
+# The intercept routes IPv4. If the host also has working IPv6 and the target
+# publishes AAAA records, the browser prefers v6 and never touches the tunnel —
+# which looks exactly like "the intercept does nothing".
+
+Section "IPv6 leak"
+$v6 = Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+      Where-Object { $_.IPAddress -notlike "fe80*" -and $_.IPAddress -ne "::1" -and
+                     $_.InterfaceAlias -notlike "f2f*" }
+if ($v6) {
+    Warn2 "host has global IPv6: $(($v6.IPAddress | Select-Object -First 3) -join ', ')"
+    if ($status -and $status.intercepts) {
+        foreach ($ic in $status.intercepts) {
+            $aaaa = Resolve-DnsName $ic.spec -Type AAAA -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress }
+            if ($aaaa) {
+                Bad "  $($ic.spec) has AAAA -> browsers will prefer IPv6 and skip the tunnel"
+                Info "  (f2f installs reject routes for these; if they failed above, that's the cause)"
+            }
+        }
+    }
+} else {
+    Ok "no global IPv6 on this host - nothing to leak through"
+}
+
+# --- egress ------------------------------------------------------------------
+# The end-to-end answer: what the outside world sees. Over IPv4 this should be
+# the exit peer's address when an intercept is active.
+
+Section "egress address"
+$v4ip = & curl.exe -4 -sS --max-time 15 https://api.ipify.org 2>$null
+if ($LASTEXITCODE -eq 0 -and $v4ip) { Info "public IPv4: $v4ip" } else { Warn2 "could not determine public IPv4" }
+$v6ip = & curl.exe -6 -sS --max-time 10 https://api64.ipify.org 2>$null
+if ($LASTEXITCODE -eq 0 -and $v6ip) { Warn2 "public IPv6: $v6ip  (traffic can leave this way)" }
+
 # --- DNS ---------------------------------------------------------------------
 
 Section "DNS"
