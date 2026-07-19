@@ -1,6 +1,10 @@
 /f2f-mac
 dist
 
+# Windows build output + the Wintun driver dev.ps1 fetches next to it.
+/f2f.exe
+/wintun.dll
+
 # macOS dirt — drop everywhere in the tree.
 .DS_Store
 **/.DS_Store
