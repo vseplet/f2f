@@ -140,10 +140,22 @@ if ($status -and $status.intercepts -and $status.intercepts.Count -gt 0) {
         }
         foreach ($pfx in $ic.prefixes) {
             $ip = ($pfx -split '/')[0]
+            # Reject entries are meant to be unreachable, not tunnelled: f2f
+            # points them at loopback so the address fails fast and the client
+            # falls back to the address we DO route. Landing anywhere else means
+            # the reject didn't take and that family can still leave the box.
+            $isReject = $pfx -match 'reject'
             $rt = Find-NetRoute -RemoteIPAddress $ip -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $rt)                          { Bad   "  $pfx -> no route" }
-            elseif ($rt.InterfaceAlias -like "f2f*") { Ok  "  $pfx -> $($rt.InterfaceAlias)" }
-            else                                   { Bad   "  $pfx -> $($rt.InterfaceAlias)  <-- BYPASSES the tunnel" }
+            if (-not $rt) {
+                Bad "  $pfx -> no route"
+            } elseif ($isReject) {
+                if ($rt.InterfaceAlias -like "*Loopback*") { Ok  "  $pfx -> blackholed (correct)" }
+                else { Bad "  $pfx -> $($rt.InterfaceAlias)  <-- reject not applied, can leak" }
+            } elseif ($rt.InterfaceAlias -like "f2f*") {
+                Ok "  $pfx -> $($rt.InterfaceAlias)"
+            } else {
+                Bad "  $pfx -> $($rt.InterfaceAlias)  <-- BYPASSES the tunnel"
+            }
         }
         # What the name resolves to right now may differ from what we routed:
         # a CDN hands out different addresses over time, and anything not in the
