@@ -28,6 +28,12 @@ param(
     [string]$LogLevel = "info",
     # Reuse an existing f2f.exe instead of rebuilding.
     [switch]$SkipBuild,
+    # Run unelevated. The UI, config and local DNS come up, but creating the
+    # wintun adapter and writing routes need Administrator — so there is no
+    # tunnel, and with it no peers, mesh or calls. Useful when the UAC prompt
+    # can't be answered (some remote-desktop tools don't show the secure
+    # desktop) and you only need to exercise the UI or the build.
+    [switch]$NoElevate,
     # Anything else is forwarded to the helper verbatim (e.g. `up`).
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
@@ -51,14 +57,29 @@ function Test-Admin {
 
 # Re-launch elevated, preserving the arguments we were given. -NoExit keeps the
 # new window open so the helper's console output stays readable after it exits.
-if (-not (Test-Admin)) {
+if (-not (Test-Admin) -and $NoElevate) {
+    Write-Host "running WITHOUT Administrator: UI and config only." -ForegroundColor Yellow
+    Write-Host "the tunnel will fail to start (wintun adapter + routes need elevation)." -ForegroundColor Yellow
+} elseif (-not (Test-Admin)) {
     Write-Host "not elevated - relaunching as Administrator..." -ForegroundColor Yellow
     $argList = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
     if ($Bind)      { $argList += @("-Bind", $Bind) }
     if ($LogLevel)  { $argList += @("-LogLevel", $LogLevel) }
     if ($SkipBuild) { $argList += "-SkipBuild" }
     if ($ExtraArgs) { $argList += $ExtraArgs }
-    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList
+    try {
+        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList
+    } catch {
+        # Nothing was elevated. The usual cause on a remote session is that UAC
+        # draws its prompt on the secure desktop, which some remote-desktop
+        # tools don't render — so it is dismissed without ever being seen.
+        Write-Host ""
+        Write-Host "elevation was cancelled or never appeared." -ForegroundColor Red
+        Write-Host "over a remote session UAC prompts on the secure desktop, which not every" -ForegroundColor DarkGray
+        Write-Host "remote-desktop tool shows. Options: connect with mstsc (plain RDP), or run" -ForegroundColor DarkGray
+        Write-Host "'.\dev.ps1 -NoElevate' for UI-only (no tunnel)." -ForegroundColor DarkGray
+        exit 1
+    }
     exit
 }
 
