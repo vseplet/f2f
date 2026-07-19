@@ -7,6 +7,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // Windows split-DNS goes through the NRPT (Name Resolution Policy Table): a rule
@@ -24,6 +25,18 @@ import (
 // DNSBindAddr pins the resolver to loopback :53; see the note above on why an
 // ephemeral port cannot work here.
 func DNSBindAddr() string { return "127.0.0.1:53" }
+
+// Installed namespaces are mirrored in memory because ZoneResolverInstalled is
+// polled by the UI on every status refresh, and that call runs while the engine
+// mutex is held. Asking Windows (a PowerShell round-trip, ~seconds) from there
+// stalls every other engine user behind it — the bus resolver included, which
+// then can't dial peers at all. Reads must stay allocation-cheap; only the
+// mutating calls are allowed to spawn a process.
+var (
+	nrptMu      sync.Mutex
+	nrptZone    string // "<label>.f2f" currently routed to us, "" if none
+	nrptDomains = map[string]bool{}
+)
 
 // powershell runs a one-liner and returns its trimmed output.
 func powershell(script string) (string, error) {
@@ -76,12 +89,6 @@ func removeNrptRule(namespace string) error {
 	return nil
 }
 
-func hasNrptRule(namespace string) bool {
-	out, err := powershell(fmt.Sprintf(
-		`if (Get-DnsClientNrptRule | Where-Object { $_.Namespace -eq '%s' }) { 'present' }`, namespace))
-	return err == nil && strings.Contains(out, "present")
-}
-
 // InstallZoneResolver routes <zone>.f2f and everything under it to our resolver.
 func InstallZoneResolver(zone, bindAddr string) error {
 	if zone == "" {
@@ -90,14 +97,21 @@ func InstallZoneResolver(zone, bindAddr string) error {
 	if err := addNrptRule(nrptNamespace(zone+".f2f"), bindAddr); err != nil {
 		return err
 	}
+	nrptMu.Lock()
+	nrptZone = zone + ".f2f"
+	nrptMu.Unlock()
 	return FlushDNSCache()
 }
 
+// ZoneResolverInstalled answers from the in-memory mirror — see the note on
+// nrptZone for why this must not touch Windows.
 func ZoneResolverInstalled(zone string) bool {
 	if zone == "" {
 		return false
 	}
-	return hasNrptRule(nrptNamespace(zone + ".f2f"))
+	nrptMu.Lock()
+	defer nrptMu.Unlock()
+	return nrptZone != "" && nrptZone == zone+".f2f"
 }
 
 func RemoveZoneResolver(zone string) error {
@@ -107,6 +121,9 @@ func RemoveZoneResolver(zone string) error {
 	if err := removeNrptRule(nrptNamespace(zone + ".f2f")); err != nil {
 		return err
 	}
+	nrptMu.Lock()
+	nrptZone = ""
+	nrptMu.Unlock()
 	return FlushDNSCache()
 }
 
@@ -119,6 +136,9 @@ func InstallDomainResolver(domain, bindAddr string) error {
 	if err := addNrptRule(nrptNamespace(domain), bindAddr); err != nil {
 		return err
 	}
+	nrptMu.Lock()
+	nrptDomains[domain] = true
+	nrptMu.Unlock()
 	return FlushDNSCache()
 }
 
@@ -129,5 +149,8 @@ func RemoveDomainResolver(domain string) error {
 	if err := removeNrptRule(nrptNamespace(domain)); err != nil {
 		return err
 	}
+	nrptMu.Lock()
+	delete(nrptDomains, domain)
+	nrptMu.Unlock()
 	return FlushDNSCache()
 }
