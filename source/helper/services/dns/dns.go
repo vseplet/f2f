@@ -268,7 +268,10 @@ func (s *Service) Start(campID, zone string) error {
 	if err := s.seedFromStore(); err != nil {
 		return err
 	}
-	srv, err := Open("127.0.0.1:0", zone, s, s.PinnedLookup, s.pinnedMiss)
+	// Bind address is platform-chosen: an ephemeral loopback port everywhere
+	// the OS resolver can be pointed at "IP:port", but a fixed :53 on Windows,
+	// whose NRPT only accepts a bare server IP.
+	srv, err := Open(platform.DNSBindAddr(), zone, s, s.PinnedLookup, s.pinnedMiss)
 	if err != nil {
 		return err
 	}

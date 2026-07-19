@@ -168,3 +168,8 @@ func RemoveDomainResolver(domain string) error {
 	}
 	return applyResolvedLocked()
 }
+
+// DNSBindAddr is the address our resolver listens on. An ephemeral loopback
+// port is fine here: the per-zone resolver file records "nameserver + port", so
+// a port that changes across restarts costs nothing.
+func DNSBindAddr() string { return "127.0.0.1:0" }
