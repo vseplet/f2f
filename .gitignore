@@ -1,9 +1,10 @@
 /f2f-mac
 dist
 
-# Windows build output + the Wintun driver dev.ps1 fetches next to it.
+# Windows build output. wintun.dll is NOT ignored — it's vendored (amd64,
+# v0.14.1, from www.wintun.net) so dev.ps1 needn't download it; the site is
+# unreachably slow from some networks.
 /f2f.exe
-/wintun.dll
 
 # macOS dirt — drop everywhere in the tree.
 .DS_Store
