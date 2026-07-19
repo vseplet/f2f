@@ -48,6 +48,14 @@ func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
 		if p.Self || p.Pub == "" || !p.Reachable {
 			continue
 		}
+		// Reachable on UDP still doesn't mean the bus link works: a peer whose
+		// QUIC conn is down burns the full 2s timeout below on every poll, and
+		// the vnc probe does the same in parallel. On a marginal link that load
+		// is enough to keep the conn from recovering, so skip until a ping
+		// succeeds — the UI keeps peers listed on a short TTL anyway.
+		if s.bus != nil && !s.bus.LinkUp(p.Pub) {
+			continue
+		}
 		p := p
 		wg.Add(1)
 		go func() {

@@ -44,6 +44,11 @@ func (s *Server) handleVncPeers(w http.ResponseWriter, r *http.Request) {
 		if p.Self || p.Pub == "" || !p.Reachable {
 			continue
 		}
+		// And the same bus-link gate: dialing a peer whose QUIC conn is down
+		// just times out, twice over once the shell probe joins in.
+		if s.bus != nil && !s.bus.LinkUp(p.Pub) {
+			continue
+		}
 		p := p
 		wg.Add(1)
 		go func() {
