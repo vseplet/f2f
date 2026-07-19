@@ -91,7 +91,11 @@ if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
 
 # --- wintun.dll --------------------------------------------------------------
 
-if (-not (Test-Path $WintunDll)) {
+if ($NoElevate -and -not (Test-Path $WintunDll)) {
+    # The DLL only matters when the tunnel starts, and unelevated it can't.
+    # Skipping the download keeps UI-only runs working on a flaky connection.
+    Write-Host "skipping wintun download (-NoElevate: no tunnel anyway)" -ForegroundColor DarkGray
+} elseif (-not (Test-Path $WintunDll)) {
     # Map the process architecture onto the layout inside the zip.
     $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
         "AMD64" { "amd64" }
@@ -106,7 +110,18 @@ if (-not (Test-Path $WintunDll)) {
 
     # Windows PowerShell 5.1 still defaults to TLS 1.0, which www.wintun.net rejects.
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $WintunUrl -OutFile $tmpZip -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri $WintunUrl -OutFile $tmpZip -UseBasicParsing -TimeoutSec 60
+    } catch {
+        Write-Host ""
+        Write-Host "could not download wintun: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "fetch it by hand instead:" -ForegroundColor DarkGray
+        Write-Host "  1. download $WintunUrl" -ForegroundColor DarkGray
+        Write-Host "  2. extract wintun\bin\$arch\wintun.dll" -ForegroundColor DarkGray
+        Write-Host "  3. drop it next to this script: $WintunDll" -ForegroundColor DarkGray
+        Write-Host "(the same DLL ships inside the WireGuard for Windows installer)" -ForegroundColor DarkGray
+        throw "wintun.dll missing"
+    }
 
     if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
     Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpDir -Force
