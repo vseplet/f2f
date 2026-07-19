@@ -112,17 +112,31 @@ if ($NoElevate -and -not (Test-Path $WintunDll)) {
     # wintun.net publishes an AAAA record, and IWR stalls until timeout on
     # networks that advertise IPv6 without working connectivity. -4 pins IPv4;
     # curl also ignores the system proxy settings IWR silently inherits.
-    try {
-        & curl.exe -4 -fsSL --connect-timeout 15 --max-time 120 $WintunUrl -o $tmpZip
-        if ($LASTEXITCODE -ne 0) { throw "curl exited with $LASTEXITCODE" }
-    } catch {
+    #
+    # The host is slow enough to stall mid-transfer, so each pass resumes with
+    # -C - instead of restarting: a link that only moves a few KB per attempt
+    # still finishes across attempts. --speed-limit/--speed-time abandons a pass
+    # that has effectively flatlined rather than sitting out the whole timeout.
+    $ok = $false
+    for ($i = 1; $i -le 10; $i++) {
+        & curl.exe -4 -L -C - --connect-timeout 15 `
+            --speed-limit 1024 --speed-time 20 `
+            --retry 3 --retry-all-errors --retry-delay 2 `
+            $WintunUrl -o $tmpZip
+        # 33/416 = server refused the range because the file is already whole.
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 33) { $ok = $true; break }
+        $have = if (Test-Path $tmpZip) { (Get-Item $tmpZip).Length } else { 0 }
+        Write-Host "attempt $i stalled at $have bytes - resuming..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 2
+    }
+
+    if (-not $ok) {
         Write-Host ""
-        Write-Host "could not download wintun: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "could not download wintun after 10 attempts." -ForegroundColor Red
         Write-Host "fetch it by hand instead:" -ForegroundColor DarkGray
         Write-Host "  1. download $WintunUrl" -ForegroundColor DarkGray
         Write-Host "  2. extract wintun\bin\$arch\wintun.dll" -ForegroundColor DarkGray
         Write-Host "  3. drop it next to this script: $WintunDll" -ForegroundColor DarkGray
-        Write-Host "(the same DLL ships inside the WireGuard for Windows installer)" -ForegroundColor DarkGray
         throw "wintun.dll missing"
     }
 
