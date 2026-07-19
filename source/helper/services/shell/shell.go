@@ -37,12 +37,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/creack/pty"
 
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
+	"github.com/vseplet/f2f/source/helper/platform"
 )
 
 // bus message types.
@@ -340,7 +340,7 @@ func dropToInvokingUser(c *exec.Cmd) {
 	if e1 != nil || e2 != nil {
 		return
 	}
-	c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	platform.SetProcCredential(c, uid, gid)
 	if u.HomeDir != "" {
 		c.Dir = u.HomeDir
 		c.Env = append(c.Env, "HOME="+u.HomeDir)
@@ -484,8 +484,8 @@ func (se *session) resize(cols, rows uint16) {
 func (se *session) kill() {
 	if se.cmd != nil && se.cmd.Process != nil {
 		pid := se.cmd.Process.Pid
-		_ = syscall.Kill(-pid, syscall.SIGKILL) // session leader → negative pid = the group
-		_ = se.cmd.Process.Kill()               // fallback: the leader itself
+		_ = platform.KillProcessGroup(pid) // the shell and everything it spawned
+		_ = se.cmd.Process.Kill()          // fallback: the leader itself
 	}
 	_ = se.ptmx.Close()
 }
