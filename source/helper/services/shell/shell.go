@@ -76,8 +76,8 @@ type Service struct {
 	bus *bus.Service
 
 	pmu      sync.Mutex
-	channels []string                    // expose the shell to members of these channels (bids)
-	isMember func(bid, pub string) bool  // injected channel-membership predicate
+	channels []string                   // expose the shell to members of these channels (bids)
+	isMember func(bid, pub string) bool // injected channel-membership predicate
 	command  string
 
 	mu       sync.Mutex
