@@ -108,10 +108,13 @@ if ($NoElevate -and -not (Test-Path $WintunDll)) {
     $tmpZip = Join-Path $env:TEMP "wintun-$WintunVersion.zip"
     $tmpDir = Join-Path $env:TEMP "wintun-$WintunVersion"
 
-    # Windows PowerShell 5.1 still defaults to TLS 1.0, which www.wintun.net rejects.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # curl.exe (shipped since Windows 10 1803) rather than Invoke-WebRequest:
+    # wintun.net publishes an AAAA record, and IWR stalls until timeout on
+    # networks that advertise IPv6 without working connectivity. -4 pins IPv4;
+    # curl also ignores the system proxy settings IWR silently inherits.
     try {
-        Invoke-WebRequest -Uri $WintunUrl -OutFile $tmpZip -UseBasicParsing -TimeoutSec 60
+        & curl.exe -4 -fsSL --connect-timeout 15 --max-time 120 $WintunUrl -o $tmpZip
+        if ($LASTEXITCODE -ne 0) { throw "curl exited with $LASTEXITCODE" }
     } catch {
         Write-Host ""
         Write-Host "could not download wintun: $($_.Exception.Message)" -ForegroundColor Red
