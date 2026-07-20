@@ -91,6 +91,21 @@ if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
 
 # --- wintun.dll --------------------------------------------------------------
 
+# Reuse a wintun.dll that's already on the machine before hitting the network:
+# an installed f2f (install.ps1) drops one in %LOCALAPPDATA%\f2f, and every
+# WireGuard-based VPN ships one too. www.wintun.net is unreliably slow from some
+# networks, so avoid it whenever we can.
+if (-not (Test-Path $WintunDll)) {
+    $existing = @("$env:LOCALAPPDATA\f2f\wintun.dll", "$env:ProgramFiles\WireGuard\wintun.dll") +
+                (Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter wintun.dll -Recurse -ErrorAction SilentlyContinue |
+                 Select-Object -Expand FullName)
+    $src = $existing | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if ($src) {
+        Copy-Item $src $WintunDll
+        Write-Host "reused wintun.dll from $src" -ForegroundColor DarkGray
+    }
+}
+
 if ($NoElevate -and -not (Test-Path $WintunDll)) {
     # The DLL only matters when the tunnel starts, and unelevated it can't.
     # Skipping the download keeps UI-only runs working on a flaky connection.
