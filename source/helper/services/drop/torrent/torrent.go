@@ -108,6 +108,11 @@ func New(opts Options) (*Client, error) {
 	cfg.DisableTrackers = true
 	cfg.DisablePEX = true
 	cfg.DisableIPv6 = true
+	// Sharing rides the overlay between camp peers, so we never want a public
+	// listen port. The default client tries UPnP/NAT-PMP to forward its port on
+	// the router at startup — pointless here and it logs "AddPortMapping: 500"
+	// warnings when the router declines. Off, like every other public feature.
+	cfg.NoDefaultPortForwarding = true
 	cfg.NoUpload = false
 	cfg.Seed = true
 	cfg.DefaultStorage = storage.NewFile(opts.DownloadsDir)
