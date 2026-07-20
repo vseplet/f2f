@@ -52,8 +52,11 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 say "downloading $asset ($VERSION)..."
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
+# -4: force IPv4. Some networks advertise IPv6 (AAAA records resolve) but have
+# no working v6 route, so a default dual-stack curl picks the v6 address and
+# hangs until timeout. GitHub is reachable over IPv4 everywhere we care about.
 # -f fails on HTTP errors (a missing asset otherwise saves the 404 page).
-curl -fSL --proto '=https' "$url" -o "$tmp" \
+curl -4 -fSL --proto '=https' --connect-timeout 20 "$url" -o "$tmp" \
   || die "download failed: $url (does a release exist for $VERSION?)"
 
 chmod +x "$tmp"
