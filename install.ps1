@@ -39,13 +39,20 @@ $tmpZip = Join-Path $env:TEMP $asset
 Fetch $url $tmpZip
 
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-# Expand-Archive won't overwrite; clear the old copy first so upgrades work.
-Get-ChildItem $dest -Filter "f2f.exe"    -ErrorAction SilentlyContinue | Remove-Item -Force
+# Expand-Archive won't overwrite; clear the old copies first so upgrades work.
+Get-ChildItem $dest -Filter "*.exe"      -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem $dest -Filter "wintun.dll" -ErrorAction SilentlyContinue | Remove-Item -Force
 Expand-Archive -LiteralPath $tmpZip -DestinationPath $dest -Force
 Remove-Item -Force $tmpZip
 
 $exe = Join-Path $dest "f2f.exe"
+if (-not (Test-Path $exe)) {
+    # Older release zips name the binary after the target (f2f-windows-amd64.exe)
+    # rather than f2f.exe. Normalise whatever single .exe landed to f2f.exe so the
+    # installed command is always `f2f`.
+    $found = Get-ChildItem $dest -Filter "f2f-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { Rename-Item $found.FullName $exe }
+}
 if (-not (Test-Path $exe)) { throw "f2f.exe missing after extract" }
 Write-Host "installed: $exe" -ForegroundColor Green
 & $exe version

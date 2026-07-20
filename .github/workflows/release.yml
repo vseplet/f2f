@@ -79,7 +79,10 @@ jobs:
             curl -fsSL "https://www.wintun.net/builds/wintun-${WINTUN_VERSION}.zip" -o wintun.zip
             echo "${WINTUN_SHA256}  wintun.zip" | sha256sum -c -
             unzip -j -o wintun.zip "wintun/bin/amd64/wintun.dll" -d .
-            zip -j "$base.zip" "$base.exe" wintun.dll
+            # The binary inside the zip is f2f.exe (the installed command is `f2f`);
+            # the target tag lives on the zip name, not the exe.
+            cp "$base.exe" f2f.exe
+            zip -j "$base.zip" f2f.exe wintun.dll
             echo "asset=$base.zip" >> "$GITHUB_OUTPUT"
           else
             echo "asset=$base" >> "$GITHUB_OUTPUT"
