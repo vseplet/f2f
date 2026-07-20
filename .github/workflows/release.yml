@@ -1,0 +1,83 @@
+name: release
+
+# Release on a v* tag: one binary per target, cross-compiled from a single
+# Linux runner (f2f is pure Go, CGO_ENABLED=0). Also runnable by hand against a
+# tag via workflow_dispatch.
+#
+# Packaging per OS:
+#   linux / darwin — the bare binary (f2f-<os>-<arch>).
+#   windows        — a zip, because the tunnel adapter needs wintun.dll beside
+#                    the .exe at runtime (it's loaded lazily, not linked in). We
+#                    ship the amd64 driver that's vendored in the repo.
+#
+# Targets: macOS arm64 (Apple Silicon), linux amd64 + arm64, windows amd64.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: arm64 } # Apple Silicon
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: source/helper/go.mod
+
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        working-directory: source/helper
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=$TAG" \
+            -o "${{ github.workspace }}/f2f-$GOOS-$GOARCH$ext" .
+
+      - name: Package
+        id: pkg
+        working-directory: ${{ github.workspace }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          base="f2f-$GOOS-$GOARCH"
+          if [ "$GOOS" = "windows" ]; then
+            # Bundle the driver the .exe loads at runtime.
+            cp wintun.dll .
+            zip -j "$base.zip" "$base.exe" wintun.dll
+            echo "asset=$base.zip" >> "$GITHUB_OUTPUT"
+          else
+            echo "asset=$base" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: ${{ steps.pkg.outputs.asset }}
+          fail_on_unmatched_files: true
