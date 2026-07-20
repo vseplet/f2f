@@ -529,6 +529,13 @@ func userHome() string {
 	if h := os.Getenv("HOME"); h != "" {
 		return h
 	}
+	// Windows sets USERPROFILE, not HOME, and never SUDO_USER — without this
+	// the fallback below would scatter camp config, keys and downloads across
+	// C:\tmp instead of the user's profile. os.UserHomeDir reads the right
+	// variable per OS.
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
 	return "/tmp"
 }
 

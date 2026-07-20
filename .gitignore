@@ -1,6 +1,13 @@
 /f2f-mac
 dist
 
+# Windows build output + the Wintun driver. wintun.dll is NOT committed: its
+# license forbids distributing the DLL on its own, only bundled alongside
+# software that uses it. dev.ps1 fetches it locally; release.yml bundles it into
+# the Windows zip in CI.
+/f2f.exe
+/wintun.dll
+
 # macOS dirt — drop everywhere in the tree.
 .DS_Store
 **/.DS_Store

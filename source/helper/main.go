@@ -50,6 +50,10 @@ import (
 
 const defaultBind = "127.0.0.1:2202"
 
+// version is the build version, stamped by CI via
+// -ldflags "-X main.version=<tag>". "dev" for local builds.
+var version = "dev"
+
 // service is the uniform shape every f2f service is wrapped in inside
 // main.go — start on engine ready, stop on engine teardown, and
 // optionally one long-lived worker tied to the process root ctx.
@@ -101,6 +105,12 @@ func main() {
 		args = args[1:]
 	}
 
+	// `f2f version` / `--version` — print the build version and exit.
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-version") {
+		fmt.Println(version)
+		return
+	}
+
 	fs := flag.NewFlagSet("f2f", flag.ExitOnError)
 	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI")
 	console := fs.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
@@ -127,6 +137,7 @@ func run(bind string, console bool, autostart bool) error {
 		return err
 	}
 	defer logCloser.Close()
+	clog.Console("f2f %s (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
 
 	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
 	// comes up (OnStarted); it auto-meshes with every reachable peer. All

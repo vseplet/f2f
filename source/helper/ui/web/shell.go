@@ -27,8 +27,8 @@ var shellUpgrader = websocket.Upgrader{
 // is a UI-only HTTP endpoint: the browser asks its local f2f, which probes
 // each peer over the BUS (shell.status) — no peer↔peer HTTP.
 func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	type peerShell struct {
@@ -46,6 +46,14 @@ func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
 		// that's unreachable on the overlay can't answer a bus probe
 		// either, and this poll fires every 5s for every peer.
 		if p.Self || p.Pub == "" || !p.Reachable {
+			continue
+		}
+		// Reachable on UDP still doesn't mean the bus link works: a peer whose
+		// QUIC conn is down burns the full 2s timeout below on every poll, and
+		// the vnc probe does the same in parallel. On a marginal link that load
+		// is enough to keep the conn from recovering, so skip until a ping
+		// succeeds — the UI keeps peers listed on a short TTL anyway.
+		if s.bus != nil && !s.bus.LinkUp(p.Pub) {
 			continue
 		}
 		p := p
@@ -73,8 +81,8 @@ func (s *Server) handleShellPeers(w http.ResponseWriter, r *http.Request) {
 // control ({"t":"resize","cols":C,"rows":R}). Server→browser: binary frames
 // are raw terminal output.
 func (s *Server) handleShellWS(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	q := r.URL.Query()

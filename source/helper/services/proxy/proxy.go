@@ -334,6 +334,17 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upHost string,
 		}
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// A browser cancels its in-flight requests whenever it navigates away or
+		// reloads, and the UI's long-lived SSE streams (/api/events,
+		// /api/log/stream) are cancelled on every single reload. That is routine
+		// client behaviour, not an upstream failure — warning about it buries
+		// real errors and reads like the portal is broken. Log it quietly and
+		// skip the 502, which would only be written to a connection that has
+		// already gone away.
+		if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+			clog.Debug("proxy", "%s → %s: client cancelled", host, target)
+			return
+		}
 		clog.Warn("proxy", "%s → %s: %v", host, target, err)
 		http.Error(w, "upstream unreachable", http.StatusBadGateway)
 	}

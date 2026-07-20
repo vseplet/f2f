@@ -24,8 +24,8 @@ var vncUpgrader = websocket.Upgrader{
 // us. UI-only HTTP: the browser asks its local f2f, which probes each peer
 // over the BUS (vnc.status).
 func (s *Server) handleVncPeers(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	type peerVnc struct {
@@ -42,6 +42,11 @@ func (s *Server) handleVncPeers(w http.ResponseWriter, r *http.Request) {
 		// Same gate as the shell probe: only peers reachable on the
 		// overlay can answer, and this poll fires every 5s per peer.
 		if p.Self || p.Pub == "" || !p.Reachable {
+			continue
+		}
+		// And the same bus-link gate: dialing a peer whose QUIC conn is down
+		// just times out, twice over once the shell probe joins in.
+		if s.bus != nil && !s.bus.LinkUp(p.Pub) {
 			continue
 		}
 		p := p
@@ -65,8 +70,8 @@ func (s *Server) handleVncPeers(w http.ResponseWriter, r *http.Request) {
 // pipes the raw RFB byte stream both ways between the WebSocket and the bus
 // stream. No framing — RFB is end-to-end between noVNC and the host server.
 func (s *Server) handleVncWS(w http.ResponseWriter, r *http.Request) {
-	if !isLoopback(r.RemoteAddr) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("loopback only"))
+	if !isLocalRequest(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("local network only"))
 		return
 	}
 	peer := r.URL.Query().Get("peer")

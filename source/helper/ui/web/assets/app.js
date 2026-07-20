@@ -3301,7 +3301,9 @@ $(function () {
   }
   function hideOnboarding() { $('#onboarding').addClass('hidden'); }
   function updateOnboardSave() {
-    const ok = $('#onboard-first').val().trim() && onboardPkDone;
+    // Passkey is optional (it can't be created over plain-HTTP LAN / non-secure
+    // contexts anyway) — a name alone is enough to finish onboarding.
+    const ok = !!$('#onboard-first').val().trim();
     $('#onboard-save').prop('disabled', !ok);
   }
   $('#onboard-first').on('input', updateOnboardSave);
@@ -3346,7 +3348,6 @@ $(function () {
     const last = $('#onboard-last').val().trim();
     $('#onboard-err').text('');
     if (!first) { $('#onboard-err').text('Имя обязательно'); return; }
-    if (!onboardPkDone) { $('#onboard-err').text('Сначала создайте passkey'); return; }
     const $btn = $('#onboard-save').prop('disabled', true).text('Сохраняю…');
     $.ajax({
       url: '/api/profile', method: 'POST', contentType: 'application/json',

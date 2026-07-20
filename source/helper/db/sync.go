@@ -115,6 +115,14 @@ func (s *Sync) onPush(from string, payload []byte) ([]byte, error) {
 
 // Push fans a freshly-committed entry to reachable peers that are members of
 // its scope (best-effort; anyone offline catches up later via pull).
+//
+// Each peer is notified in its own goroutine and Push returns immediately.
+// bus.Notify blocks up to 5s dialing an unreachable peer, and Push runs on the
+// synchronous Commit path (under the db mutex) — so a blocking fan-out would
+// stall the committing request (e.g. a chat send hangs in "sending") and hold
+// the db lock across every dead-peer timeout, wedging all other db work.
+// Delivery order doesn't matter: a receiver that gets entries out of order
+// hits a gap in onPush and pulls to fill it.
 func (s *Sync) Push(e *Frame) {
 	payload, err := json.Marshal(e)
 	if err != nil {
@@ -124,7 +132,7 @@ func (s *Sync) Push(e *Frame) {
 		if !s.allowed(e.Scope, pub) {
 			continue
 		}
-		_ = s.bus.Notify(pub, typePush, payload)
+		go func(pub string) { _ = s.bus.Notify(pub, typePush, payload) }(pub)
 	}
 }
 
