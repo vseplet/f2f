@@ -3191,17 +3191,65 @@ $(function () {
     const fp = s.identity_fp || (s.identity_pub || '').slice(0, 16) || '—';
     const row = (k, v) => '<div class="ax-prof-row"><span class="ax-prof-k">' + esc(k) +
       '</span><span class="ax-prof-v ax-prof-mono">' + esc(v) + '</span></div>';
-    const pk = (profile && profile.has_passkey)
-      ? '<span class="ax-prof-ok">✓ создан</span>'
-      : '<button type="button" id="passkey-create" class="ax-btn ax-btn-primary ax-btn-sm">Создать passkey</button>';
+    // Passkeys: list each enrolled credential with a remove button, and always
+    // offer to add another. Multiple passkeys = redundancy (phone + laptop +
+    // key), and removing a lost one is the recovery path — do it from any device
+    // still in the camp, then enrol a fresh passkey.
+    const keys = (profile && profile.passkeys) || [];
+    let pkList = '';
+    keys.forEach(function (k, i) {
+      pkList += '<div class="ax-prof-row"><span class="ax-prof-k">Passkey ' + (i + 1) + '</span>' +
+        '<span class="ax-prof-v ax-prof-mono">' + esc(String(k.id).slice(0, 12)) + '…' +
+        ' <button type="button" class="ax-btn ax-btn-sm passkey-del" data-id="' + esc(k.id) +
+        '">удалить</button></span></div>';
+    });
+    if (!keys.length) {
+      pkList = '<div class="ax-prof-row"><span class="ax-prof-k">Passkey</span>' +
+        '<span class="ax-prof-v muted">нет</span></div>';
+    }
+    const addLabel = keys.length ? 'Добавить passkey' : 'Создать passkey';
     $('#profile-device').html(
       '<div class="ax-prof-readonly">' +
       row('Overlay IP', ip) + row('Отпечаток ключа', fp) +
-      '<div class="ax-prof-row"><span class="ax-prof-k">Passkey</span>' +
-      '<span class="ax-prof-v" id="passkey-cell">' + pk + '</span></div>' +
+      pkList +
       '</div>' +
+      '<div style="margin-top:8px"><button type="button" id="passkey-create" class="ax-btn ax-btn-primary ax-btn-sm">' + addLabel + '</button></div>' +
       '<div class="ax-modal-err" id="passkey-err"></div>');
   }
+
+  // Remove a passkey (e.g. a lost authenticator). On success re-render: when the
+  // last one goes, has_passkey flips false and the button reads "Создать" again.
+  $('#tab-profile').on('click', '.passkey-del', function () {
+    const id = $(this).data('id');
+    if (!id || !confirm('Отозвать этот passkey? Вход по нему перестанет работать. Саму запись, возможно, придётся убрать в настройках браузера/ОС.')) return;
+    $('#passkey-err').text('');
+    const $b = $(this).prop('disabled', true).text('…');
+    $.ajax({
+      url: '/api/profile/passkey/delete', method: 'POST',
+      contentType: 'application/json', data: JSON.stringify({ id: String(id) }),
+    }).then(function (res) {
+      if (profile) {
+        profile.passkeys = (profile.passkeys || []).filter(function (k) { return String(k.id) !== String(id); });
+        profile.has_passkey = !!(res && res.has_passkey);
+      }
+      // Best-effort: nudge the browser/password-manager to forget the now-revoked
+      // credential (WebAuthn Signal API, Chrome 125+/Safari). We can only REVOKE
+      // server-side; the RP can't delete an authenticator key, but this signal
+      // asks a supporting client to drop the dangling entry itself. No-op where
+      // unsupported — the user then removes it in browser/OS passkey settings.
+      try {
+        if (window.PublicKeyCredential && PublicKeyCredential.signalUnknownCredential) {
+          var rpId = location.hostname.split('.').slice(-2).join('.'); // <zone>.f2f
+          PublicKeyCredential.signalUnknownCredential({ rpId: rpId, credentialId: String(id) })
+            .catch(function () {});
+        }
+      } catch (_) { /* unsupported shape — ignore */ }
+      renderProfileDevices();
+    }, function (e) {
+      $('#passkey-err').text((e && e.responseText) || 'не удалось удалить');
+      $b.prop('disabled', false).text('удалить');
+    });
+  });
   // Clicking the account plaque opens the profile page (edit). Leaving without
   // saving = just navigate away via the sidebar (no explicit cancel needed).
   $('#ax-account').on('click', function () { if (lastStatus && lastStatus.running) location.hash = 'profile'; });
@@ -3245,13 +3293,20 @@ $(function () {
         contentType: 'application/json', data: JSON.stringify(body),
       });
     }).then(() => {
-      if (profile) profile.has_passkey = true;
-      renderProfileDevices();
+      // Re-fetch so the new credential shows in the list (finish returns 204,
+      // not the updated set).
+      $.getJSON('/api/profile').done((p) => {
+        if (p) profile = Object.assign(profile || {}, p);
+        renderProfileDevices();
+      }).fail(() => {
+        if (profile) profile.has_passkey = true;
+        renderProfileDevices();
+      });
     }, (e) => {
       const msg = (e && e.name === 'NotAllowedError') ? 'отменено или истекло время'
         : ((e && e.responseText) || (e && e.message) || 'не удалось');
       $('#passkey-err').text(msg);
-      $b.prop('disabled', false).text('Создать passkey');
+      $b.prop('disabled', false).text(($('.passkey-del').length ? 'Добавить' : 'Создать') + ' passkey');
     });
   });
   // One Сохранить saves the profile (name) and, if it changed, the device name

@@ -259,6 +259,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/profile/device", s.handleDeviceRename)
 	mux.HandleFunc("POST /api/profile/passkey/begin", s.handlePasskeyBegin)
 	mux.HandleFunc("POST /api/profile/passkey/finish", s.handlePasskeyFinish)
+	mux.HandleFunc("POST /api/profile/passkey/delete", s.handlePasskeyDelete)
 	mux.HandleFunc("GET /api/notes/scope", s.handleNotesScope)
 	mux.HandleFunc("GET /api/notes", s.handleNotesList)
 	mux.HandleFunc("POST /api/notes", s.handleNotesCreate)

@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -93,7 +95,80 @@ func (s *Server) handleProfileGet(w http.ResponseWriter, r *http.Request) {
 		"first":       c.First,
 		"last":        c.Last,
 		"has_passkey": len(c.Passkeys) > 0,
+		"passkeys":    passkeyList(c.Passkeys),
 	})
+}
+
+// passkeyList renders the enrolled credentials for the UI: the credential id
+// (base64url, the stable handle the delete endpoint takes) and nothing secret.
+// Only the id is exposed; the credential itself is a public key already synced
+// to every peer, but the UI needs no more than an id to list + remove.
+func passkeyList(creds []webauthn.Credential) []map[string]any {
+	out := make([]map[string]any, 0, len(creds))
+	for _, cr := range creds {
+		out = append(out, map[string]any{"id": base64.RawURLEncoding.EncodeToString(cr.ID)})
+	}
+	return out
+}
+
+// POST /api/profile/passkey/delete {id} → removes the credential with that id
+// (base64url) from block.profile. When the last one goes, has_passkey flips back
+// to false and the UI re-offers "create passkey" — this is the recovery path
+// after losing an authenticator: from any device still in the camp, drop the
+// lost passkey and enrol a fresh one. Gated by the block signer (device
+// identity), not by a passkey, so a lost passkey doesn't lock you out of this.
+func (s *Server) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("passkey id required"))
+		return
+	}
+	want, err := base64.RawURLEncoding.DecodeString(req.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad passkey id: %w", err))
+		return
+	}
+	pub := s.profilePub()
+	if pub == "" {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("identity not ready"))
+		return
+	}
+	id, ok := s.blockSigner(w)
+	if !ok {
+		return
+	}
+	c := s.loadProfileContent(pub)
+	kept := c.Passkeys[:0]
+	removed := false
+	for _, cr := range c.Passkeys {
+		if bytes.Equal(cr.ID, want) {
+			removed = true
+			continue
+		}
+		kept = append(kept, cr)
+	}
+	if !removed {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no such passkey"))
+		return
+	}
+	c.Passkeys = kept
+	content, err := json.Marshal(c)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.blocks.Upsert(id, profileScope, pub, "profile", content); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"has_passkey": len(c.Passkeys) > 0})
 }
 
 // POST /api/profile {first,last} → creates (or updates) the profile block keyed
