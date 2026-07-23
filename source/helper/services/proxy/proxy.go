@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -128,6 +129,21 @@ func (s *Service) Start(tunnelIP, campID string) error {
 	return nil
 }
 
+// proxyErrWriter adapts net/http's ErrorLog to clog. TLS handshake failures are
+// routine (a client that doesn't trust our CA) — those go to debug; anything
+// else the http.Server reports stays at warn.
+type proxyErrWriter struct{}
+
+func (proxyErrWriter) Write(b []byte) (int, error) {
+	msg := strings.TrimRight(string(b), "\n")
+	if strings.Contains(msg, "TLS handshake error") {
+		clog.Debug("proxy", "%s", msg)
+	} else {
+		clog.Warn("proxy", "%s", msg)
+	}
+	return len(b), nil
+}
+
 // startListener brings up one listener (HTTP if tlsCfg is nil, HTTPS
 // otherwise) and stashes it for shutdown.
 func (s *Service) startListener(addr string, tlsCfg *tls.Config) {
@@ -140,6 +156,12 @@ func (s *Service) startListener(addr string, tlsCfg *tls.Config) {
 		Handler:           s.proxyHandler(loopback),
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig:         tlsCfg,
+		// Route net/http's own error log through clog, demoting TLS-handshake
+		// failures to debug: "remote error: tls: unknown certificate" just means
+		// a local client (Firefox with its own trust store, curl, a rotated CA
+		// not yet reinstalled) refused our leaf. That's the client's trust
+		// decision, not our fault, and it spams the log once per retry.
+		ErrorLog: log.New(proxyErrWriter{}, "", 0),
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
