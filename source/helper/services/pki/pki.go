@@ -52,10 +52,17 @@ const (
 	busTypeCACertNext = "pki.cert"
 )
 
-// myCADir is where the local CA's ca.crt/ca.key live. Persisted
-// across runs so leaf certs issued in one session remain valid in
-// the next.
-const myCADir = "/var/lib/f2f/ca"
+// myCARootDir is the parent for the per-camp local CAs.
+const myCARootDir = "/var/lib/f2f/ca"
+
+// myCADir is the CA directory for one camp (its ca.crt/ca.key). Per-camp — NOT
+// a single shared slot — because each camp's CA is pinned to its own zone.
+// With one shared slot, switching camps rotated the CA every time (the stored
+// CA never matched the incoming zone) and re-installed it into the system trust
+// store, which on macOS pops a Touch ID / password prompt on every switch. A
+// per-camp dir means a switch just loads that camp's existing, already-trusted
+// CA — no rotation, no prompt.
+func myCADir(campID string) string { return filepath.Join(myCARootDir, campID) }
 
 // peerCAsRootDir is the on-disk parent for per-camp peer-CA caches.
 // Each camp gets its own subdir keyed by camp_id so CAs from camp A
@@ -162,8 +169,9 @@ func (s *Service) ensureMyCA(campID string) error {
 		return fmt.Errorf("ca: no camp_id")
 	}
 	zone := identity.CampLabel(campID)
+	dir := myCADir(campID)
 
-	loaded, err := LoadCA(myCADir)
+	loaded, err := LoadCA(dir)
 	if err != nil {
 		clog.Info("ca", "load: %v (will regenerate)", err)
 		loaded = nil
@@ -178,7 +186,7 @@ func (s *Service) ensureMyCA(campID string) error {
 		if gerr != nil {
 			return fmt.Errorf("generate: %w", gerr)
 		}
-		if serr := fresh.Save(myCADir); serr != nil {
+		if serr := fresh.Save(dir); serr != nil {
 			return fmt.Errorf("save: %w", serr)
 		}
 		clog.Info("ca", "generated %s (fp %s)", fresh.CommonName(), fresh.Fingerprint())
@@ -188,7 +196,7 @@ func (s *Service) ensureMyCA(campID string) error {
 	}
 	if loaded.IsSystemTrusted() {
 		clog.Info("ca", "already in system trust store (fp %s) — skipping install", loaded.Fingerprint())
-	} else if err := loaded.EnsureSystemTrust(CACertPath(myCADir)); err != nil {
+	} else if err := loaded.EnsureSystemTrust(CACertPath(dir)); err != nil {
 		clog.Info("ca", "install in system trust store: %v (https will show warnings)", err)
 	} else {
 		clog.Info("ca", "installed in system trust store (fp %s)", loaded.Fingerprint())
