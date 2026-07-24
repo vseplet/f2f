@@ -340,7 +340,20 @@ func dropToInvokingUser(c *exec.Cmd) {
 	if e1 != nil || e2 != nil {
 		return
 	}
-	platform.SetProcCredential(c, uid, gid)
+	// The FULL supplementary group list, not just the primary gid: without it
+	// the child would drop to zero supplementary groups (losing sudo/wheel), and
+	// `sudo` — often mode 4750 root:sudo — becomes unexecutable ("Permission
+	// denied") for the dropped user. GroupIds reads /etc/group (works under
+	// CGO_ENABLED=0 too).
+	var groups []int
+	if gidStrs, gerr := u.GroupIds(); gerr == nil {
+		for _, gs := range gidStrs {
+			if g, e := strconv.Atoi(gs); e == nil {
+				groups = append(groups, g)
+			}
+		}
+	}
+	platform.SetProcCredential(c, uid, gid, groups)
 	if u.HomeDir != "" {
 		c.Dir = u.HomeDir
 		c.Env = append(c.Env, "HOME="+u.HomeDir)

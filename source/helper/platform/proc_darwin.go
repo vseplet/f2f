@@ -11,11 +11,26 @@ import (
 // (root, since f2f runs under sudo). Privilege reduction only — it can't raise
 // privileges. Leaves the rest of SysProcAttr alone so callers that add their
 // own flags afterwards (pty.Start sets Setsid/Setctty) still work.
-func SetProcCredential(c *exec.Cmd, uid, gid int) {
+//
+// groups is the user's FULL supplementary group list. It must be passed: with
+// an empty Credential.Groups Go calls setgroups(0), wiping every supplementary
+// group — which strips membership of admin/wheel and so breaks group-gated
+// access (including sudo). When groups is empty we keep the inherited set
+// (NoSetGroups) rather than clearing it.
+func SetProcCredential(c *exec.Cmd, uid, gid int, groups []int) {
 	if c.SysProcAttr == nil {
 		c.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	c.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	cred := &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	if len(groups) > 0 {
+		cred.Groups = make([]uint32, len(groups))
+		for i, g := range groups {
+			cred.Groups[i] = uint32(g)
+		}
+	} else {
+		cred.NoSetGroups = true
+	}
+	c.SysProcAttr.Credential = cred
 }
 
 // KillProcessGroup SIGKILLs the whole process group led by pid, so a shell and

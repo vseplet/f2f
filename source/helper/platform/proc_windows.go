@@ -11,7 +11,7 @@ import (
 // child process inherits the caller's token. f2f isn't "root dropping to the
 // human" here — it already runs as the invoking user's account, which is the
 // property the Unix path is emulating.
-func SetProcCredential(c *exec.Cmd, uid, gid int) {}
+func SetProcCredential(c *exec.Cmd, uid, gid int, groups []int) {}
 
 // KillProcessGroup terminates pid and everything it spawned. Windows has no
 // process groups addressable by a negative pid, so use taskkill's /T (tree)
