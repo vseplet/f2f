@@ -22,13 +22,13 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/vseplet/f2f/source/helper/db/blocks"
-	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
-	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/cli"
 	"github.com/vseplet/f2f/source/helper/clog"
 	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/db"
+	"github.com/vseplet/f2f/source/helper/db/blocks"
+	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
+	"github.com/vseplet/f2f/source/helper/db/blocks/message"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/camp"
@@ -54,17 +54,110 @@ const defaultBind = "127.0.0.1:2202"
 // -ldflags "-X main.version=<tag>". "dev" for local builds.
 var version = "dev"
 
+// runMode is how this process runs. Only the CLI/startup path branches on it
+// for now (camp selection + logging); the engine and services are identical.
+// The restricted-services / peer-allowlist behaviour of service/task comes
+// later — this step only wires the modes into the CLI.
+type runMode int
+
+const (
+	modePortal  runMode = iota // interactive, with the web portal (default)
+	modeService                // headless, long-lived, no human (a server)
+	modeTask                   // headless, short-lived (a CI runner)
+)
+
+func (m runMode) String() string {
+	switch m {
+	case modeService:
+		return "service"
+	case modeTask:
+		return "task"
+	default:
+		return "portal"
+	}
+}
+
+// runOpts is the parsed CLI: bundles the flags so run()'s signature stays small
+// as modes grow.
+type runOpts struct {
+	bind      string
+	console   bool
+	verbose   bool // --logs: debug-level logging
+	autostart bool // legacy `f2f up`: non-interactive, last-used camp
+	mode      runMode
+	campID    string // service/task: the camp to bring up
+	name      string // service/task: this node's display name
+	keyRef    string // task: pre-generated identity key (import TBD)
+}
+
 // service is the uniform shape every f2f service is wrapped in inside
 // main.go — start on engine ready, stop on engine teardown, and
 // optionally one long-lived worker tied to the process root ctx.
 // Closures avoid touching individual service packages (their public
 // APIs are intentionally varied — drop wants a goroutine, calls has
 // no Start, etc.); main just dispatches.
+//
+// on gates the whole entry by run mode: a disabled service is neither
+// started, stopped, nor given a worker. This is the single lever for "don't
+// run this feature in service/task mode" — every start site goes through the
+// registry so the gate is uniform.
 type service struct {
 	name  string
+	on    bool
 	start func(localIP string, st engine.Status) error
 	stop  func() error
 	run   func(ctx context.Context) // nil = no worker
+}
+
+// features is the per-mode capability set: which optional services start. The
+// substrate (engine + bus + camp) is always on and not represented here — a
+// node without it isn't in the mesh. Everything else is gated.
+type features struct {
+	firewall bool
+	dns      bool
+	pki      bool
+	tunnel   bool
+	drop     bool
+	secrets  bool
+	remote   bool // apply shell/desktop exposure from camp config
+	calls    bool
+	proxy    bool // :80/:443 reverse proxy for *.f2f
+	gossip   bool
+	web      bool // loopback web UI (the portal)
+	oidc     bool // built-in OpenID provider
+	db       bool // block engine sync + the general channel
+}
+
+func allFeatures() features {
+	return features{
+		firewall: true, dns: true, pki: true, tunnel: true, drop: true,
+		secrets: true, remote: true, calls: true, proxy: true, gossip: true,
+		web: true, oidc: true, db: true,
+	}
+}
+
+// featuresFor maps a run mode to its capability set. Presets for now; per-feature
+// override flags can layer on later.
+//
+//	portal  — everything (the human workstation).
+//	service — headless server: hosts/serves, but no human web UI or OIDC, and no
+//	          heavy media (calls) or file sharing (drop). Tunable starting point.
+//	task    — ephemeral client: substrate only (engine/bus/camp). It dials OUT
+//	          to a chosen node and exposes nothing, so nothing optional starts —
+//	          not even the firewall (it gates by port, but the task serves no
+//	          ports; real per-peer restriction is the allowlist, coming later).
+func featuresFor(m runMode) features {
+	switch m {
+	case modeService:
+		return features{
+			firewall: true, dns: true, pki: true, tunnel: true,
+			secrets: true, remote: true, proxy: true, gossip: true, db: true,
+		}
+	case modeTask:
+		return features{} // substrate only
+	default:
+		return allFeatures()
+	}
 }
 
 func main() {
@@ -72,38 +165,31 @@ func main() {
 
 	args := os.Args[1:]
 
-	// `f2f camp …` — camp management (create/list/use/join/rm/invite).
-	// Runs and exits: no engine, no UI. Needs only the config store.
-	if len(args) > 0 && args[0] == "camp" {
-		store, err := config.NewStore()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "config store:", err)
-			os.Exit(1)
-		}
-		if err := cli.RunCamp(store, args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-		return
-	}
+	// `f2f camp …` — disabled: creating/joining a camp is done through the
+	// interactive portal (bare `f2f`), so the subcommand is a duplicate. Kept
+	// commented for reference.
+	// if len(args) > 0 && args[0] == "camp" {
+	// 	store, err := config.NewStore()
+	// 	if err != nil {
+	// 		fmt.Fprintln(os.Stderr, "config store:", err)
+	// 		os.Exit(1)
+	// 	}
+	// 	if err := cli.RunCamp(store, args[1:]); err != nil {
+	// 		fmt.Fprintln(os.Stderr, "error:", err)
+	// 		os.Exit(1)
+	// 	}
+	// 	return
+	// }
 
-	// `f2f remote …` — interactive TUI to expose this node's terminal/desktop
-	// to channels. Talks to the running helper's loopback API; no engine here.
-	if len(args) > 0 && args[0] == "remote" {
-		if err := cli.RunRemote(args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// `f2f up [flags]` — non-interactive: bring up the last-used camp
-	// (login items / headless). Bare `f2f` shows the interactive picker.
-	autostart := false
-	if len(args) > 0 && args[0] == "up" {
-		autostart = true
-		args = args[1:]
-	}
+	// `f2f remote …` — disabled for now (exposing terminal/desktop moves under
+	// the new mode design). Kept commented so the wiring is easy to restore.
+	// if len(args) > 0 && args[0] == "remote" {
+	// 	if err := cli.RunRemote(args[1:]); err != nil {
+	// 		fmt.Fprintln(os.Stderr, "error:", err)
+	// 		os.Exit(1)
+	// 	}
+	// 	return
+	// }
 
 	// `f2f version` / `--version` — print the build version and exit.
 	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-version") {
@@ -111,17 +197,70 @@ func main() {
 		return
 	}
 
+	// `f2f up` — disabled: `--service` is the headless bring-up now. Left
+	// commented; autostart stays false so bare `f2f` is interactive.
+	autostart := false
+	// if len(args) > 0 && args[0] == "up" {
+	// 	autostart = true
+	// 	args = args[1:]
+	// }
+
+	// Three run modes, selected by flag; bare `f2f` (no mode flag) is the
+	// interactive portal, exactly as before.
+	//   f2f                                              → portal (interactive)
+	//   f2f --service --camp <id> --name <n>             → service (headless)
+	//   f2f --task    --camp <id> --name <n> --key <k>   → task    (ephemeral)
 	fs := flag.NewFlagSet("f2f", flag.ExitOnError)
 	bind := fs.String("bind", defaultBind, "HTTP bind address for the loopback UI")
 	console := fs.Bool("console", false, "also mirror logs to the console; by default logs go to the file only")
+	logs := fs.Bool("logs", false, "verbose (debug-level) logging; implies --console so you see them")
+	service := fs.Bool("service", false, "headless service mode (requires --camp, --name)")
+	task := fs.Bool("task", false, "ephemeral task mode (requires --camp, --name, --key)")
+	campID := fs.String("camp", "", "camp_id to bring up (service/task modes)")
+	name := fs.String("name", "", "this node's display name (service/task modes)")
+	keyRef := fs.String("key", "", "pre-generated identity key (task mode)")
 	_ = fs.Parse(args)
 
-	if err := run(*bind, *console, autostart); err != nil {
+	opts := runOpts{
+		bind:      *bind,
+		console:   *console || *logs, // verbose logs are useless if not shown
+		verbose:   *logs,
+		autostart: autostart,
+		mode:      modePortal,
+		campID:    *campID,
+		name:      *name,
+		keyRef:    *keyRef,
+	}
+	switch {
+	case *service && *task:
+		fmt.Fprintln(os.Stderr, "error: --service and --task are mutually exclusive")
+		os.Exit(1)
+	case *task:
+		opts.mode = modeTask
+	case *service:
+		opts.mode = modeService
+	}
+	if opts.mode != modePortal {
+		if opts.campID == "" || opts.name == "" {
+			fmt.Fprintf(os.Stderr, "error: --camp and --name are required in %s mode\n", opts.mode)
+			os.Exit(1)
+		}
+		// Headless: there's no portal to read logs from, so surface them.
+		opts.console = true
+	}
+	if opts.mode == modeTask && opts.keyRef == "" {
+		fmt.Fprintln(os.Stderr, "error: --key is required in task mode")
+		os.Exit(1)
+	}
+
+	if err := run(opts); err != nil {
 		clog.Fatal("%v", err)
 	}
 }
 
-func run(bind string, console bool, autostart bool) error {
+func run(opts runOpts) error {
+	bind, console := opts.bind, opts.console
+	feat := featuresFor(opts.mode)
 	store, err := config.NewStore()
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
@@ -137,7 +276,10 @@ func run(bind string, console bool, autostart bool) error {
 		return err
 	}
 	defer logCloser.Close()
-	clog.Console("f2f %s (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
+	if opts.verbose {
+		clog.SetLevel(clog.LevelDebug) // --logs overrides the F2F_LOG default
+	}
+	clog.Console("f2f %s (%s/%s) — %s mode", version, runtime.GOOS, runtime.GOARCH, opts.mode)
 
 	// Peer-to-peer QUIC data bus over the overlay. Started when the overlay
 	// comes up (OnStarted); it auto-meshes with every reachable peer. All
@@ -304,39 +446,44 @@ func run(bind string, console bool, autostart bool) error {
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
 	dbSvc.OnApply(srv.OnFrameApplied)
 
-	// Service registry. Start order top-to-bottom, Stop reverse.
-	// Workers are spawned once and live for the whole process.
+	// Service registry — the SINGLE list of every start site. Camp-lifetime
+	// entries (start/stop) run on engine up/down; process-lifetime entries (run)
+	// are spawned once for the whole process. Order is start order (Stop is the
+	// reverse); the substrate (camp, bus) is always on, the rest gated by feat.
+	//
+	// Note on ordering: proxy must come after pki (it needs the loaded CA to bind
+	// :443), so the camp-lifetime block below stays pki → … → proxy.
 	services := []service{
 		{
-			name:  "firewall",
+			name: "firewall", on: feat.firewall,
 			start: func(localIP string, st engine.Status) error { return fwSvc.Start(st.UtunName, localIP, st.CampID) },
 			stop:  fwSvc.Stop,
 			run:   fwSvc.PollPeers,
 		},
 		{
-			name:  "dns",
+			name: "dns", on: feat.dns,
 			start: func(_ string, st engine.Status) error { return dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)) },
 			stop:  dnsSvc.Stop,
 			run:   dnsSvc.PollPeers,
 		},
 		{
-			name: "dns-health",
-			run:  dnsSvc.HealthCheck,
+			name: "dns-health", on: feat.dns,
+			run: dnsSvc.HealthCheck,
 		},
 		{
-			name:  "pki",
+			name: "pki", on: feat.pki,
 			start: func(_ string, st engine.Status) error { return pkiSvc.Start(st.CampID) },
 			stop:  pkiSvc.Stop,
 			run:   pkiSvc.PollPeers,
 		},
 		{
-			name:  "tunnel",
+			name: "tunnel", on: feat.tunnel,
 			start: func(_ string, st engine.Status) error { tunnelSvc.Start(st.CampID); return nil },
 			stop:  func() error { tunnelSvc.Stop(); return nil },
 			run:   tunnelSvc.RefreshDomainRoutes,
 		},
 		{
-			name: "camp",
+			name: "camp", on: true, // substrate: rendezvous
 			start: func(_ string, st engine.Status) error {
 				if st.CampID == "" {
 					return nil
@@ -350,7 +497,7 @@ func run(bind string, console bool, autostart bool) error {
 			stop: campSvc.Stop,
 		},
 		{
-			name: "drop",
+			name: "drop", on: feat.drop,
 			start: func(localIP string, st engine.Status) error {
 				// anacrolix can take a moment to bind and has been
 				// known to panic during init — isolate.
@@ -371,13 +518,13 @@ func run(bind string, console bool, autostart bool) error {
 			run:  dropSvc.PollPeers,
 		},
 		{
-			name:  "secrets",
+			name: "secrets", on: feat.secrets,
 			start: func(_ string, st engine.Status) error { secretsSvc.Start(st.CampID); return nil },
 		},
 		{
 			// Apply the persisted remote-access exposure (which channels may open
 			// our shell / desktop) from the camp config.
-			name: "remote",
+			name: "remote", on: feat.remote,
 			start: func(_ string, st engine.Status) error {
 				if st.CampID == "" {
 					return nil
@@ -392,9 +539,94 @@ func run(bind string, console bool, autostart bool) error {
 			},
 		},
 		{
-			name: "calls",
+			name: "calls", on: feat.calls,
 			stop: func() error { callsSvc.Reset(); return nil },
 			run:  callsSvc.PollPeers,
+		},
+		// --- moved here from inline OnStarted (camp-lifetime) ---
+		{
+			// After pki: the CA is loaded, so the proxy can bind :443 with
+			// on-demand leaf certs (not just :80).
+			name: "proxy", on: feat.proxy,
+			start: func(localIP string, st engine.Status) error { return proxySvc.Start(localIP, st.CampID) },
+			stop:  proxySvc.Stop,
+		},
+		{
+			name: "bus", on: true, // substrate: QUIC data bus, auto-meshes with peers
+			start: func(localIP string, _ engine.Status) error { return busSvc.Start(localIP) },
+			stop:  busSvc.Stop,
+		},
+		{
+			name: "gossip", on: feat.gossip,
+			start: func(_ string, _ engine.Status) error { gossipSvc.Start(); return nil },
+			stop:  func() error { gossipSvc.Stop(); return nil },
+		},
+		{
+			// Ensure the camp-wide general channel exists (everyone has it). No-op
+			// if already present locally or pulled from a peer. Needs the block db.
+			name: "general", on: feat.db,
+			start: func(_ string, st engine.Status) error {
+				if st.CampID == "" {
+					return nil
+				}
+				if id := eng.Identity(); id != nil {
+					if _, err := channelsMgr.EnsureGeneral(id); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		// --- process-lifetime workers (moved here from run() goroutines) ---
+		{
+			name: "web", on: feat.web,
+			run: func(_ context.Context) {
+				clog.Console("f2f UI on http://%s", bind)
+				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					clog.Console("UI server error: %v (engine continues; fix --bind and restart)", err)
+				}
+			},
+		},
+		{
+			name: "oidc", on: feat.oidc,
+			run: func(ctx context.Context) {
+				oidcSrv := &http.Server{
+					Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(oidcPort)),
+					Handler:           oidcSvc.Handler(),
+					ReadHeaderTimeout: 10 * time.Second,
+				}
+				go func() {
+					<-ctx.Done()
+					c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					_ = oidcSrv.Shutdown(c)
+				}()
+				if err := oidcSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					clog.Warn("main", "oidc listener: %v", err)
+				}
+			},
+		},
+		{
+			// db anti-entropy: pull from peers periodically to catch up gaps (push
+			// on commit handles the live path). No-ops when not in a camp / no peers.
+			name: "db-sync", on: feat.db,
+			run: func(ctx context.Context) {
+				t := time.NewTicker(7 * time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						if eng.Status().CampID == "" {
+							continue
+						}
+						c, cancel := context.WithTimeout(ctx, 5*time.Second)
+						dbSync.PullAll(c)
+						cancel()
+					}
+				}
+			},
 		},
 	}
 
@@ -410,44 +642,23 @@ func run(bind string, console bool, autostart bool) error {
 			}
 		}
 		for _, s := range services {
-			if s.start == nil {
+			if !s.on || s.start == nil {
 				continue
 			}
 			if err := s.start(localIP, st); err != nil {
 				clog.Error("main", "%s start: %v", s.name, err)
 			}
 		}
-		// After services: pki has loaded the CA, so the proxy can bind
-		// :443 with on-demand leaf certs (not just :80).
-		if err := proxySvc.Start(localIP, st.CampID); err != nil {
-			clog.Warn("main", "bind http proxies: %v", err)
-		}
-		// QUIC data bus on the overlay IP — auto-meshes with peers.
-		if err := busSvc.Start(localIP); err != nil {
-			clog.Warn("main", "start bus: %v", err)
-		}
-		gossipSvc.Start() // replicate NodeState across the mesh
-		// Ensure the camp-wide general channel exists (everyone has it). No-op
-		// if already present locally or pulled from a peer.
-		if st.CampID != "" {
-			if id := eng.Identity(); id != nil {
-				if _, err := channelsMgr.EnsureGeneral(id); err != nil {
-					clog.Warn("main", "ensure general channel: %v", err)
-				}
-			}
-		}
-		if st.CampID != "" && st.CampID != lastPortalCamp {
+		// The portal name only resolves where the proxy serves it.
+		if feat.proxy && st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
 		}
 	}
 	eng.OnStopped = func() {
-		gossipSvc.Stop()
-		_ = busSvc.Stop()
-		_ = proxySvc.Stop()
 		for i := len(services) - 1; i >= 0; i-- {
 			s := services[i]
-			if s.stop == nil {
+			if !s.on || s.stop == nil {
 				continue
 			}
 			if err := s.stop(); err != nil {
@@ -467,14 +678,37 @@ func run(bind string, console bool, autostart bool) error {
 	// and returns immediately. Camp provisioning + selection live in
 	// package cli now (the engine no longer owns any of this).
 	mgr := cli.NewManager(store)
-	interactive := !autostart && cli.Interactive()
-	selCamp, selIdt, selErr := mgr.SelectCamp(interactive)
+	var (
+		selCamp *config.Camp
+		selIdt  *identity.Identity
+		selErr  error
+	)
+	switch opts.mode {
+	case modeService, modeTask:
+		// Non-interactive, explicit camp: register it (idempotent; also marks
+		// it last-used) then select it. No picker.
+		if opts.mode == modeTask && opts.keyRef != "" {
+			// TODO: import the pre-generated identity from opts.keyRef so the
+			// task runs under a known fp. Not wired yet — logged for now.
+			clog.Console("task key provided — identity import not yet implemented")
+		}
+		if _, jerr := mgr.Join(opts.campID, opts.name); jerr != nil {
+			selErr = jerr
+		} else {
+			selCamp, selIdt, selErr = mgr.SelectCamp(false)
+		}
+	default: // modePortal
+		interactive := !opts.autostart && cli.Interactive()
+		selCamp, selIdt, selErr = mgr.SelectCamp(interactive)
+	}
 
 	// Long-lived workers tied to the process root ctx. They survive
 	// engine restarts (each tick checks engine state, no-ops when down).
+	// Includes the web UI, OIDC listener and db-sync — all now registry
+	// entries, so the feat gate is the single place that turns them off.
 	var workerDone []chan struct{}
 	for _, s := range services {
-		if s.run == nil {
+		if !s.on || s.run == nil {
 			continue
 		}
 		d := make(chan struct{})
@@ -484,46 +718,6 @@ func run(bind string, console bool, autostart bool) error {
 			fn(ctx)
 		}(s.run, d)
 	}
-
-	go func() {
-		clog.Console("f2f UI on http://%s", bind)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			clog.Console("UI server error: %v (engine continues; fix --bind and restart)", err)
-		}
-	}()
-
-	// OIDC provider listener (loopback). The handler reads live engine
-	// state, so it's bound once and survives camp switches.
-	go func() {
-		oidcSrv := &http.Server{
-			Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(oidcPort)),
-			Handler:           oidcSvc.Handler(),
-			ReadHeaderTimeout: 10 * time.Second,
-		}
-		if err := oidcSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			clog.Warn("main", "oidc listener: %v", err)
-		}
-	}()
-
-	// db anti-entropy: pull from peers periodically to catch up gaps (push
-	// on commit handles the live path). No-ops when not in a camp / no peers.
-	go func() {
-		t := time.NewTicker(7 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if eng.Status().CampID == "" {
-					continue
-				}
-				c, cancel := context.WithTimeout(ctx, 5*time.Second)
-				dbSync.PullAll(c)
-				cancel()
-			}
-		}
-	}()
 
 	// Bring up the chosen camp (eng.Start → OnStarted → services start).
 	if selErr != nil {
