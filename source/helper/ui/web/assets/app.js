@@ -4492,6 +4492,13 @@ $(function () {
       if (!p.self && p.in_camp) {
         $name.append($('<span class="ax-pill ax-pill-peer" style="margin-left:6px">').text('in camp'));
       }
+      // Role pill: self-declared run-mode (user/service/task) from the roster.
+      // Absent on old clients that don't announce a role.
+      if (p.role) {
+        $name.append($('<span class="ax-pill ax-pill-role" style="margin-left:6px">')
+          .text(p.role)
+          .attr('title', 'role: ' + p.role + (p.version ? ' · v' + p.version : '')));
+      }
       // RTT: show the latest measurement when we have one. Muted when
       // the pong is stale (peer marked degraded above) so the number
       // doesn't pretend to be current.

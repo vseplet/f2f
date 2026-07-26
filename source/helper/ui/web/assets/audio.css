@@ -1466,6 +1466,19 @@ a.ax-domain-link:hover {
     border-color: var(--border-2);
     background: color-mix(in srgb, #fff 4%, transparent);
 }
+/* Role pill — self-declared run-mode (user/service/task) in the peers table.
+   Same standalone styling as ax-pill-fp (rendered outside .ax-intercept). */
+.ax-pill-role {
+    display: inline-block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 2px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
 /* Subdomain row nested under its parent zone — a thin guide on the left
    reinforces the indent applied inline (margin-left scales with depth). */
 .ax-intercept.is-child {
