@@ -155,8 +155,10 @@ func allFeatures() features {
 // override flags can layer on later.
 //
 //	portal  — everything (the human workstation).
-//	service — headless server: hosts/serves, but no human web UI or OIDC, and no
-//	          heavy media (calls) or file sharing (drop). Tunable starting point.
+//	service — headless server: hosts/serves, but no human web UI (the portal)
+//	          and no heavy media (calls) or file sharing (drop). OIDC IS on — it
+//	          serves co-located apps (e.g. Gitea) over the proxy and is exactly
+//	          what a headless IdP node needs. Tunable starting point.
 //	task    — ephemeral client: substrate only (engine/bus/camp). It dials OUT
 //	          to a chosen node and exposes nothing, so nothing optional starts —
 //	          not even the firewall (it gates by port, but the task serves no
@@ -167,6 +169,7 @@ func featuresFor(m runMode) features {
 		return features{
 			firewall: true, dns: true, pki: true, tunnel: true,
 			secrets: true, remote: true, proxy: true, gossip: true, db: true,
+			oidc: true,
 		}
 	case modeTask:
 		return features{} // substrate only
