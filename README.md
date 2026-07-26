@@ -21,10 +21,6 @@ network with broken IPv6, prefix with `-4`:
 ```sh
 curl -4 -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/install.sh | sh
 ```
-Pin a version or change the location with env vars:
-```sh
-F2F_VERSION=v0.2.0 F2F_BIN_DIR=~/.local/bin curl -fsSL .../install.sh | sh
-```
 
 **Windows** (PowerShell)
 ```powershell
@@ -32,7 +28,7 @@ irm https://raw.githubusercontent.com/vseplet/f2f/main/install.ps1 | iex
 ```
 Installs `f2f.exe` + `wintun.dll` to `%LOCALAPPDATA%\f2f` and adds it to your
 PATH. Run from a PowerShell opened **as Administrator** (creating the tunnel
-adapter needs it). Pin a version with `-Version v0.2.0`.
+adapter needs it).
 
 The tunnel needs privileges everywhere: run f2f with `sudo` on macOS/Linux and
 as Administrator on Windows.
