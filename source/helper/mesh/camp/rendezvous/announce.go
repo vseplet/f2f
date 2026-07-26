@@ -27,6 +27,8 @@ type AnnounceClient struct {
 	name          atomic.Pointer[string]      // display name; SetName updates it live (re-announced next tick)
 	campID        string
 	pub           string // local ed25519 pubkey in hex, "" in static --peer mode
+	version       string // client build version, published in the roster
+	role          string // run-mode role (user/service/task), published in the roster
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
@@ -52,12 +54,14 @@ type AnnounceClient struct {
 // outage at startup — e.g. the machine just woke and the network isn't
 // up yet — self-heals instead of permanently failing. pub is the local
 // ed25519 pubkey in hex, empty if not available.
-func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub string) (*AnnounceClient, error) {
+func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub, version, role string) (*AnnounceClient, error) {
 	a := &AnnounceClient{
 		conn:        conn,
 		campAddrStr: campAddrStr,
 		campID:      campID,
 		pub:         pub,
+		version:     version,
+		role:        role,
 	}
 	a.name.Store(&name)
 	a.resolve() // best-effort; sendAnnounce keeps retrying if DNS isn't ready
@@ -253,11 +257,12 @@ func (a *AnnounceClient) sendAnnounce() error {
 		name = *p
 	}
 	data, err := json.Marshal(AnnounceReq{
-		T:      "announce",
-		Name:   name,
-		CampID: a.campID,
-		Pub:    a.pub,
-		Paged:  true, // opt into windowed roster (server falls back to full list if old)
+		T:       "announce",
+		Name:    name,
+		CampID:  a.campID,
+		Pub:     a.pub,
+		Version: a.version,
+		Role:    a.role,
 	})
 	if err != nil {
 		return err

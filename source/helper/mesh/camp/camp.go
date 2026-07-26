@@ -19,8 +19,11 @@ package camp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,8 +52,16 @@ func (s *Service) HealthSnapshot() *Health {
 // Service owns the AnnounceClient. Constructed once in main.go; Start
 // runs on eng.OnStarted, Stop on eng.OnStopped.
 type Service struct {
-	eng   *engine.Engine
-	store *config.Store
+	eng     *engine.Engine
+	store   *config.Store
+	version string // client build version, announced to the camp
+	role    string // run-mode role (user/service/task), published in the roster
+
+	// httpOK flips true once the HTTP roster poll (/api/id) succeeds; while set,
+	// the UDP announce reply's roster is ignored (HTTP is the authoritative
+	// source with full PeerInfo). Stays false against an old server without
+	// /api/id, so the UDP roster remains the fallback — backward compatible.
+	httpOK atomic.Bool
 
 	mu            sync.Mutex
 	announce      *rendezvous.AnnounceClient
@@ -88,9 +99,17 @@ type Service struct {
 // store is where this service persists each camp's peer catalog (the
 // roster snapshot it receives on every announce reply) — the engine no
 // longer owns that write.
-func New(eng *engine.Engine, store *config.Store) *Service {
-	return &Service{eng: eng, store: store}
+func New(eng *engine.Engine, store *config.Store, version, role string) *Service {
+	return &Service{eng: eng, store: store, version: version, role: role}
 }
+
+// Role reports our own run-mode role (user/service/task) — the same value we
+// publish to the roster. The web layer stamps it onto the self peer row so the
+// network view shows our role too.
+func (s *Service) Role() string { return s.role }
+
+// Version reports our own announced client build string.
+func (s *Service) Version() string { return s.version }
 
 // SetName changes our announced display name live — the next announce carries
 // it, so peers pick up the rename without a restart.
@@ -125,7 +144,7 @@ func (s *Service) Start(c *config.Camp) error {
 		return errors.New("camp: engine UDP socket not ready")
 	}
 	pub := s.eng.IdentityPub()
-	ac, err := rendezvous.NewAnnounceClient(udp, c.StunAddr, c.Identity.Name, c.CampID, pub)
+	ac, err := rendezvous.NewAnnounceClient(udp, c.StunAddr, c.Identity.Name, c.CampID, pub, s.version, s.role)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -171,6 +190,11 @@ func (s *Service) Start(c *config.Camp) error {
 		//                            windows (rosterWindow) a full roster cycle
 		//                            completes in ceil(N/window) ticks.
 	}()
+	// HTTP roster poller: fetches the full roster from the camp server's
+	// /api/id (no MTU cap → exhaustive PeerInfo). Once it succeeds it becomes the
+	// authoritative source (onUpdate then ignores the UDP roster). Falls back to
+	// UDP silently against an old server without /api/id.
+	go s.httpRosterLoop(ctx, c.ServerURL, campID)
 
 	s.mu.Lock()
 	s.announce = ac
@@ -196,6 +220,7 @@ func (s *Service) Stop() error {
 	s.unregisterUDP = nil
 	s.mu.Unlock()
 	s.curCampID.Store(nil)
+	s.httpOK.Store(false) // next Start re-probes /api/id fresh
 	if unreg != nil {
 		unreg()
 	}
@@ -270,6 +295,12 @@ func (s *Service) AnnounceStats() (sentMs, replyMs, rttMs int64) {
 // map reconciles, and persists the roster into the per-camp catalog so
 // the UI sees known nodes (incl. currently-offline) on the next start.
 func (s *Service) onUpdate(peers []rendezvous.PeerInfo, paged, cycleEnd bool) {
+	// Once the HTTP roster poll works, it's the authoritative source (full
+	// PeerInfo, no paging) — ignore the UDP reply's roster to avoid the two
+	// fighting. UDP still registers us + keeps the NAT mapping alive.
+	if s.httpOK.Load() {
+		return
+	}
 	if !paged {
 		// Legacy / small-camp full list — authoritative, reconcile now.
 		s.applyRoster(peers)
@@ -349,6 +380,8 @@ func toRoster(peers []rendezvous.PeerInfo) []engine.RosterEntry {
 			JoinedAt:    p.JoinedAt,
 			LastSeenAt:  p.LastSeenAt,
 			Online:      p.Online,
+			Role:        p.Role,
+			Version:     p.Version,
 		})
 	}
 	return out
@@ -438,4 +471,72 @@ func sameUDPAddr(a, b *net.UDPAddr) bool {
 		return a == b
 	}
 	return a.IP.Equal(b.IP) && a.Port == b.Port
+}
+
+// httpRosterLoop polls the camp server's /api/id/<camp> for the full roster and
+// applies it. On first success it flips httpOK so the UDP reply's roster is
+// ignored (this becomes the authoritative source). A non-200 (old server with
+// no /api/id) or a network error just leaves httpOK as-is → UDP stays the
+// fallback. Runs until ctx is cancelled (Stop).
+func (s *Service) httpRosterLoop(ctx context.Context, serverURL, campID string) {
+	base := httpRosterBase(serverURL)
+	if base == "" {
+		return // no usable server URL — stick with the UDP roster
+	}
+	endpoint := base + "/api/id/" + campID
+	client := &http.Client{Timeout: 8 * time.Second}
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		if peers, ok := fetchRoster(ctx, client, endpoint); ok {
+			if s.httpOK.CompareAndSwap(false, true) {
+				clog.Info("camp", "roster via http %s", endpoint)
+			}
+			s.applyRoster(peers)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// fetchRoster GETs the JSON roster. ok=false on any error or non-200 (e.g. an
+// old server returning 404), which the caller treats as "fall back to UDP".
+func fetchRoster(ctx context.Context, c *http.Client, endpoint string) ([]rendezvous.PeerInfo, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var body struct {
+		Peers []rendezvous.PeerInfo `json:"peers"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&body) != nil {
+		return nil, false
+	}
+	return body.Peers, true
+}
+
+// httpRosterBase derives the HTTP(S) base URL of the camp server from its
+// ServerURL (a ws:// or wss:// endpoint): wss→https, ws→http, path dropped.
+// "" if unparseable.
+func httpRosterBase(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := "https"
+	if u.Scheme == "ws" || u.Scheme == "http" {
+		scheme = "http"
+	}
+	return scheme + "://" + u.Host
 }

@@ -18,12 +18,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vseplet/f2f/source/helper/clog"
+	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/db"
 	"github.com/vseplet/f2f/source/helper/db/blocks"
 	"github.com/vseplet/f2f/source/helper/db/blocks/channels"
 	"github.com/vseplet/f2f/source/helper/db/blocks/message"
-	"github.com/vseplet/f2f/source/helper/clog"
-	"github.com/vseplet/f2f/source/helper/config"
 	"github.com/vseplet/f2f/source/helper/identity"
 	"github.com/vseplet/f2f/source/helper/mesh/bus"
 	"github.com/vseplet/f2f/source/helper/mesh/camp"
@@ -82,8 +82,8 @@ type Server struct {
 
 	signals     *signalHub
 	callSignals *signalHub   // SSE hub for SFU signals → local browser
-	blockEvents *signalHub    // SSE hub: a block scope changed (remote sync) → browser
-	msgEvents  *signalHub    // SSE hub: a new/edited chat message → browser (Message JSON)
+	blockEvents *signalHub   // SSE hub: a block scope changed (remote sync) → browser
+	msgEvents   *signalHub   // SSE hub: a new/edited chat message → browser (Message JSON)
 	bus         *bus.Service // peer↔peer transport; nil until RegisterBus
 
 	// profRegSess holds in-flight profile passkey registration ceremonies
@@ -118,7 +118,7 @@ func New(eng *engine.Engine, store *config.Store, fwSvc *firewall.Service, pkiSv
 		signals:     newSignalHub(),
 		callSignals: newSignalHub(),
 		blockEvents: newSignalHub(),
-		msgEvents:  newSignalHub(),
+		msgEvents:   newSignalHub(),
 		profRegSess: make(map[string]*webauthn.SessionData),
 	}
 	callsSvc.OnLocalSignal = func(msg []byte) {
@@ -675,14 +675,17 @@ func (s *Server) statusWithDomains() statusView {
 		peers = append(peers, v)
 	}
 	reflex := s.camp.Reflex()
-	// Self peer entry from engine doesn't carry UDPEndpoint anymore —
-	// merge camp.Reflex() in here.
-	if reflex != "" {
-		for i := range peers {
-			if peers[i].Self {
+	// Self peer entry from engine doesn't carry UDPEndpoint / role / version —
+	// the engine doesn't know its own run-mode. Merge them in from camp here.
+	selfRole, selfVersion := s.camp.Role(), s.camp.Version()
+	for i := range peers {
+		if peers[i].Self {
+			if reflex != "" {
 				peers[i].UDPEndpoint = reflex
-				break
 			}
+			peers[i].Role = selfRole
+			peers[i].Version = selfVersion
+			break
 		}
 	}
 	// Camp metadata from engine config snapshot. PeerName derived

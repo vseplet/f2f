@@ -77,6 +77,21 @@ func (m runMode) String() string {
 	}
 }
 
+// role is what this process publishes to the camp roster (peers act on it):
+// portal is a "user" (a live person behind a browser/Touch ID), service a
+// headless long-lived node, task an ephemeral CI runner. Distinct from
+// String() so the portal mode reads as "user" in the roster.
+func (m runMode) role() string {
+	switch m {
+	case modeService:
+		return "service"
+	case modeTask:
+		return "task"
+	default:
+		return "user"
+	}
+}
+
 // runOpts is the parsed CLI: bundles the flags so run()'s signature stays small
 // as modes grow.
 type runOpts struct {
@@ -310,7 +325,7 @@ func run(opts runOpts) error {
 	// the exit peer and routed on the fly, so the user needn't add every
 	// subdomain by hand.
 	dnsSvc.OnPinnedMiss = tunnelSvc.ResolveSubdomain
-	campSvc := camp.New(eng, store)
+	campSvc := camp.New(eng, store, version, opts.mode.role())
 	// Built-in OIDC provider: turns overlay identity into standard tokens
 	// for co-located apps. Served on a loopback port; the proxy exposes it
 	// at id.<zone>.f2f and injects the attested caller pub.

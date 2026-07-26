@@ -181,6 +181,11 @@ type PeerStatusInfo struct {
 	// Present for any peer whose Pub is known; empty for legacy peers
 	// announced without a pub. Used for BT peer addresses and display.
 	OverlayV4 string `json:"overlay_v4,omitempty"`
+	// Role is the peer's self-declared run-mode role from the roster
+	// (user/service/task). Empty for peers on an old client that doesn't
+	// announce one. Version is the peer's client build string, same source.
+	Role    string `json:"role,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 // peerState is our per-peer view: identity from camp + when we last
@@ -211,6 +216,12 @@ type peerState struct {
 	// "online" semantic for that lives in IsOnline() below.
 	InCamp     bool
 	LastSeenAt int64
+
+	// Role / Version are self-declared roster metadata (run-mode role and
+	// client build). Advisory display + future peer-filtering; empty for
+	// peers on an old client that doesn't announce them.
+	Role    string
+	Version string
 
 	UDPAddr    *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -756,7 +767,9 @@ type RosterEntry struct {
 	UDPEndpoint string
 	JoinedAt    int64
 	LastSeenAt  int64
-	Online      bool // camp confirms the peer announced recently
+	Online      bool   // camp confirms the peer announced recently
+	Role        string // self-declared run-mode role (user/service/task); "" on old clients
+	Version     string // peer's client build string; "" on old clients
 }
 
 // ApplyCampRoster is called by mesh/camp every poll cycle (and
@@ -898,6 +911,8 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				JoinedAt:    p.JoinedAt,
 				InCamp:      p.Online,
 				LastSeenAt:  p.LastSeenAt,
+				Role:        p.Role,
+				Version:     p.Version,
 				UDPAddr:     addr,
 			}
 			e.peers[p.Pub] = st
@@ -912,6 +927,8 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				existing.Pub = p.Pub
 			}
 			existing.LastSeenAt = p.LastSeenAt
+			existing.Role = p.Role
+			existing.Version = p.Version
 			if p.Online {
 				existing.PublicIP = p.PublicIP
 				existing.UDPPort = p.UDPPort
@@ -1593,6 +1610,8 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Paired:      paired,
 			HalfPaired:  halfPaired,
 			OverlayV4:   overlayV4OrEmpty(p.Pub),
+			Role:        p.Role,
+			Version:     p.Version,
 		})
 	}
 	return out

@@ -24,6 +24,16 @@ type PeerInfo struct {
 	JoinedAt    int64  `json:"joined_at"`
 	Online      bool   `json:"online"`
 	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
+	// Version is the peer's client build version (main.version), useful for
+	// diagnostics and gauging wire-rollout readiness. Empty for old clients.
+	Version string `json:"version,omitempty"`
+	// Role is "task" for an ephemeral, restricted-connectivity node, "" (normal)
+	// otherwise. Allow lists the peer fingerprints a task accepts links from;
+	// other nodes read it to skip punching a task they're not on. Both are
+	// advisory hints carried in the roster — the actual enforcement is on the
+	// task itself (it drops non-allowlisted inbound). Empty for normal peers.
+	Role  string   `json:"role,omitempty"`
+	Allow []string `json:"allow,omitempty"`
 }
 
 // --- UDP wire types ---
@@ -47,6 +57,11 @@ type AnnounceReq struct {
 	// overflows a single UDP datagram. Old clients omit it and keep getting
 	// the full list — backward-compatible.
 	Paged bool `json:"paged,omitempty"`
+	// Version/Role/Allow are published into the roster (see PeerInfo). The
+	// server stores them verbatim and hands them back in /api/id and replies.
+	Version string   `json:"version,omitempty"`
+	Role    string   `json:"role,omitempty"`
+	Allow   []string `json:"allow,omitempty"`
 }
 
 // AnnouncedResp is what camp sends back on success. The client parses

@@ -106,21 +106,40 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 			continue
 		}
 
+		// version/role/allow are advisory metadata the peer publishes. Sanitize
+		// so a junk announce can't bloat the roster: role must be a short token,
+		// allow a small list of 64-hex fps, version a short string.
+		version := req.Version
+		if len(version) > 40 {
+			version = version[:40]
+		}
+		role := req.Role
+		switch role {
+		case "user", "service", "task":
+			// known roles, kept verbatim
+		default:
+			role = "" // unknown/absent (old client) → blank
+		}
+		var allow []string
+		for _, fp := range req.Allow {
+			if pubRE.MatchString(fp) {
+				allow = append(allow, fp)
+			}
+			if len(allow) >= 8 { // cap: keep the roster JSON small
+				break
+			}
+		}
+
 		wasNew := !hub.has(campID, pub)
-		info := hub.upsert(campID, pub, name, src.IP.String(), src.Port)
+		info := hub.upsert(campID, pub, name, src.IP.String(), src.Port, version, role, allow)
 		if wasNew {
 			log.Printf("join: %s@%s pub=%s from %s", name, campID, short(pub), src)
 		}
 
+		// The announce reply carries only `you` — the roster is served over HTTP
+		// (/api/id) now, with no MTU cap and full PeerInfo (version/role/allow).
+		// UDP announce is kept purely for register / reflex-endpoint / NAT-keepalive.
 		reply := rendezvous.AnnouncedResp{T: "announced", You: info}
-		if req.Paged {
-			// Windowed roster: a slice per reply, rotating, so a big camp never
-			// overflows one UDP datagram. Client accumulates until CycleEnd.
-			peers, cycleEnd, total := hub.listWindow(campID, pub, rosterWindow)
-			reply.Peers, reply.Paged, reply.CycleEnd, reply.Total = peers, true, cycleEnd, total
-		} else {
-			reply.Peers = hub.list(campID) // legacy: full list (old clients)
-		}
 		if data, err := json.Marshal(reply); err == nil {
 			conn.WriteToUDP(data, src)
 		}

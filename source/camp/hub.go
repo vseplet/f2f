@@ -42,7 +42,9 @@ func NewHub() *Hub {
 
 // upsert registers or refreshes a peer and returns the resulting wire
 // view. Online is always true here — stale peers are evicted, not kept.
-func (h *Hub) upsert(campID, pub, name, publicIP string, udpPort int) rendezvous.PeerInfo {
+// version/role/allow are announced by the peer and carried verbatim into the
+// roster (the server adds no logic — clients act on role/allow themselves).
+func (h *Hub) upsert(campID, pub, name, publicIP string, udpPort int, version, role string, allow []string) rendezvous.PeerInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -60,6 +62,9 @@ func (h *Hub) upsert(campID, pub, name, publicIP string, udpPort int) rendezvous
 		p.info.UDPEndpoint = endpoint
 		p.info.Online = true
 		p.info.LastSeenAt = now.UnixMilli()
+		p.info.Version = version
+		p.info.Role = role
+		p.info.Allow = allow
 		p.lastSeen = now
 		return p.info
 	}
@@ -72,6 +77,9 @@ func (h *Hub) upsert(campID, pub, name, publicIP string, udpPort int) rendezvous
 		JoinedAt:    now.UnixMilli(),
 		Online:      true,
 		LastSeenAt:  now.UnixMilli(),
+		Version:     version,
+		Role:        role,
+		Allow:       allow,
 	}
 	c.peers[pub] = &peer{info: info, lastSeen: now}
 	return info

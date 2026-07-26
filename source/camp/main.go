@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
@@ -76,6 +77,23 @@ func main() {
 func rootHandler(hub *Hub, stunPort string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch p := r.URL.Path; {
+		case strings.HasPrefix(p, "/api/id/"):
+			// Machine-readable full roster (JSON) — clients poll this instead of
+			// relying on the size-capped UDP announce reply, so we can publish
+			// exhaustive PeerInfo (version/role/allow) without MTU limits. No
+			// auth: the camp_id is a bearer secret, same gate as /id and announce.
+			id := strings.TrimPrefix(p, "/api/id/")
+			if !validCampID(id) {
+				http.Error(w, "invalid camp id", http.StatusBadRequest)
+				return
+			}
+			peers := hub.list(id)
+			if peers == nil {
+				peers = []rendezvous.PeerInfo{}
+			}
+			w.Header().Set("content-type", "application/json; charset=utf-8")
+			w.Header().Set("access-control-allow-origin", "*")
+			_ = json.NewEncoder(w).Encode(map[string]any{"camp_id": id, "peers": peers})
 		case strings.HasPrefix(p, "/id/"):
 			id := strings.TrimPrefix(p, "/id/")
 			if !validCampID(id) {
@@ -153,16 +171,38 @@ func renderCampPage(campID string, peers []rendezvous.PeerInfo) string {
 			if len(p.Pub) >= 16 {
 				fp = p.Pub[:16]
 			}
+			ver := p.Version
+			if ver == "" {
+				ver = "—"
+			}
+			role := p.Role
+			if role == "" {
+				role = "—"
+			}
+			allow := "—"
+			if len(p.Allow) > 0 {
+				short := make([]string, 0, len(p.Allow))
+				for _, a := range p.Allow {
+					if len(a) >= 16 {
+						a = a[:16]
+					}
+					short = append(short, a)
+				}
+				allow = strings.Join(short, " ")
+			}
 			fmt.Fprintf(&rows, `      <tr>
         <td>%s</td>
         <td class="muted">%s</td>
         <td>%s</td>
         <td class="muted">%s</td>
+        <td class="muted">%s</td>
+        <td class="muted">%s</td>
+        <td class="muted">%s</td>
       </tr>
-`, html.EscapeString(p.Name), html.EscapeString(fp), html.EscapeString(endpoint), ago(p.JoinedAt))
+`, html.EscapeString(p.Name), html.EscapeString(fp), html.EscapeString(endpoint), html.EscapeString(ver), html.EscapeString(role), html.EscapeString(allow), ago(p.JoinedAt))
 		}
 		body = `<table>
-      <thead><tr><th>name</th><th>fingerprint</th><th>udp endpoint</th><th>joined</th></tr></thead>
+      <thead><tr><th>name</th><th>fingerprint</th><th>udp endpoint</th><th>version</th><th>role</th><th>allow</th><th>joined</th></tr></thead>
       <tbody>
 ` + rows.String() + `      </tbody>
     </table>`
