@@ -125,10 +125,15 @@ type Service struct {
 	OnPinnedMiss func(name string) []string
 
 	srvMu  sync.Mutex
-	srv    *Server
+	srv    *Server // loopback listener (127.0.0.1:<ephemeral>), OS-wired per zone
+	srvOvl *Server // overlay-IP listener (100.64.x.y:53) for Docker containers; nil if unavailable
 	zone   string
 	campID string
 }
+
+// overlayDNSPort is the FIXED port the overlay-IP DNS listener binds, so it can
+// be pointed at from Docker (--dns <overlay-ip>) without discovering a port.
+const overlayDNSPort = 53
 
 // New constructs a Service. The store and engine must outlive the
 // service. The camp identity is picked up from engine.Status() at
@@ -258,7 +263,7 @@ func (s *Service) visibleChannels(d Entry, pub string) []string {
 // the MyDomains list and the peer-domains mirror from the on-disk
 // camp config. campID and zone come from the engine's current
 // state (typically passed through from eng.OnStarted via Status()).
-func (s *Service) Start(campID, zone string) error {
+func (s *Service) Start(campID, zone, overlayIP string) error {
 	s.srvMu.Lock()
 	defer s.srvMu.Unlock()
 	if s.srv != nil {
@@ -271,12 +276,25 @@ func (s *Service) Start(campID, zone string) error {
 	// Bind address is platform-chosen: an ephemeral loopback port everywhere
 	// the OS resolver can be pointed at "IP:port", but a fixed :53 on Windows,
 	// whose NRPT only accepts a bare server IP.
-	srv, err := Open(platform.DNSBindAddr(), zone, s, s.PinnedLookup, s.pinnedMiss)
+	srv, err := Open(platform.DNSBindAddr(), zone, s, s.PinnedLookup, s.pinnedMiss, "")
 	if err != nil {
 		return err
 	}
 	s.srv = srv
 	s.zone = zone
+	// Second listener on the overlay IP at a fixed port so Docker containers can
+	// resolve *.f2f (point them at this IP via --dns). Own domains resolve to the
+	// overlay IP here (v4Rewrite) so a container reaches the host's proxy, not its
+	// own loopback. Best-effort: a bind failure (IP not up yet) just skips it.
+	if overlayIP != "" {
+		ovlAddr := net.JoinHostPort(overlayIP, strconv.Itoa(overlayDNSPort))
+		if ovl, oerr := Open(ovlAddr, zone, s, s.PinnedLookup, s.pinnedMiss, overlayIP); oerr != nil {
+			clog.Warn("dns", "overlay listener on %s: %v (containers can't resolve .f2f)", ovlAddr, oerr)
+		} else {
+			s.srvOvl = ovl
+			clog.Info("dns", "serving %s.f2f on %s (for containers)", zone, ovlAddr)
+		}
+	}
 	addr := srv.Addr()
 	if rerr := platform.InstallZoneResolver(zone, addr); rerr != nil {
 		clog.Warn("dns", "install zone resolver: %v", rerr)
@@ -338,10 +356,15 @@ func (s *Service) seedFromStore() error {
 func (s *Service) Stop() error {
 	s.srvMu.Lock()
 	srv := s.srv
+	ovl := s.srvOvl
 	zone := s.zone
 	s.srv = nil
+	s.srvOvl = nil
 	s.zone = ""
 	s.srvMu.Unlock()
+	if ovl != nil {
+		_ = ovl.Close()
+	}
 	if zone != "" {
 		if err := platform.RemoveZoneResolver(zone); err != nil {
 			clog.Warn("dns", "remove zone resolver: %v", err)

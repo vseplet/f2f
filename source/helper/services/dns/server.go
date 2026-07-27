@@ -56,6 +56,13 @@ type Server struct {
 	// disables on-demand subdomains.
 	pinnedMissFn func(name string) []string
 
+	// v4Rewrite, when non-empty, replaces a "127.0.0.1" A answer with this IP.
+	// Set on the overlay-IP listener (for Docker containers): our own domains
+	// resolve to loopback for the host, but a container must instead reach the
+	// proxy on the host's overlay IP. Empty on the loopback listener. Immutable
+	// after Open, so it's read lock-free in handle().
+	v4Rewrite string
+
 	// Per-rcode query counters and last-query timestamp, for the UI's
 	// diagnostics tab. Atomic — read concurrently with handle().
 	totalQueries atomic.Int64
@@ -94,7 +101,7 @@ func (s *Server) Stats() Stats {
 //
 // Pass "127.0.0.1:0" to let the kernel pick a free port; the actual
 // bound address is then available via Server.Addr.
-func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name string) []string) (*Server, error) {
+func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name string) []string, v4Rewrite string) (*Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dns: resolve %s: %w", bindAddr, err)
@@ -111,6 +118,7 @@ func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name stri
 		res:          res,
 		pinnedFn:     pinned,
 		pinnedMissFn: pinnedMiss,
+		v4Rewrite:    v4Rewrite,
 	}
 	mux := dns.NewServeMux()
 	mux.HandleFunc(strings.TrimPrefix(suffix, "."), s.handle)
@@ -210,6 +218,12 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	if (q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY) && host.V4 != "" {
+		// On the overlay listener, our own loopback answer is useless to a
+		// container (its 127.0.0.1 is itself) — hand it the host's overlay IP,
+		// where the proxy also listens.
+		if s.v4Rewrite != "" && host.V4 == "127.0.0.1" {
+			host.V4 = s.v4Rewrite
+		}
 		if addr := net.ParseIP(host.V4).To4(); addr != nil {
 			m.Answer = append(m.Answer, &dns.A{
 				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},

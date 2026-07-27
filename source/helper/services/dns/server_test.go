@@ -36,7 +36,7 @@ func TestPinnedDomains(t *testing.T) {
 	pins := map[string][]string{"work-vpn.ru": {"10.8.3.7", "10.8.3.8"}}
 	srv, err := Open("127.0.0.1:0", "testcamp", stubResolver{}, func(name string) []string {
 		return pins[name]
-	}, nil)
+	}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestPinnedMiss(t *testing.T) {
 	}
 	srv, err := Open("127.0.0.1:0", "testcamp", stubResolver{}, func(name string) []string {
 		return pins[name]
-	}, miss)
+	}, miss, "")
 	if err != nil {
 		t.Fatal(err)
 	}

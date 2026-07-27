@@ -489,9 +489,11 @@ func run(opts runOpts) error {
 		},
 		{
 			name: "dns", on: feat.dns,
-			start: func(_ string, st engine.Status) error { return dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID)) },
-			stop:  dnsSvc.Stop,
-			run:   dnsSvc.PollPeers,
+			start: func(_ string, st engine.Status) error {
+				return dnsSvc.Start(st.CampID, identity.CampLabel(st.CampID), st.LocalIP)
+			},
+			stop: dnsSvc.Stop,
+			run:  dnsSvc.PollPeers,
 		},
 		{
 			name: "dns-health", on: feat.dns,
