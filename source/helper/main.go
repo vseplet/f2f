@@ -155,10 +155,12 @@ func allFeatures() features {
 // override flags can layer on later.
 //
 //	portal  — everything (the human workstation).
-//	service — headless server: hosts/serves, but no human web UI (the portal)
-//	          and no heavy media (calls) or file sharing (drop). OIDC IS on — it
-//	          serves co-located apps (e.g. Gitea) over the proxy and is exactly
-//	          what a headless IdP node needs. Tunable starting point.
+//	service — headless server: hosts/serves, no heavy media (calls) or file
+//	          sharing (drop). The web feature IS on, but only for its loopback
+//	          API (127.0.0.1:2202) that `f2f tui` drives — the portal.<zone>.f2f
+//	          domain is loopback-only and never exposed to peers. OIDC IS on too:
+//	          it serves co-located apps (e.g. Gitea) over the proxy, exactly what
+//	          a headless IdP node needs. Tunable starting point.
 //	task    — ephemeral client: substrate only (engine/bus/camp). It dials OUT
 //	          to a chosen node and exposes nothing, so nothing optional starts —
 //	          not even the firewall (it gates by port, but the task serves no
@@ -170,6 +172,10 @@ func featuresFor(m runMode) features {
 			firewall: true, dns: true, pki: true, tunnel: true,
 			secrets: true, remote: true, proxy: true, gossip: true, db: true,
 			oidc: true,
+			// web = the loopback API server (127.0.0.1:2202). On a headless node
+			// nobody opens the portal HTML, but `f2f tui` — the whole reason a
+			// service node needs managing without a browser — talks to this API.
+			web: true,
 		}
 	case modeTask:
 		return features{} // substrate only
@@ -669,8 +675,10 @@ func run(opts runOpts) error {
 				clog.Error("main", "%s start: %v", s.name, err)
 			}
 		}
-		// The portal name only resolves where the proxy serves it.
-		if feat.proxy && st.CampID != "" && st.CampID != lastPortalCamp {
+		// The portal banner is for a human at a browser — only portal mode has
+		// one. A --service node runs the loopback API (for `f2f tui`) but its
+		// portal.<zone>.f2f is loopback-only and unvisited, so don't advertise it.
+		if opts.mode == modePortal && feat.proxy && st.CampID != "" && st.CampID != lastPortalCamp {
 			clog.Console("portal: https://portal.%s.f2f", identity.CampLabel(st.CampID))
 			lastPortalCamp = st.CampID
 		}
