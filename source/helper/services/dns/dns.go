@@ -276,7 +276,7 @@ func (s *Service) Start(campID, zone, overlayIP string) error {
 	// Bind address is platform-chosen: an ephemeral loopback port everywhere
 	// the OS resolver can be pointed at "IP:port", but a fixed :53 on Windows,
 	// whose NRPT only accepts a bare server IP.
-	srv, err := Open(platform.DNSBindAddr(), zone, s, s.PinnedLookup, s.pinnedMiss, "")
+	srv, err := Open(platform.DNSBindAddr(), zone, s, s.PinnedLookup, s.pinnedMiss, "", nil)
 	if err != nil {
 		return err
 	}
@@ -288,11 +288,14 @@ func (s *Service) Start(campID, zone, overlayIP string) error {
 	// own loopback. Best-effort: a bind failure (IP not up yet) just skips it.
 	if overlayIP != "" {
 		ovlAddr := net.JoinHostPort(overlayIP, strconv.Itoa(overlayDNSPort))
-		if ovl, oerr := Open(ovlAddr, zone, s, s.PinnedLookup, s.pinnedMiss, overlayIP); oerr != nil {
+		// Forward non-.f2f queries to the host's real resolver, so a container can
+		// point its sole --dns at this listener without losing normal DNS.
+		up := upstreamServers(overlayIP)
+		if ovl, oerr := Open(ovlAddr, zone, s, s.PinnedLookup, s.pinnedMiss, overlayIP, up); oerr != nil {
 			clog.Warn("dns", "overlay listener on %s: %v (containers can't resolve .f2f)", ovlAddr, oerr)
 		} else {
 			s.srvOvl = ovl
-			clog.Info("dns", "serving %s.f2f on %s (for containers)", zone, ovlAddr)
+			clog.Info("dns", "serving %s.f2f on %s (for containers, upstream %v)", zone, ovlAddr, up)
 		}
 	}
 	addr := srv.Addr()

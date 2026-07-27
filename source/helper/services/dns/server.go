@@ -63,6 +63,12 @@ type Server struct {
 	// after Open, so it's read lock-free in handle().
 	v4Rewrite string
 
+	// upstream is the list of "ip:port" resolvers to forward NON-.f2f queries to.
+	// Set on the overlay listener so a container can use it as its sole --dns
+	// (everything else is relayed to the host's real resolver). Empty on the
+	// loopback listener, which only ever receives .f2f. Immutable after Open.
+	upstream []string
+
 	// Per-rcode query counters and last-query timestamp, for the UI's
 	// diagnostics tab. Atomic — read concurrently with handle().
 	totalQueries atomic.Int64
@@ -101,7 +107,7 @@ func (s *Server) Stats() Stats {
 //
 // Pass "127.0.0.1:0" to let the kernel pick a free port; the actual
 // bound address is then available via Server.Addr.
-func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name string) []string, v4Rewrite string) (*Server, error) {
+func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name string) []string, v4Rewrite string, upstream []string) (*Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dns: resolve %s: %w", bindAddr, err)
@@ -119,6 +125,7 @@ func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name stri
 		pinnedFn:     pinned,
 		pinnedMissFn: pinnedMiss,
 		v4Rewrite:    v4Rewrite,
+		upstream:     upstream,
 	}
 	mux := dns.NewServeMux()
 	mux.HandleFunc(strings.TrimPrefix(suffix, "."), s.handle)
@@ -149,6 +156,45 @@ func Open(bindAddr, zone string, res Resolver, pinned, pinnedMiss func(name stri
 		_ = s.srv.Shutdown()
 		return nil, fmt.Errorf("dns: activate %s timed out", s.addr)
 	}
+}
+
+// upstreamServers returns the host's real resolvers (from /etc/resolv.conf) as
+// "ip:port", excluding selfIP so the overlay listener never forwards to itself.
+// Falls back to a public resolver when resolv.conf is missing/empty. These are
+// what non-.f2f queries get forwarded to.
+func upstreamServers(selfIP string) []string {
+	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil || cfg == nil || len(cfg.Servers) == 0 {
+		return []string{"1.1.1.1:53"}
+	}
+	port := cfg.Port
+	if port == "" {
+		port = "53"
+	}
+	var out []string
+	for _, srv := range cfg.Servers {
+		if srv == selfIP {
+			continue // never loop back to ourselves
+		}
+		out = append(out, net.JoinHostPort(srv, port))
+	}
+	if len(out) == 0 {
+		return []string{"1.1.1.1:53"}
+	}
+	return out
+}
+
+// forward relays a query to the first upstream that answers (UDP, short
+// timeout). Returns nil if none respond, so the caller can fall back to
+// NXDOMAIN. Used only on the overlay listener (upstream set).
+func (s *Server) forward(req *dns.Msg) *dns.Msg {
+	c := &dns.Client{Timeout: 4 * time.Second}
+	for _, srv := range s.upstream {
+		if resp, _, err := c.Exchange(req, srv); err == nil && resp != nil {
+			return resp
+		}
+	}
+	return nil
 }
 
 // Addr returns the actual bound address, including the
@@ -288,6 +334,18 @@ func (s *Server) handlePinned(w dns.ResponseWriter, req *dns.Msg) {
 		ips = s.pinnedMissFn(name)
 	}
 	if len(ips) == 0 {
+		// Not one of ours (not .f2f, not a pinned intercept). On the overlay
+		// listener we forward to the host's real resolver so a container can use
+		// us as its sole --dns; the loopback listener (no upstream) NXDOMAINs.
+		if len(s.upstream) > 0 {
+			if resp := s.forward(req); resp != nil {
+				resp.Id = req.Id
+				_ = w.WriteMsg(resp)
+				// Count against our rcode stats for the diagnostics tab.
+				m.Rcode = resp.Rcode
+				return
+			}
+		}
 		m.Rcode = dns.RcodeNameError
 		_ = w.WriteMsg(m)
 		return
