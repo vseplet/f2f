@@ -1567,8 +1567,8 @@ $(function () {
       return;
     }
     $('#status-diag').removeClass('active');
-    // invite ("add peer") → camp tab; the invite flow will live there.
-    if (h === 'invite') { activateTab('camp'); return; }
+    // invite ("add peer") → onboarding page (install + join / run as service).
+    if (h === 'invite') { activateTab('invite'); fillInvitePage(); return; }
     // tunnel:/dns:/drop: rows open their (hidden) tab, like peers open camp.
     // dns[:<channelKey>] — bare shows all my domains; with a key, filters to
     // domains reachable by that channel.
@@ -3058,6 +3058,19 @@ $(function () {
       setTimeout(() => $el.css('color', prev), 500);
     }).catch(() => {});
   });
+  // Generic click-to-copy: any .ax-copy element copies its data-copy (or text)
+  // to the clipboard and flashes green. Used by the invite page's camp id and
+  // command snippets.
+  $(document).on('click', '.ax-copy', function () {
+    const $el = $(this);
+    const text = String($el.data('copy') || $el.text() || '').trim();
+    if (!text || !navigator.clipboard) return;
+    navigator.clipboard.writeText(text).then(() => {
+      const prev = $el.css('color');
+      $el.css('color', '#7fc474');
+      setTimeout(() => $el.css('color', prev), 500);
+    }).catch(() => {});
+  });
   // Diagnostics tab is opened from the status bar via a route (tab is hidden).
   $('#status-diag').on('click', function () { location.hash = 'diag'; });
 
@@ -3094,6 +3107,19 @@ $(function () {
       return id.slice(65);
     }
     return id;
+  }
+  // fillInvitePage populates the onboarding page with this camp's id/zone and
+  // the ready-to-copy service command. camp_id is a bearer secret, shown here
+  // only for sharing.
+  function fillInvitePage() {
+    const id = (lastStatus && lastStatus.camp_id) || '';
+    const zone = campLabelFromID(id) || '<zone>';
+    $('#invite-zone').text(id ? '# ' + zone : 'this camp');
+    $('#invite-campid').text(id || '— (no camp running)').data('copy', id);
+    $('#invite-portal-url').text('https://portal.' + zone + '.f2f');
+    $('#invite-service-cmd').text(
+      'sudo f2f --service --camp ' + (id || '<camp_id>') + ' --name <node-name>',
+    );
   }
   let currentCampID = '';
   let currentCampLabel = '';
@@ -3444,6 +3470,8 @@ $(function () {
     lastStatus = s;
     renderAccount(s);
     ensureProfile(s); // force profile creation if there's none yet
+    // Keep the invite page's camp id/command fresh if it's the open tab.
+    if (!$('#tab-invite').hasClass('hidden')) fillInvitePage();
     if (s.running) {
       setEngineState('running', 'running', '· ' + (s.utun_name || '?'));
       currentCampID = s.camp_id || '';

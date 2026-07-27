@@ -3409,3 +3409,9 @@ a.ax-domain-link:hover {
 .ax-sec-add { display: flex; gap: 6px; margin-top: 8px; }
 .ax-sec-add input { flex: 1; box-sizing: border-box; background: var(--bg, #15161a); color: var(--fg, #e6e6e6); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--mono, ui-monospace, monospace); }
 .ax-sec-addbtn { flex: 0 0 auto !important; }
+
+/* Invite / onboarding page: numbered steps + click-to-copy snippets. */
+.ax-invite-steps { margin: 10px 0 0; padding-left: 20px; line-height: 1.9; }
+.ax-invite-steps li { margin-bottom: 10px; }
+.ax-invite-steps code { display: inline-block; margin: 2px 0; }
+.ax-copy { cursor: pointer; }

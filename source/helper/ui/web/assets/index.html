@@ -289,6 +289,101 @@
             </div>
             <!-- /#tab-camp -->
 
+            <!-- Invite page. Opened from the sidebar "add peer" row (#invite).
+                 Exhaustive onboarding: install → join as a user, or run as a
+                 headless service node. camp_id + commands filled by JS. -->
+            <div id="tab-invite" class="tab-panel hidden">
+                <div class="ax-frame">
+                    <div class="ax-section">
+                        <div class="ax-section-title"><span>— invite a peer</span></div>
+                        <div class="ax-section-status">
+                            Share the <b>camp id</b> below to let someone join
+                            <b id="invite-zone">this camp</b>. It is a
+                            <b>bearer secret</b> — anyone who has it can join, so
+                            send it privately.
+                        </div>
+                        <div style="margin-top: 10px">
+                            <code
+                                id="invite-campid"
+                                class="ax-mono ax-copy"
+                                title="click to copy"
+                                style="word-break: break-all"
+                            >—</code>
+                        </div>
+                    </div>
+
+                    <div class="ax-section">
+                        <div class="ax-section-title"><span>— add a user (a workstation)</span></div>
+                        <div class="ax-section-status muted">
+                            For a person who will use the portal, chat, calls and
+                            apps from a machine with a browser.
+                        </div>
+                        <ol class="ax-invite-steps">
+                            <li>
+                                Install f2f —<br />
+                                macOS / Linux:
+                                <code class="ax-mono ax-copy" title="click to copy"
+                                    >curl -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/install.sh | sh</code
+                                ><br />
+                                <span class="muted">broken IPv6? use</span>
+                                <code class="ax-mono ax-copy" title="click to copy"
+                                    >curl -4 -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/install.sh | sh</code
+                                ><br />
+                                Windows (PowerShell as Administrator):
+                                <code class="ax-mono ax-copy" title="click to copy"
+                                    >irm https://raw.githubusercontent.com/vseplet/f2f/main/install.ps1 | iex</code
+                                >
+                            </li>
+                            <li>
+                                Join this camp:
+                                <code class="ax-mono ax-copy" title="click to copy">sudo f2f</code>
+                                → choose
+                                <b>“Join an existing camp (camp_id)”</b>
+                                → paste the camp id above → enter a display name.
+                            </li>
+                            <li>
+                                The portal opens at
+                                <code class="ax-mono" id="invite-portal-url">https://portal.&lt;zone&gt;.f2f</code>
+                                — accept the local CA once when the browser warns.
+                            </li>
+                        </ol>
+                    </div>
+
+                    <div class="ax-section">
+                        <div class="ax-section-title"><span>— add a service node (headless server)</span></div>
+                        <div class="ax-section-status muted">
+                            For a VPS or box with no browser — hosts services
+                            (Gitea, etc.), the OIDC provider and exit routing. No
+                            portal is served to peers.
+                        </div>
+                        <ol class="ax-invite-steps">
+                            <li>Install f2f (same one-liner as above).</li>
+                            <li>
+                                Run it as a headless service (non-interactive):
+                                <code class="ax-mono ax-copy" id="invite-service-cmd" title="click to copy"
+                                    >sudo f2f --service --camp &lt;camp_id&gt; --name &lt;node-name&gt;</code
+                                ><br />
+                                <span class="muted">replace</span>
+                                <code class="ax-mono">&lt;node-name&gt;</code>
+                                <span class="muted">with a label for this node.</span>
+                            </li>
+                            <li>
+                                Manage it from the terminal (no browser needed):
+                                <code class="ax-mono ax-copy" title="click to copy">f2f tui</code>
+                                — status, certificates, domains, ports, channels,
+                                OIDC, logs, update.
+                            </li>
+                        </ol>
+                        <div class="ax-section-status muted" style="margin-top: 8px">
+                            The camp id is a secret — in CI / systemd units keep it
+                            out of logs (e.g. pass via an env var, not the command
+                            line where possible).
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- /#tab-invite -->
+
             <!-- Profile page. Opened from the account plaque (create/edit). -->
             <div id="tab-profile" class="tab-panel hidden">
                 <div class="ax-frame ax-profile-page">
