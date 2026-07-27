@@ -244,6 +244,7 @@ func RunTUI(args []string) error {
 				huh.NewOption("OIDC clients", "oidc"),
 				huh.NewOption("Calls", "calls"),
 				huh.NewOption("Logs", "logs"),
+				huh.NewOption("Update", "update"),
 				huh.NewOption("Quit", "quit"),
 			).Value(&choice),
 		))
@@ -277,6 +278,8 @@ func RunTUI(args []string) error {
 			err = t.sectionCalls()
 		case "logs":
 			err = t.sectionLogs()
+		case "update":
+			err = t.sectionUpdate()
 		case "quit", "":
 			return nil
 		}
@@ -1226,6 +1229,42 @@ func (t *tui) sectionLogs() error {
 			continue
 		}
 		fmt.Println(strings.TrimRight(e.Message, "\n"))
+	}
+	return nil
+}
+
+// sectionUpdate asks the helper to check for and apply a newer release (POST
+// /api/update). The helper swaps its own on-disk binary — it doesn't restart, so
+// we tell the user to. Uses a long timeout since it downloads a binary.
+func (t *tui) sectionUpdate() error {
+	fmt.Println("\nchecking for updates…")
+	req, err := http.NewRequest(http.MethodPost, t.base+"/api/update", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: 6 * time.Minute}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var res struct {
+		From, To, Path, RestartHint string
+		Updated                     bool
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return err
+	}
+	if !res.Updated {
+		fmt.Printf("already up to date (%s)\n", orDash(res.To))
+		return nil
+	}
+	fmt.Printf("updated %s → %s\n  binary: %s\n", orDash(res.From), res.To, res.Path)
+	if res.RestartHint != "" {
+		fmt.Println("  " + res.RestartHint)
 	}
 	return nil
 }

@@ -468,6 +468,7 @@ func run(opts runOpts) error {
 	vncSvc.Register()
 
 	srv := web.New(eng, store, fwSvc, pkiSvc, dnsSvc, dropSvc, callsSvc, tunnelSvc, campSvc, dbSvc, gossipSvc, shellSvc, vncSvc, oidcSvc, secretsSvc, blocksMgr, channelsMgr, msgMgr, bind)
+	srv.SetVersion(version)
 	srv.RegisterBus(busSvc) // inbound meet signalling + bus-first outbound
 	// Remote block entries (sync) → live-refresh any open editor in the browser.
 	dbSvc.OnApply(srv.OnFrameApplied)

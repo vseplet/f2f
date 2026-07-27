@@ -37,6 +37,7 @@ import (
 	"github.com/vseplet/f2f/source/helper/services/oidc"
 	"github.com/vseplet/f2f/source/helper/services/pki"
 	"github.com/vseplet/f2f/source/helper/services/secrets"
+	"github.com/vseplet/f2f/source/helper/services/selfupdate"
 	"github.com/vseplet/f2f/source/helper/services/shell"
 	"github.com/vseplet/f2f/source/helper/services/tunnel"
 	"github.com/vseplet/f2f/source/helper/services/vnc"
@@ -78,6 +79,7 @@ type Server struct {
 	channels *channels.Manager
 	messages *message.Manager
 	addr     string
+	version  string // build version, for the self-update check
 	srv      *http.Server
 
 	signals     *signalHub
@@ -242,6 +244,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	}
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("POST /api/update", s.handleUpdate)
 	mux.HandleFunc("POST /api/intercepts", s.handleAddIntercept)
 	mux.HandleFunc("DELETE /api/intercepts/{id}", s.handleRemoveIntercept)
 	mux.HandleFunc("POST /api/peers/active", s.handleSetActivePeer)
@@ -597,6 +600,22 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.statusWithDomains())
+}
+
+// SetVersion records the running build version so the self-update handler can
+// compare it against the latest release. Called once at startup.
+func (s *Server) SetVersion(v string) { s.version = v }
+
+// handleUpdate checks GitHub for a newer release and, if found, swaps the on-disk
+// binary in place (does not restart — the response tells the caller to). Served
+// on the loopback API so `f2f tui` can trigger it on a headless node.
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	res, err := selfupdate.Apply(r.Context(), s.version)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // peerStatusView wraps engine.PeerStatusInfo with per-peer fields
