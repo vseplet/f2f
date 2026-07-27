@@ -199,15 +199,17 @@ func main() {
 	// 	return
 	// }
 
-	// `f2f remote …` — disabled for now (exposing terminal/desktop moves under
-	// the new mode design). Kept commented so the wiring is easy to restore.
-	// if len(args) > 0 && args[0] == "remote" {
-	// 	if err := cli.RunRemote(args[1:]); err != nil {
-	// 		fmt.Fprintln(os.Stderr, "error:", err)
-	// 		os.Exit(1)
-	// 	}
-	// 	return
-	// }
+	// `f2f tui …` — terminal control panel for a running helper (headless
+	// nodes / VPS without a browser). Thin loopback client to the same API the
+	// web portal uses: status, cert trust, domains, tunnels, shell/desktop
+	// exposure, OIDC clients, calls.
+	if len(args) > 0 && args[0] == "tui" {
+		if err := cli.RunTUI(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// `f2f version` / `--version` — print the build version and exit.
 	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-version") {
