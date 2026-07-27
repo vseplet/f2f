@@ -15,12 +15,19 @@ type LogEntry struct {
 	Message string    `json:"message"`
 }
 
+// maxBacklog is how many recent log lines the tap retains so a fresh subscriber
+// (a just-opened log view) gets immediate history instead of an empty screen
+// until the next line is emitted.
+const maxBacklog = 500
+
 // logTap is an io.Writer that taps the log stream: every line written via
 // log.Printf (routed through Init's MultiWriter) is broadcast to all active
-// subscribers — the UI's diagnostics log stream.
+// subscribers — the UI's diagnostics log stream. It also keeps a ring of the
+// last maxBacklog entries, replayed to each new subscriber.
 type logTap struct {
 	mu   sync.RWMutex
 	subs map[chan<- LogEntry]struct{}
+	ring []LogEntry
 }
 
 func newLogTap() *logTap {
@@ -45,21 +52,34 @@ func (t *logTap) Write(p []byte) (int, error) {
 			continue
 		}
 		entry := LogEntry{Time: now, Message: line}
-		t.mu.RLock()
+		t.mu.Lock()
+		t.ring = append(t.ring, entry)
+		if len(t.ring) > maxBacklog {
+			// Reslice with a fresh backing array so old entries can be GC'd
+			// rather than pinned forever behind a growing slice.
+			t.ring = append(t.ring[:0:0], t.ring[len(t.ring)-maxBacklog:]...)
+		}
 		for ch := range t.subs {
 			select {
 			case ch <- entry:
 			default: // slow subscriber — drop rather than block the log path
 			}
 		}
-		t.mu.RUnlock()
+		t.mu.Unlock()
 	}
 	return len(p), nil
 }
 
 func (t *logTap) Subscribe(buf int) (<-chan LogEntry, func()) {
-	ch := make(chan LogEntry, buf)
 	t.mu.Lock()
+	// Prefill with the retained backlog so the subscriber sees recent history
+	// immediately. Size the channel to fit backlog + the caller's live headroom
+	// so the prefill never blocks.
+	backlog := t.ring
+	ch := make(chan LogEntry, len(backlog)+buf)
+	for _, e := range backlog {
+		ch <- e
+	}
 	t.subs[ch] = struct{}{}
 	t.mu.Unlock()
 	return ch, func() {
