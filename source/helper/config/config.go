@@ -1,15 +1,21 @@
 // Package config persists user-editable engine configuration under
-// $HOME/.f2f/. Two file types live there:
+// $HOME/.f2f/. Files:
 //
-//	state.json               — global pointer: last camp_id + list of known camps
-//	<camp_id>.config.json    — per-camp: name, intercepts, my-domains, firewall,
-//	                           trusted-peer CA metadata, last-known peer roster
+//	state.json                  — global: last camp_id + list of known camps
+//	<camp_id>/config.json       — per-camp INTENT: name, intercepts, my-domains,
+//	                              firewall, shell/vnc policy, server endpoints.
+//	                              Small, stable, hand-editable.
+//	<camp_id>/cache.json        — per-camp CACHES: last-known peer roster
+//	                              (peer_catalog) + discovered peer-CA mirror
+//	                              (trusted_peers). Rewritten constantly; not intent.
 //
-// Writes are atomic (tmp + rename) and chowned to $SUDO_USER so the
-// user (not root) can manage these files from Finder.
+// Splitting the two keeps config.json from churning on every roster update.
+// Writes are atomic (tmp + rename) and chowned to $SUDO_USER so the user (not
+// root) can manage these files from Finder.
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,11 +75,15 @@ type Camp struct {
 	// Profile (the peer's name/passkeys) lives as a block.profile in db, keyed by
 	// peer_pub in the well-known "profiles" scope — nothing about it is recorded
 	// in config. See docs/IDENTITY.md.
-	Intercepts   []Intercept   `json:"intercepts"`
-	MyDomains    []Domain      `json:"my_domains"`
-	Firewall     []Firewall    `json:"firewall"`
-	TrustedPeers []TrustedPeer `json:"trusted_peers"`
-	PeerCatalog  []Peer        `json:"peer_catalog"`
+	Intercepts []Intercept `json:"intercepts"`
+	MyDomains  []Domain    `json:"my_domains"`
+	Firewall   []Firewall  `json:"firewall"`
+	// TrustedPeers and PeerCatalog are runtime CACHES, not user intent — they're
+	// rewritten constantly (roster snapshot, discovered CA mirror). They stay in
+	// memory here but persist to a separate cache.json (json:"-" keeps them out
+	// of the hand-editable config.json). See campCache / persistCampLocked.
+	TrustedPeers []TrustedPeer `json:"-"`
+	PeerCatalog  []Peer        `json:"-"`
 	// Shell gates the remote-terminal service (services/shell). Opening a
 	// shell on this machine is the single most dangerous capability, so the
 	// long-term default is opt-in + an explicit allowlist of peer pubs.
@@ -238,7 +248,7 @@ func (s *Store) UpdateCamp(id string, fn func(*Camp)) error {
 	}
 	fn(c)
 	normaliseCamp(c, id)
-	return s.writeJSON(s.campPath(id), c)
+	return s.persistCampLocked(id, c)
 }
 
 // ensureLoadedLocked returns the cached *Camp for id, lazily loading
@@ -270,6 +280,9 @@ func (s *Store) ensureLoadedLocked(id string) (*Camp, error) {
 		return nil, fmt.Errorf("parse %s.config.json: %w", id, err)
 	}
 	normaliseCamp(&c, id)
+	// Caches live in cache.json now; migrate from legacy config.json bytes if
+	// this is an old file that still embeds them.
+	s.loadCacheLocked(id, &c, data)
 	s.camps[id] = &c
 	return &c, nil
 }
@@ -405,7 +418,68 @@ func (s *Store) SaveCamp(id string, c *Camp) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.camps[id] = deepCopyCamp(c)
-	return s.writeJSON(s.campPath(id), c)
+	return s.persistCampLocked(id, c)
+}
+
+// campCache is the on-disk shape of cache.json: the runtime caches split out of
+// config.json so the config file stays small, stable and hand-editable.
+type campCache struct {
+	PeerCatalog  []Peer        `json:"peer_catalog"`
+	TrustedPeers []TrustedPeer `json:"trusted_peers"`
+}
+
+// cachePath is the per-camp cache file: ~/.f2f/<camp_id>/cache.json.
+func (s *Store) cachePath(id string) string {
+	seg := id
+	if seg == "" {
+		seg = "_root"
+	}
+	return filepath.Join(s.dir, seg, "cache.json")
+}
+
+// persistCampLocked writes the split representation: config.json (durable intent
+// — PeerCatalog/TrustedPeers are json:"-") and cache.json (the caches). config
+// .json is rewritten only when its bytes actually change, so the constant roster
+// churn no longer touches the hand-editable file. Caller holds s.mu.
+func (s *Store) persistCampLocked(id string, c *Camp) error {
+	if err := s.writeJSONIfChanged(s.campPath(id), c); err != nil {
+		return err
+	}
+	return s.writeJSON(s.cachePath(id), campCache{PeerCatalog: c.PeerCatalog, TrustedPeers: c.TrustedPeers})
+}
+
+// loadCacheLocked fills c.PeerCatalog/TrustedPeers from cache.json. If cache.json
+// is absent but the legacy config.json bytes still carry those keys (a file
+// written before the split), migrate them in — the next persist writes cache
+// .json and, because the fields are json:"-", drops them from config.json.
+func (s *Store) loadCacheLocked(id string, c *Camp, legacyConfig []byte) {
+	if data, err := os.ReadFile(s.cachePath(id)); err == nil {
+		var cache campCache
+		if json.Unmarshal(data, &cache) == nil {
+			c.PeerCatalog, c.TrustedPeers = cache.PeerCatalog, cache.TrustedPeers
+			normaliseCamp(c, id)
+			return
+		}
+	}
+	var legacy campCache
+	if json.Unmarshal(legacyConfig, &legacy) == nil {
+		c.PeerCatalog, c.TrustedPeers = legacy.PeerCatalog, legacy.TrustedPeers
+		normaliseCamp(c, id)
+	}
+}
+
+// writeJSONIfChanged writes only when the marshaled bytes differ from the file
+// on disk — used for config.json so cache-only updates don't rewrite it.
+func (s *Store) writeJSONIfChanged(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		return nil
+	}
+	return s.writeBytes(path, data)
 }
 
 // writeJSON marshals v to a tmp file in the same directory and renames
@@ -417,6 +491,11 @@ func (s *Store) writeJSON(path string, v any) error {
 		return err
 	}
 	data = append(data, '\n')
+	return s.writeBytes(path, data)
+}
+
+// writeBytes atomically writes data to path (tmp + rename), chowned to the user.
+func (s *Store) writeBytes(path string, data []byte) error {
 	// Ensure the parent dir exists (per-camp dirs are created on demand).
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
