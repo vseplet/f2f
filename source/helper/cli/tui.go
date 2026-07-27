@@ -592,86 +592,88 @@ func (t *tui) sectionCerts() error {
 }
 
 func (t *tui) sectionDomains() error {
+	// Only "mine" rows are editable; peers' domains are read-only.
+	type rowMeta struct {
+		editable bool
+		idx      int
+	}
 	for {
 		var domains []tuiDomain
 		if err := t.get("/api/my-domains", &domains); err != nil {
 			return err
 		}
-		var b strings.Builder
-		b.WriteString("Mine:\n")
-		if len(domains) == 0 {
-			b.WriteString("  (none)\n")
-		} else {
-			for _, d := range domains {
-				tgt := d.Host
-				if tgt == "" {
-					tgt = "127.0.0.1"
-				}
-				if d.Port > 0 {
-					tgt = fmt.Sprintf("%s:%d", tgt, d.Port)
-				}
-				fmt.Fprintf(&b, "  %-24s → %s\n", d.Name, tgt)
-			}
-		}
-		// Peers' published domains (read-only) — from /api/status, which the
-		// portal fills by polling each reachable peer's /api/domains. Empty for
-		// peers we can't reach yet.
 		var st tuiStatus
 		_ = t.get("/api/status", &st)
-		var others strings.Builder
+		chanName := t.channelNames(t.myChannels()) // bid → display name for the access column
+
+		headers := []string{"SCOPE", "NAME", "TARGET", "ACCESS"}
+		var rows [][]string
+		var meta []rowMeta
+		for i, d := range domains {
+			tgt := d.Host
+			if tgt == "" {
+				tgt = "127.0.0.1"
+			}
+			if d.Port > 0 {
+				tgt = fmt.Sprintf("%s:%d", tgt, d.Port)
+			}
+			rows = append(rows, []string{"mine", d.Name, tgt, domainAccess(d.Channels, chanName)})
+			meta = append(meta, rowMeta{true, i})
+		}
 		for _, p := range st.Peers {
-			if p.Self || len(p.Domains) == 0 {
+			if p.Self {
 				continue
 			}
 			for _, d := range p.Domains {
-				fmt.Fprintf(&others, "  %-24s @ %s\n", d.Name, p.Name)
+				rows = append(rows, []string{p.Name, d.Name, "—", ""})
+				meta = append(meta, rowMeta{false, -1})
 			}
 		}
-		if others.Len() > 0 {
-			b.WriteString("\nPeers':\n")
-			b.WriteString(others.String())
-		}
-		opts := []huh.Option[string]{huh.NewOption("Add domain", "add")}
-		for i, d := range domains {
-			opts = append(opts, huh.NewOption("Delete: "+d.Name, "del:"+strconv.Itoa(i)))
-		}
-		opts = append(opts, huh.NewOption("Back", "back"))
-		var choice string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewNote().Title("Domains (what this node publishes)").Description(b.String()),
-			huh.NewSelect[string]().Options(opts...).Value(&choice),
-		))
-		if err := form.Run(); err != nil {
-			if errors.Is(err, huh.ErrUserAborted) {
-				return nil
-			}
+		action, ridx, err := runTable("domains · enter/d delete · a new (only 'mine')", headers, rows, "a", "d")
+		if err != nil {
 			return err
 		}
-		switch {
-		case choice == "back" || choice == "":
-			return nil
-		case choice == "add":
+		editable := ridx >= 0 && ridx < len(meta) && meta[ridx].editable
+		switch action {
+		case "refresh":
+			continue
+		case "a":
 			if err := t.addDomain(domains); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 				fmt.Fprintln(os.Stderr, "error:", err)
 			}
-		case strings.HasPrefix(choice, "del:"):
-			i, _ := strconv.Atoi(strings.TrimPrefix(choice, "del:"))
-			if i >= 0 && i < len(domains) {
+		case "select", "d":
+			if editable {
+				i := meta[ridx].idx
 				next := append(domains[:i:i], domains[i+1:]...)
 				if err := t.do(http.MethodPut, "/api/my-domains", next, new([]tuiDomain)); err != nil {
 					fmt.Fprintln(os.Stderr, "error:", err)
 				}
 			}
+		default:
+			return nil
 		}
 	}
 }
 
 func (t *tui) addDomain(cur []tuiDomain) error {
+	// Channels this domain is reachable by (empty = everyone in the camp). Only
+	// members of the chosen channels reach it through the reverse-proxy.
+	chans := t.myChannels()
+	disp := t.channelNames(chans)
+	chanOpts := make([]huh.Option[string], len(chans))
+	for i, c := range chans {
+		chanOpts[i] = huh.NewOption("#"+disp[c.ID], c.ID)
+	}
 	var name, portStr, host string
+	var allow []string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Name (e.g. gitea or gitea.mini)").Value(&name),
 		huh.NewInput().Title("Local service port (empty = none)").Value(&portStr),
 		huh.NewInput().Title("Target host (empty = 127.0.0.1)").Value(&host),
+		huh.NewMultiSelect[string]().
+			Title("Reachable by channels (none selected = everyone)").
+			Options(chanOpts...).
+			Value(&allow),
 	))
 	if err := form.Run(); err != nil {
 		return err
@@ -691,6 +693,7 @@ func (t *tui) addDomain(cur []tuiDomain) error {
 	if h := strings.TrimSpace(host); h != "" {
 		d.Host = h
 	}
+	d.Channels = allow
 	next := append(append([]tuiDomain{}, cur...), d)
 	return t.do(http.MethodPut, "/api/my-domains", next, new([]tuiDomain))
 }
@@ -802,6 +805,23 @@ func (t *tui) putFirewall(user []tuiFirewall) error {
 	return t.do(http.MethodPut, "/api/firewall", map[string]any{"user": user}, new(tuiFirewallView))
 }
 
+// domainAccess renders a domain's reachable-by allowlist for the table: the
+// channel names it's gated to, or "everyone" when the list is empty.
+func domainAccess(channels []string, name map[string]string) string {
+	if len(channels) == 0 {
+		return "everyone"
+	}
+	parts := make([]string, len(channels))
+	for i, bid := range channels {
+		if n := name[bid]; n != "" {
+			parts[i] = "#" + n
+		} else {
+			parts[i] = "#" + bid
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 func onOff(enabled bool) string {
 	if enabled {
 		return "on"
@@ -896,42 +916,30 @@ func (t *tui) sectionTunnels() error {
 		if err := t.get("/api/status", &st); err != nil {
 			return err
 		}
-		var b strings.Builder
-		if len(st.Intercepts) == 0 {
-			b.WriteString("No tunnels.\n")
-		} else {
-			for _, it := range st.Intercepts {
-				fmt.Fprintf(&b, "  %-28s → %s\n", it.Spec, it.Peer)
-			}
+		headers := []string{"SPEC", "VIA PEER"}
+		rows := make([][]string, len(st.Intercepts))
+		for i, it := range st.Intercepts {
+			rows[i] = []string{it.Spec, it.Peer}
 		}
-		opts := []huh.Option[string]{huh.NewOption("Add tunnel", "add")}
-		for _, it := range st.Intercepts {
-			opts = append(opts, huh.NewOption("Delete: "+it.Spec, "del:"+it.ID))
-		}
-		opts = append(opts, huh.NewOption("Back", "back"))
-		var choice string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewNote().Title("Tunnels (domain via exit peer)").Description(b.String()),
-			huh.NewSelect[string]().Options(opts...).Value(&choice),
-		))
-		if err := form.Run(); err != nil {
-			if errors.Is(err, huh.ErrUserAborted) {
-				return nil
-			}
+		action, idx, err := runTable("tunnels · enter/d delete · a new", headers, rows, "a", "d")
+		if err != nil {
 			return err
 		}
-		switch {
-		case choice == "back" || choice == "":
-			return nil
-		case choice == "add":
+		switch action {
+		case "refresh":
+			continue
+		case "a":
 			if err := t.addTunnel(st.Peers); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 				fmt.Fprintln(os.Stderr, "error:", err)
 			}
-		case strings.HasPrefix(choice, "del:"):
-			id := strings.TrimPrefix(choice, "del:")
-			if err := t.do(http.MethodDelete, "/api/intercepts/"+id, nil, nil); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
+		case "select", "d":
+			if idx >= 0 && idx < len(st.Intercepts) {
+				if err := t.do(http.MethodDelete, "/api/intercepts/"+st.Intercepts[idx].ID, nil, nil); err != nil {
+					fmt.Fprintln(os.Stderr, "error:", err)
+				}
 			}
+		default:
+			return nil
 		}
 	}
 }
@@ -1020,51 +1028,48 @@ func (t *tui) sectionOIDC() error {
 		if err := t.get("/api/oidc", &info); err != nil {
 			return err
 		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "Issuer: %s\n", orDash(info.Issuer))
-		if info.Discovery != "" {
-			fmt.Fprintf(&b, "Discovery: %s\n", info.Discovery)
-		}
-		b.WriteString("\n")
-		if len(info.Clients) == 0 {
-			b.WriteString("No clients.\n")
-		} else {
-			for _, c := range info.Clients {
-				kind := "public"
-				if c.Confidential {
-					kind = "confidential"
-				}
-				fmt.Fprintf(&b, "  %-20s [%s]  %s\n", c.ClientName, kind, c.ClientID)
+		title := "OIDC · " + orDash(info.Issuer) + " · enter/d delete · a new"
+		headers := []string{"NAME", "TYPE", "CLIENT_ID"}
+		rows := make([][]string, len(info.Clients))
+		for i, c := range info.Clients {
+			kind := "public"
+			if c.Confidential {
+				kind = "confidential"
 			}
+			rows[i] = []string{c.ClientName, kind, c.ClientID}
 		}
-		opts := []huh.Option[string]{huh.NewOption("Create client", "add")}
-		for _, c := range info.Clients {
-			opts = append(opts, huh.NewOption("Delete: "+c.ClientName, "del:"+c.ClientID))
-		}
-		opts = append(opts, huh.NewOption("Back", "back"))
-		var choice string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewNote().Title("OIDC provider").Description(b.String()),
-			huh.NewSelect[string]().Options(opts...).Value(&choice),
-		))
-		if err := form.Run(); err != nil {
-			if errors.Is(err, huh.ErrUserAborted) {
-				return nil
-			}
+		action, idx, err := runTable(title, headers, rows, "a", "d")
+		if err != nil {
 			return err
 		}
-		switch {
-		case choice == "back" || choice == "":
-			return nil
-		case choice == "add":
+		switch action {
+		case "refresh":
+			continue
+		case "a":
 			if err := t.addOIDCClient(); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 				fmt.Fprintln(os.Stderr, "error:", err)
 			}
-		case strings.HasPrefix(choice, "del:"):
-			id := strings.TrimPrefix(choice, "del:")
-			if err := t.do(http.MethodDelete, "/api/oidc/clients/"+id, nil, nil); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
+		case "select", "d":
+			if idx < 0 || idx >= len(info.Clients) {
+				continue
 			}
+			c := info.Clients[idx]
+			var ok bool
+			if e := huh.NewForm(huh.NewGroup(
+				huh.NewConfirm().Title(fmt.Sprintf("Delete OIDC client %q?", c.ClientName)).Value(&ok),
+			)).Run(); e != nil {
+				if errors.Is(e, huh.ErrUserAborted) {
+					continue
+				}
+				return e
+			}
+			if ok {
+				if err := t.do(http.MethodDelete, "/api/oidc/clients/"+c.ClientID, nil, nil); err != nil {
+					fmt.Fprintln(os.Stderr, "error:", err)
+				}
+			}
+		default:
+			return nil
 		}
 	}
 }
@@ -1117,48 +1122,33 @@ func (t *tui) sectionCalls() error {
 		if err := t.get("/api/call/list", &calls); err != nil {
 			return err
 		}
-		var b strings.Builder
-		if len(calls) == 0 {
-			b.WriteString("No active calls.\n")
-		} else {
-			for _, c := range calls {
-				ch := c.Channel
-				if ch == "" {
-					ch = "(no channel)"
-				}
-				fmt.Fprintf(&b, "  %-20s participants: %d  sfu: %s\n", ch, len(c.Participants), orDash(c.SFUHost))
+		headers := []string{"CHANNEL", "PARTICIPANTS", "SFU"}
+		rows := make([][]string, len(calls))
+		for i, c := range calls {
+			ch := c.Channel
+			if ch == "" {
+				ch = "(no channel)"
 			}
+			rows[i] = []string{ch, strconv.Itoa(len(c.Participants)), orDash(c.SFUHost)}
 		}
-		var choice string
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewNote().Title("Calls").Description(b.String()),
-			huh.NewSelect[string]().Options(
-				huh.NewOption("Start call", "create"),
-				huh.NewOption("Leave my call", "leave"),
-				huh.NewOption("Refresh", "refresh"),
-				huh.NewOption("Back", "back"),
-			).Value(&choice),
-		))
-		if err := form.Run(); err != nil {
-			if errors.Is(err, huh.ErrUserAborted) {
-				return nil
-			}
+		// a = start a call, l = leave my call.
+		action, _, err := runTable("calls · a start · l leave my call", headers, rows, "a", "l")
+		if err != nil {
 			return err
 		}
-		switch choice {
-		case "back", "":
-			return nil
+		switch action {
 		case "refresh":
-		case "create":
+			continue
+		case "a":
 			if err := t.createCall(); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 				fmt.Fprintln(os.Stderr, "error:", err)
 			}
-		case "leave":
+		case "l":
 			if err := t.do(http.MethodPost, "/api/call/leave", nil, nil); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
-			} else {
-				fmt.Println("call ended.")
 			}
+		default:
+			return nil
 		}
 	}
 }
