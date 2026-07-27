@@ -131,6 +131,31 @@ func NewBID(pub string) string {
 	return fp + "-" + randHex(16)
 }
 
+// CreatorFP recovers the creator's 16-hex fingerprint from a creator-namespaced
+// bid (see NewBID). ok is false for well-known/shared ids that aren't creator-
+// namespaced (general, "dm-…", derived ids) — those have no single owner and
+// are left permissionless. A version is "from the owner" when its Author pub
+// starts with this fingerprint.
+func CreatorFP(bid string) (fp string, ok bool) {
+	if len(bid) < 17 || bid[16] != '-' {
+		return "", false
+	}
+	for i := 0; i < 16; i++ {
+		c := bid[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return "", false
+		}
+	}
+	return bid[:16], true
+}
+
+// IsOwner reports whether pub is the creator (owner) of the creator-namespaced
+// block bid. Non-namespaced (ownerless) ids return false.
+func IsOwner(bid, pub string) bool {
+	fp, ok := CreatorFP(bid)
+	return ok && strings.HasPrefix(pub, fp)
+}
+
 // Update writes a new version of bid. parents are the version(s) it builds
 // on; if nil, the block's current heads are used (the usual case).
 func (m *Manager) Update(s Signer, channel, bid string, content json.RawMessage, parents []string) error {
@@ -276,6 +301,16 @@ func foldInto(cf *scopeFold, frames []*db.Frame) bool {
 			continue
 		}
 		cf.seen[e.ID] = true
+		// Ownership gate: a tombstone only counts if it's signed by the block's
+		// creator. This is enforced at fold time (not just the API) because the
+		// log is replicated — any peer can append a raw OpDelete entry, so the
+		// authority must be the projection, applied identically on every node.
+		// Ownerless ids (general, DMs) aren't creator-namespaced → left as-is.
+		if o.Op == OpDelete {
+			if fp, ok := CreatorFP(o.BID); ok && !strings.HasPrefix(e.Author, fp) {
+				continue // non-owner delete — ignore
+			}
+		}
 		a := cf.by[o.BID]
 		if a == nil {
 			a = &acc{parents: map[string]bool{}}

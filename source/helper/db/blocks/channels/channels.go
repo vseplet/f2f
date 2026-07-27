@@ -50,10 +50,10 @@ type meta struct {
 
 // Channel is the folded current state of one channel block.
 type Channel struct {
-	BID     string   `json:"bid"`
-	Name    string   `json:"name"`
-	Parent  string   `json:"parent,omitempty"` // parent channel bid ("" = root)
-	Pos     string   `json:"pos,omitempty"`
+	BID       string   `json:"bid"`
+	Name      string   `json:"name"`
+	Parent    string   `json:"parent,omitempty"` // parent channel bid ("" = root)
+	Pos       string   `json:"pos,omitempty"`
 	Owner     string   `json:"owner"`      // creator pub
 	Members   []string `json:"members"`    // explicit members (excludes the owner)
 	CreatedAt int64    `json:"created_at"` // first version's timestamp
@@ -151,8 +151,17 @@ func (m *Manager) RemoveMember(s blocks.Signer, bid, pub string) error {
 	return m.write(s, bid, c.Name, out)
 }
 
-// Delete tombstones the channel block.
+// Delete tombstones the channel block. Only the channel's creator may delete it
+// — the fold enforces this on every node, so this early check is just a clear
+// error instead of a silently-ignored tombstone. The camp-wide general channel
+// is undeletable.
 func (m *Manager) Delete(s blocks.Signer, bid string) error {
+	if bid == GeneralBID {
+		return fmt.Errorf("channels: %q cannot be deleted", GeneralBID)
+	}
+	if fp, ok := blocks.CreatorFP(bid); ok && !strings.HasPrefix(s.PubHex(), fp) {
+		return fmt.Errorf("channels: only the creator can delete this channel")
+	}
 	return m.blocks.Delete(s, metaScope(bid), bid, nil)
 }
 

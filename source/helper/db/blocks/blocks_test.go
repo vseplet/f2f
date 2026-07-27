@@ -87,6 +87,31 @@ func TestDeleteTombstone(t *testing.T) {
 	}
 }
 
+// TestDeleteOwnershipGate: a delete from a non-creator is ignored by the fold
+// (block stays live), while the creator's delete tombstones it. The bid is
+// creator-namespaced (Create → NewBID), so ownership is derivable from the id.
+func TestDeleteOwnershipGate(t *testing.T) {
+	m := newMgr(t)
+	owner, intruder := id(t), id(t)
+	bid, _ := m.Create(owner, "doc:1", "text", json.RawMessage(`{"md":"x"}`), "", "a")
+
+	// Non-owner tombstone: committed to the log, but the fold must drop it.
+	if err := m.Delete(intruder, "doc:1", bid, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b := m.Block("doc:1", bid); b == nil || b.Deleted {
+		t.Fatalf("non-owner delete must be ignored, got %+v", b)
+	}
+
+	// Owner tombstone: honored.
+	if err := m.Delete(owner, "doc:1", bid, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b := m.Block("doc:1", bid); b == nil || !b.Deleted {
+		t.Fatalf("owner delete must tombstone, got %+v", b)
+	}
+}
+
 func TestOrderingByPos(t *testing.T) {
 	m := newMgr(t)
 	a := id(t)
