@@ -629,7 +629,7 @@ func (t *tui) sectionDomains() error {
 				meta = append(meta, rowMeta{false, -1})
 			}
 		}
-		action, ridx, err := runTable("domains · enter/d delete · a new (only 'mine')", headers, rows, "a", "d")
+		action, ridx, err := runTable("domains · enter edit access · a new · d delete (only 'mine')", headers, rows, "a", "d")
 		if err != nil {
 			return err
 		}
@@ -641,7 +641,13 @@ func (t *tui) sectionDomains() error {
 			if err := t.addDomain(domains); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 				fmt.Fprintln(os.Stderr, "error:", err)
 			}
-		case "select", "d":
+		case "select": // edit the selected domain (name/target/access channels)
+			if editable {
+				if err := t.editDomain(domains, meta[ridx].idx); err != nil && !errors.Is(err, huh.ErrUserAborted) {
+					fmt.Fprintln(os.Stderr, "error:", err)
+				}
+			}
+		case "d":
 			if editable {
 				i := meta[ridx].idx
 				next := append(domains[:i:i], domains[i+1:]...)
@@ -655,9 +661,63 @@ func (t *tui) sectionDomains() error {
 	}
 }
 
+// editDomain re-opens the create form pre-filled with the domain at idx, so its
+// name/target and — the point — its reachable-by channel allowlist can be
+// changed. Writes the whole list back (PUT semantics).
+func (t *tui) editDomain(cur []tuiDomain, idx int) error {
+	if idx < 0 || idx >= len(cur) {
+		return nil
+	}
+	d := cur[idx]
+	chans := t.myChannels()
+	disp := t.channelNames(chans)
+	chanOpts := make([]huh.Option[string], len(chans))
+	for i, c := range chans {
+		chanOpts[i] = huh.NewOption("#"+disp[c.ID], c.ID)
+	}
+	name := d.Name
+	portStr := ""
+	if d.Port > 0 {
+		portStr = strconv.Itoa(d.Port)
+	}
+	host := d.Host
+	allow := append([]string{}, d.Channels...)
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title("Name").Value(&name),
+		huh.NewInput().Title("Local service port (empty = none)").Value(&portStr),
+		huh.NewInput().Title("Target host (empty = 127.0.0.1)").Value(&host),
+		huh.NewMultiSelect[string]().
+			Title("Reachable by channels (none = only you, on this host)").
+			Options(chanOpts...).
+			Value(&allow),
+	))
+	if err := form.Run(); err != nil {
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("empty name")
+	}
+	nd := tuiDomain{Name: name, Channels: allow}
+	if p := strings.TrimSpace(portStr); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 || n >= 65536 {
+			return fmt.Errorf("invalid port: %s", p)
+		}
+		nd.Port = n
+	}
+	if h := strings.TrimSpace(host); h != "" {
+		nd.Host = h
+	}
+	next := append([]tuiDomain{}, cur...)
+	next[idx] = nd
+	return t.do(http.MethodPut, "/api/my-domains", next, new([]tuiDomain))
+}
+
 func (t *tui) addDomain(cur []tuiDomain) error {
-	// Channels this domain is reachable by (empty = everyone in the camp). Only
-	// members of the chosen channels reach it through the reverse-proxy.
+	// Channels this domain is reachable by. The proxy is fail-closed: a remote
+	// peer must be a member of at least one listed channel, and EMPTY means no
+	// remote peer at all — only you reach it on this host (loopback).
 	chans := t.myChannels()
 	disp := t.channelNames(chans)
 	chanOpts := make([]huh.Option[string], len(chans))
@@ -671,7 +731,7 @@ func (t *tui) addDomain(cur []tuiDomain) error {
 		huh.NewInput().Title("Local service port (empty = none)").Value(&portStr),
 		huh.NewInput().Title("Target host (empty = 127.0.0.1)").Value(&host),
 		huh.NewMultiSelect[string]().
-			Title("Reachable by channels (none selected = everyone)").
+			Title("Reachable by channels (none = only you, on this host)").
 			Options(chanOpts...).
 			Value(&allow),
 	))
@@ -809,7 +869,7 @@ func (t *tui) putFirewall(user []tuiFirewall) error {
 // channel names it's gated to, or "everyone" when the list is empty.
 func domainAccess(channels []string, name map[string]string) string {
 	if len(channels) == 0 {
-		return "everyone"
+		return "you only"
 	}
 	parts := make([]string, len(channels))
 	for i, bid := range channels {
