@@ -7,7 +7,12 @@ dist
 # the Windows zip in CI.
 /f2f.exe
 /wintun.dll
+./camp
 
 # macOS dirt — drop everywhere in the tree.
 .DS_Store
 **/.DS_Store
+# stray build artifacts at repo root
+/camp
+/f2f
+/f2f-mac
