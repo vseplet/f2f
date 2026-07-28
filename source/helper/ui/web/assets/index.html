@@ -357,15 +357,24 @@
                             portal is served to peers.
                         </div>
                         <ol class="ax-invite-steps">
-                            <li>Install f2f (same one-liner as above).</li>
                             <li>
-                                Run it as a headless service (non-interactive):
-                                <code class="ax-mono ax-copy" id="invite-service-cmd" title="click to copy"
-                                    >sudo f2f --service --camp &lt;camp_id&gt; --name &lt;node-name&gt;</code
+                                <b>One command</b> (Linux/systemd) — installs f2f
+                                and a service unit, starts it, and keeps the camp
+                                id in a root-only env file (not in
+                                <code class="ax-mono">ps</code>):
+                                <code class="ax-mono ax-copy" id="invite-service-install" title="click to copy"
+                                    >curl -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/service.sh | sh -s -- --camp &lt;camp_id&gt; --name &lt;node-name&gt;</code
                                 ><br />
                                 <span class="muted">replace</span>
                                 <code class="ax-mono">&lt;node-name&gt;</code>
                                 <span class="muted">with a label for this node.</span>
+                            </li>
+                            <li>
+                                <span class="muted">Or manually</span> — install
+                                (one-liner above), then run:
+                                <code class="ax-mono ax-copy" id="invite-service-cmd" title="click to copy"
+                                    >sudo f2f --service --camp &lt;camp_id&gt; --name &lt;node-name&gt;</code
+                                >
                             </li>
                             <li>
                                 Manage it from the terminal (no browser needed):
@@ -375,9 +384,11 @@
                             </li>
                         </ol>
                         <div class="ax-section-status muted" style="margin-top: 8px">
-                            The camp id is a secret — in CI / systemd units keep it
-                            out of logs (e.g. pass via an env var, not the command
-                            line where possible).
+                            The camp id is a secret. The service installer keeps it
+                            in <code class="ax-mono">/etc/f2f/service.env</code>
+                            (root-only); manage the unit with
+                            <code class="ax-mono">systemctl … f2f</code> /
+                            <code class="ax-mono">journalctl -u f2f</code>.
                         </div>
                     </div>
                 </div>

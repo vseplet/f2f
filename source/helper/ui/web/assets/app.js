@@ -3117,9 +3117,12 @@ $(function () {
     $('#invite-zone').text(id ? '# ' + zone : 'this camp');
     $('#invite-campid').text(id || '— (no camp running)').data('copy', id);
     $('#invite-portal-url').text('https://portal.' + zone + '.f2f');
-    $('#invite-service-cmd').text(
-      'sudo f2f --service --camp ' + (id || '<camp_id>') + ' --name <node-name>',
+    const cid = id || '<camp_id>';
+    $('#invite-service-install').text(
+      'curl -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/service.sh | sh -s -- --camp ' +
+        cid + ' --name <node-name>',
     );
+    $('#invite-service-cmd').text('sudo f2f --service --camp ' + cid + ' --name <node-name>');
   }
   let currentCampID = '';
   let currentCampLabel = '';
