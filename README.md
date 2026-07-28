@@ -47,6 +47,18 @@ Bare `f2f` opens the interactive portal — create a new camp or join an existin
 one, then it comes up. `--service`/`--task` bring up a specific camp
 non-interactively.
 
+**Install as a service (Linux/systemd)** — one command installs the binary,
+writes a systemd unit and starts it, keeping the camp id (a secret) in a
+root-only env file instead of the command line:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vseplet/f2f/main/service.sh | \
+  sh -s -- --camp <camp_id> --name <node-name>
+```
+
+Manage it with `systemctl status f2f` / `journalctl -u f2f -f`, and from the
+terminal with `f2f tui`.
+
 Common flags (any mode):
 - `--logs` — verbose (debug) logging; also mirrors it to the console.
 - `--console` — mirror logs to the terminal (they go to a file by default).

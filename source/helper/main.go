@@ -247,15 +247,28 @@ func main() {
 	keyRef := fs.String("key", "", "pre-generated identity key (task mode)")
 	_ = fs.Parse(args)
 
+	// Env fallback for the headless flags, so a systemd unit can pass the camp_id
+	// (a bearer secret) via a root-only EnvironmentFile instead of the command
+	// line, where it'd show in `ps` / `systemctl cat`. Flags win when both set.
+	campIDVal, nameVal, keyVal := *campID, *name, *keyRef
+	if campIDVal == "" {
+		campIDVal = os.Getenv("F2F_CAMP")
+	}
+	if nameVal == "" {
+		nameVal = os.Getenv("F2F_NAME")
+	}
+	if keyVal == "" {
+		keyVal = os.Getenv("F2F_KEY")
+	}
 	opts := runOpts{
 		bind:      *bind,
 		console:   *console || *logs, // verbose logs are useless if not shown
 		verbose:   *logs,
 		autostart: autostart,
 		mode:      modePortal,
-		campID:    *campID,
-		name:      *name,
-		keyRef:    *keyRef,
+		campID:    campIDVal,
+		name:      nameVal,
+		keyRef:    keyVal,
 	}
 	switch {
 	case *service && *task:
