@@ -12,6 +12,9 @@
 # Options:
 #   --camp <id>        camp_id to join           (required)
 #   --name <name>      this node's display name   (required)
+#   --user <name>      own config/identity as this user (default: the invoking
+#                      user, so the service reuses the SAME identity as your
+#                      interactive `sudo f2f` runs — no duplicate node)
 #   --version vX.Y.Z   pin a release              (default: latest)
 #   --log  debug|info  F2F_LOG level              (default: info)
 #   --bin-dir <dir>    binary location            (default: /usr/local/bin)
@@ -23,6 +26,7 @@ BIN_DIR="/usr/local/bin"
 LOG="info"
 CAMP=""
 NAME=""
+OWNER=""
 UNIT="f2f.service"
 ENV_DIR="/etc/f2f"
 ENV_FILE="${ENV_DIR}/service.env"
@@ -36,6 +40,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --camp)    CAMP="${2:-}"; shift 2 ;;
     --name)    NAME="${2:-}"; shift 2 ;;
+    --user)    OWNER="${2:-}"; shift 2 ;;
     --version) VERSION="${2:-}"; shift 2 ;;
     --log)     LOG="${2:-}"; shift 2 ;;
     --bin-dir) BIN_DIR="${2:-}"; shift 2 ;;
@@ -57,6 +62,27 @@ SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "need root (or sudo) to install the service"
   SUDO="sudo"
+fi
+
+# Whose config/identity the service owns. f2f keeps state in <home>/.f2f, and
+# picks the home from SUDO_USER (else HOME). So to reuse the SAME identity as a
+# person's interactive `sudo f2f` runs — and not mint a fresh keypair under
+# /root — we tell the unit to run as if invoked by that user (SUDO_USER + HOME).
+# Default: the invoking user (SUDO_USER when curl|sudo sh, else the current
+# non-root user). Genuine root with no invoker → own state under /root.
+if [ -z "$OWNER" ]; then
+  if [ -n "${SUDO_USER:-}" ]; then
+    OWNER="$SUDO_USER"
+  elif [ "$(id -u)" -ne 0 ]; then
+    OWNER="$(id -un)"
+  else
+    OWNER="root"
+  fi
+fi
+OWNER_HOME=""
+if [ "$OWNER" != "root" ]; then
+  OWNER_HOME="$(getent passwd "$OWNER" 2>/dev/null | cut -d: -f6)"
+  [ -n "$OWNER_HOME" ] || die "can't resolve home for user '$OWNER' (use --user)"
 fi
 
 # --- detect target -----------------------------------------------------------
@@ -109,6 +135,15 @@ $SUDO chown root:root "$ENV_FILE" 2>/dev/null || true
 
 # --- write the systemd unit --------------------------------------------------
 
+# Run as root (tunnel/routes need it), but own state as $OWNER so the identity
+# matches that user's interactive `sudo f2f` — SUDO_USER makes f2f store/chown
+# config+identity under the user's ~/.f2f. Omitted when OWNER=root (defaults ok).
+OWNER_ENV=""
+if [ "$OWNER" != "root" ]; then
+  OWNER_ENV="Environment=SUDO_USER=${OWNER}
+Environment=HOME=${OWNER_HOME}"
+fi
+
 tmpunit="$(mktemp)"
 cat > "$tmpunit" <<UNIT
 [Unit]
@@ -119,6 +154,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=${ENV_FILE}
+${OWNER_ENV}
 ExecStart=${dest} --service
 Restart=on-failure
 RestartSec=5
@@ -137,6 +173,11 @@ $SUDO systemctl enable --now "$UNIT"
 
 say ""
 say "f2f service '${NAME}' installed and started."
+if [ "$OWNER" != "root" ]; then
+  say "  identity: owned as ${OWNER} (state in ${OWNER_HOME}/.f2f) — same as your 'sudo f2f'"
+else
+  say "  identity: owned as root (state in /root/.f2f)"
+fi
 say "  status:  ${SUDO} systemctl status ${UNIT}"
 say "  logs:    ${SUDO} journalctl -u ${UNIT} -f"
 say "  manage:  f2f tui        (status, certs, domains, ports, channels, OIDC, logs, update)"
