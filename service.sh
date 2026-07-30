@@ -79,11 +79,13 @@ if [ -z "$OWNER" ]; then
     OWNER="root"
   fi
 fi
-OWNER_HOME=""
-if [ "$OWNER" != "root" ]; then
+if [ "$OWNER" = "root" ]; then
+  OWNER_HOME="/root"
+else
   OWNER_HOME="$(getent passwd "$OWNER" 2>/dev/null | cut -d: -f6)"
   [ -n "$OWNER_HOME" ] || die "can't resolve home for user '$OWNER' (use --user)"
 fi
+say "identity dir: ${OWNER_HOME}/.f2f/${CAMP}/identity (owned as ${OWNER})"
 
 # --- detect target -----------------------------------------------------------
 
@@ -166,10 +168,14 @@ UNIT
 $SUDO mv "$tmpunit" "/etc/systemd/system/${UNIT}"
 $SUDO chmod 644 "/etc/systemd/system/${UNIT}"
 
-# --- enable + start ----------------------------------------------------------
+# --- enable + (re)start ------------------------------------------------------
 
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now "$UNIT"
+$SUDO systemctl enable "$UNIT"
+# restart, NOT `enable --now`: on a re-run the unit is already active, and start
+# is then a no-op — the OLD unit keeps running and our new SUDO_USER/HOME env
+# never takes effect. restart always re-reads the unit.
+$SUDO systemctl restart "$UNIT"
 
 say ""
 say "f2f service '${NAME}' installed and started."
