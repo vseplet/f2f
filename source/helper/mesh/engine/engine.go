@@ -382,6 +382,12 @@ type Engine struct {
 	// once the outage persists past a threshold.
 	netDownSinceMs atomic.Int64
 
+	// rebinding guards the restart-on-ephemeral-port cure against concurrent
+	// triggers — the wake-from-sleep detector, the net-down path, and the camp
+	// deaf detector (mesh/camp) can all fire near-simultaneously; only one
+	// restart should run. Reset when the restart goroutine finishes.
+	rebinding atomic.Bool
+
 	// awgAllowedHook lets services/tunnel inject extra allowed_ips
 	// (intercept prefixes) into AWG peer sync without engine owning
 	// the intercept catalog. nil disables the feature.
@@ -1255,8 +1261,7 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			// and a fresh reflex in camp; peers pick up the new endpoint
 			// on their next camp poll.
 			if prevTickMs != 0 && now-prevTickMs > wakeJumpMs {
-				clog.Info("wake", "clock jumped %ds, restarting on a fresh ephemeral port", (now-prevTickMs)/1000)
-				go e.restartOnEphemeralPort()
+				e.RebindEphemeral(fmt.Sprintf("clock jumped %ds", (now-prevTickMs)/1000))
 				return
 			}
 			prevTickMs = now
@@ -1340,9 +1345,8 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					e.netDownSinceMs.Store(now)
 					clog.Warn("net", "UDP send failing — local route gone? watching")
 				} else if now-since >= netDownGraceMs {
-					clog.Info("net", "local route down %ds, restarting on a fresh ephemeral port", (now-since)/1000)
 					e.netDownSinceMs.Store(0)
-					go e.restartOnEphemeralPort()
+					e.RebindEphemeral(fmt.Sprintf("local route down %ds", (now-since)/1000))
 					return
 				}
 			}
@@ -1359,6 +1363,22 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// RebindEphemeral restarts the transport on a fresh ephemeral port — the cure
+// for a stale outbound NAT mapping (wake-from-sleep, provider NAT rebind, or a
+// silently-dead socket where the camp stopped answering). Safe under concurrent
+// triggers: the first caller wins, the rest no-op until it completes. Runs
+// async (Stop waits on the worker pool a caller may be part of).
+func (e *Engine) RebindEphemeral(reason string) {
+	if !e.rebinding.CompareAndSwap(false, true) {
+		return // a restart is already in flight
+	}
+	clog.Info("wake", "rebind on fresh port (%s)", reason)
+	go func() {
+		defer e.rebinding.Store(false)
+		e.restartOnEphemeralPort()
+	}()
 }
 
 // restartOnEphemeralPort tears the engine down and brings it back up

@@ -195,6 +195,11 @@ func (s *Service) Start(c *config.Camp) error {
 	// authoritative source (onUpdate then ignores the UDP roster). Falls back to
 	// UDP silently against an old server without /api/id.
 	go s.httpRosterLoop(ctx, c.ServerURL, campID)
+	// Camp deaf-detector: rebind on a fresh port if we keep announcing but the
+	// camp stops answering. Clock-agnostic (accumulated silence, not a clock
+	// jump), so it also catches the case a VM's host slept and the guest saw no
+	// time jump — the wake detector in the engine would miss that.
+	go s.livenessLoop(ctx, ac)
 
 	s.mu.Lock()
 	s.announce = ac
@@ -471,6 +476,45 @@ func sameUDPAddr(a, b *net.UDPAddr) bool {
 		return a == b
 	}
 	return a.IP.Equal(b.IP) && a.Port == b.Port
+}
+
+// livenessLoop rebinds the engine on a fresh port when the camp goes silent: we
+// keep announcing (lastSent fresh) but no reply has arrived for deafMs, after
+// we'd heard from camp at least once. Clock-agnostic — it needs only
+// accumulated silence, so it catches a VM whose host slept without the guest
+// seeing a wall-clock jump (which the engine's wake detector keys on) and any
+// other silent socket death. A cooldown avoids thrashing when the camp server
+// itself is down. Rebinding tears this loop down (ctx cancel) and a fresh one
+// starts with the new announce client.
+func (s *Service) livenessLoop(ctx context.Context, ac *rendezvous.AnnounceClient) {
+	const (
+		checkEvery = 15 * time.Second
+		deafMs     = 60000  // no camp reply this long while announcing → rebind
+		cooldownMs = 120000 // min gap between rebinds (camp-server-down safety)
+	)
+	t := time.NewTicker(checkEvery)
+	defer t.Stop()
+	var lastRebind int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		sent, reply := ac.LastSentMs(), ac.LastReplyMs()
+		now := time.Now().UnixMilli()
+		// Need: the path worked once (reply>0), we've sent since then, and it's
+		// been silent for deafMs. Skip if we rebound within the cooldown.
+		if reply == 0 || sent <= reply || now-reply < deafMs {
+			continue
+		}
+		if lastRebind != 0 && now-lastRebind < cooldownMs {
+			continue
+		}
+		lastRebind = now
+		clog.Warn("camp", "no announce reply for %ds — rebinding on a fresh port", (now-reply)/1000)
+		s.eng.RebindEphemeral("camp deaf")
+	}
 }
 
 // httpRosterLoop polls the camp server's /api/id/<camp> for the full roster and
