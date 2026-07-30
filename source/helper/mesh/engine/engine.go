@@ -1243,8 +1243,19 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 		// enough that a real route change recovers in seconds instead of
 		// hanging until the next sleep happens to trigger wake-recovery.
 		netDownGraceMs = 15000
+		// Peer-deaf recovery covers the VM-sleep case the clock-jump detector
+		// misses (a guest that saw no wall-clock jump): the camp path self-heals
+		// via announce, but every peer-facing NAT mapping is stale. deafPeerMs is
+		// how long a previously-alive peer may be silent before it counts as
+		// deaf; recentAliveMs bounds "previously alive" so a long-gone peer stops
+		// triggering; the cooldown stops a genuinely unreachable peer (no hairpin)
+		// from looping. We rebind only when EVERY recently-alive peer went silent
+		// at once (⇒ our socket, not one peer's node).
+		deafPeerMs           = 45000
+		recentAliveMs        = 300000
+		peerRebindCooldownMs = 120000
 	)
-	var prevTickMs int64
+	var prevTickMs, lastPeerRebindMs int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -1281,10 +1292,25 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			// failure look like the local route is gone? Drives the
 			// awake-network-change recovery below.
 			var sentOK, netDown bool
+			// eligible = online peers we've recently talked to; deaf = those now
+			// silent past deafPeerMs. All-deaf ⇒ our transport, rebind.
+			var eligible, deaf int
 			for _, p := range targets {
 				seen := p.LastSeenMs.Load()
 				lastSent := p.LastPingMs.Load()
 				cadence := int64(burstMs)
+				if p.InCamp {
+					alive := seen
+					if rs := p.LastValidResMs.Load(); rs > alive {
+						alive = rs
+					}
+					if alive != 0 && now-alive < recentAliveMs {
+						eligible++
+						if now-alive > deafPeerMs {
+							deaf++
+						}
+					}
+				}
 				// Healthy = peer is sending us packets AND our last ping
 				// got a pong recently. Either signal stale → burst. This
 				// covers the asymmetric case: peer's keepalive reaches us
@@ -1349,6 +1375,17 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 					e.RebindEphemeral(fmt.Sprintf("local route down %ds", (now-since)/1000))
 					return
 				}
+			}
+			// Peer-deaf recovery (VM-sleep the clock-jump detector missed): every
+			// peer we were recently talking to has gone silent at once, while the
+			// camp path is fine — our peer-facing NAT mappings are stale. Rebind on
+			// a fresh port. Cooldown-gated so an always-unreachable peer (e.g. no
+			// NAT hairpin) doesn't loop.
+			if eligible > 0 && deaf == eligible &&
+				(lastPeerRebindMs == 0 || now-lastPeerRebindMs > peerRebindCooldownMs) {
+				lastPeerRebindMs = now
+				e.RebindEphemeral(fmt.Sprintf("all %d peers silent (post-wake?)", eligible))
+				return
 			}
 			// Static --peer mode (legacy): single keepalive every 25s
 			// to the configured static endpoint, no peer-state tracking.
