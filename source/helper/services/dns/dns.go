@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -286,7 +287,11 @@ func (s *Service) Start(campID, zone, overlayIP string) error {
 	// resolve *.f2f (point them at this IP via --dns). Own domains resolve to the
 	// overlay IP here (v4Rewrite) so a container reaches the host's proxy, not its
 	// own loopback. Best-effort: a bind failure (IP not up yet) just skips it.
-	if overlayIP != "" {
+	//
+	// Linux only: this is the container-on-the-node scenario. On macOS the system
+	// mDNSResponder already owns *:53, so binding <overlay>:53 always fails — and
+	// Docker Desktop containers don't route to the mac's overlay IP anyway.
+	if overlayIP != "" && runtime.GOOS == "linux" {
 		ovlAddr := net.JoinHostPort(overlayIP, strconv.Itoa(overlayDNSPort))
 		// Forward non-.f2f queries to the host's real resolver, so a container can
 		// point its sole --dns at this listener without losing normal DNS.
