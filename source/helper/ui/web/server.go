@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -217,10 +218,53 @@ func (s *Server) ListenAndServe() error {
 	s.routes(mux)
 	s.srv = &http.Server{
 		Addr:              s.addr,
-		Handler:           mux,
+		Handler:           guardCSRF(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s.srv.ListenAndServe()
+}
+
+// guardCSRF blocks cross-site browser requests to state-changing endpoints.
+// The portal is a web app on 127.0.0.1:2202, so without this any page the user
+// visits could drive the admin API via a "simple" POST (no CORS preflight) —
+// create OIDC clients, expose their shell, trigger self-update, etc. Browsers
+// always send Sec-Fetch-Site (incl. on WebSocket upgrades); non-browser clients
+// (CLI, tui) omit it and pass. Safe methods (GET/HEAD) are read-only and their
+// responses are unreadable cross-origin, so they're left open; the WebSocket
+// upgrades (GET) are guarded separately via CheckOrigin.
+func guardCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if crossSiteRequest(r) {
+				http.Error(w, "cross-site request blocked", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// crossSiteRequest reports whether r is a cross-site browser request — the
+// CSRF signal. Sec-Fetch-Site is authoritative (all modern browsers set it);
+// when absent it's a non-browser client, with an Origin-vs-Host fallback.
+func crossSiteRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
+		return true
+	case "same-origin", "none":
+		return false
+	}
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return false // no Sec-Fetch-Site and no Origin → non-browser, allow
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" {
+		return true
+	}
+	return !strings.EqualFold(u.Host, r.Host)
 }
 
 // Shutdown gracefully stops the HTTP server.

@@ -17,7 +17,7 @@ var vncUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
 	Subprotocols:    []string{"binary"},
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return !crossSiteRequest(r) },
 }
 
 // handleVncPeers lists camp peers that have a reachable VNC server open to

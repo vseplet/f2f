@@ -49,6 +49,14 @@ const (
 	// cached conn. >1 so a single transient stall doesn't tear a conn carrying a
 	// live VNC/shell stream; a truly dead conn still fails the streak and goes.
 	pingFailLimit = 2
+
+	// evictGraceRounds is how many consecutive rounds a peer must be absent from
+	// the dialable set before its cached conn is torn down as "left roster". >1
+	// so a transient roster blip (a missed announce, a hairpin flap) doesn't rip
+	// a live conn every 30s — the churn the roster is prone to. A conn that's
+	// actually dead is still dropped promptly by pingFailLimit; this only governs
+	// the roster-departure path.
+	evictGraceRounds = 3
 )
 
 // dbg logs verbose connection-lifecycle diagnostics (dial/adopt/forget/drop
@@ -111,6 +119,7 @@ type Service struct {
 	streamHandlers map[string]StreamHandlerFunc
 	linkUp         map[string]bool // pub → last ping outcome (for up/down notifications)
 	pingFail       map[string]int  // pub → consecutive failed pings; drop the conn only after a streak
+	evictMiss      map[string]int  // pub → consecutive rounds absent from the dialable set; evict only after a streak
 	// dialing collapses concurrent dials to the same peer (the shell and
 	// vnc discovery probes fire together every 5s): the first caller dials,
 	// the rest wait on the channel and reuse the outcome. Without this every
@@ -136,6 +145,7 @@ func New(r Resolver) (*Service, error) {
 		streamHandlers: make(map[string]StreamHandlerFunc),
 		linkUp:         make(map[string]bool),
 		pingFail:       make(map[string]int),
+		evictMiss:      make(map[string]int),
 		dialing:        make(map[string]chan struct{}),
 	}
 	// Built-in liveness probe: echo back so the caller can measure RTT.
@@ -289,6 +299,12 @@ func (s *Service) pingRound(ctx context.Context) {
 		known[pub] = true
 		go s.pingOne(ctx, pub)
 	}
+	// A peer we can dial this round is present: clear any pending eviction grace.
+	s.mu.Lock()
+	for pub := range known {
+		delete(s.evictMiss, pub)
+	}
+	s.mu.Unlock()
 	s.evictStale(known)
 }
 
@@ -342,8 +358,17 @@ func (s *Service) evictStale(known map[string]bool) {
 	s.mu.Lock()
 	var stale []string
 	for pub := range s.conns {
-		if !known[pub] {
+		if known[pub] {
+			continue
+		}
+		// Absent from the dialable set — but tolerate a transient roster blip:
+		// only evict after evictGraceRounds consecutive misses. A conn that's
+		// genuinely dead is dropped sooner by the ping-failure streak; this grace
+		// stops the 30s DROP/redial churn when the roster flaps a peer offline.
+		s.evictMiss[pub]++
+		if s.evictMiss[pub] >= evictGraceRounds {
 			stale = append(stale, pub)
+			delete(s.evictMiss, pub)
 		}
 	}
 	for pub := range s.linkUp {

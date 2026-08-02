@@ -20,7 +20,7 @@ import (
 var shellUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return !crossSiteRequest(r) },
 }
 
 // handleShellPeers lists camp peers whose remote shell is open to us. This
