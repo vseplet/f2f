@@ -34,6 +34,29 @@ type PeerInfo struct {
 	// task itself (it drops non-allowlisted inbound). Empty for normal peers.
 	Role  string   `json:"role,omitempty"`
 	Allow []string `json:"allow,omitempty"`
+	// Links is this peer's self-reported view of its connection to each other
+	// peer (direct/half/seen/relay + rtt), pushed via POST /api/links and echoed
+	// in /api/id. Lets the UI render a camp-wide connectivity matrix and informs
+	// relay decisions. Empty for peers that don't report.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is one peer's connection status to another, from the reporter's point of
+// view. Fp is the OTHER peer's 16-hex fingerprint; St is the state; RTT is the
+// round-trip in ms (0 = unknown).
+type Link struct {
+	Fp  string `json:"fp"`
+	St  string `json:"st"`            // "direct" | "half" | "seen" | "relay"
+	RTT int    `json:"rtt,omitempty"` // ms
+}
+
+// LinksReport is the body of POST /api/links/<camp>: a peer reporting its
+// current per-peer connection states. Pub identifies the reporter; the server
+// additionally checks the request's source IP against the reporter's announced
+// reflex so a report can't be forged for another peer.
+type LinksReport struct {
+	Pub   string `json:"pub"`
+	Links []Link `json:"links"`
 }
 
 // --- UDP wire types ---

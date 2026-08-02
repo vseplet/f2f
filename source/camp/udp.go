@@ -10,6 +10,7 @@ package main
 // camp-facing NAT mapping alive on the client's tunnel port.
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net"
@@ -22,12 +23,29 @@ import (
 var (
 	nameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	pubRE  = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	fpRE   = regexp.MustCompile(`^[a-f0-9]{16}$`)
 )
+
+// linkStates is the closed set of connection states a peer may report.
+var linkStates = map[string]bool{"direct": true, "half": true, "seen": true, "relay": true}
 
 const (
 	maxNameLen   = 64
 	maxCampIDLen = 128
 	maxPayload   = 1024
+	// Relay (DERP-style): when two peers can't hole-punch, they tunnel opaque
+	// (already AWG-encrypted) packets through us. Framing on the same socket:
+	//   client → relay:  [relaySend]   [to_pub:32]   [payload…]
+	//   relay  → client: [relayDeliver][from_pub:32] [payload…]
+	// The sender's identity comes from its source address (relayLookup), not the
+	// frame, so from can't be spoofed. First byte distinguishes these from the
+	// JSON announce (which starts with '{' = 0x7b).
+	relaySend    = 0xF3
+	relayDeliver = 0xF2
+	relayHdr     = 1 + 32 // opcode + pubkey
+	// maxRelay bounds a relay datagram: an AWG data packet is ≤ MTU (~1420) plus
+	// transport overhead; give headroom. Larger than maxPayload (announce only).
+	maxRelay = 1600
 	// rosterWindow is how many peers a paged announce reply carries. Each
 	// PeerInfo is ~0.3 KB of JSON; kept small so a reply (plus the `you` field)
 	// fits in a single un-fragmented UDP datagram (≤ MTU) — fragmented UDP is
@@ -67,14 +85,20 @@ func startUDP(port string, hub *Hub) error {
 }
 
 func serveUDP(conn *net.UDPConn, hub *Hub) {
-	buf := make([]byte, maxPayload+1)
+	buf := make([]byte, maxRelay+1)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			log.Printf("udp: read: %v", err)
 			return
 		}
-		// Hard cap on payload size — sanity check and keeps reflection
+		// Relay frames are binary and can exceed the announce cap — handle them
+		// first, before the JSON path's size limit.
+		if n > 0 && buf[0] == relaySend {
+			handleRelay(conn, hub, src, buf[:n])
+			continue
+		}
+		// Hard cap on announce payload size — sanity check and keeps reflection
 		// amplification cheap.
 		if n > maxPayload {
 			log.Printf("udp: drop oversize %dB from %s", n, src)
@@ -131,7 +155,7 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 		}
 
 		wasNew := !hub.has(campID, pub)
-		info := hub.upsert(campID, pub, name, src.IP.String(), src.Port, version, role, allow)
+		info := hub.upsert(campID, pub, name, src, version, role, allow)
 		if wasNew {
 			log.Printf("join: %s@%s pub=%s from %s", name, campID, short(pub), src)
 		}
@@ -144,6 +168,31 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 			conn.WriteToUDP(data, src)
 		}
 	}
+}
+
+// handleRelay forwards one relay send. It resolves the sender from its source
+// address and the target from the frame's to_pub, requires both in the same
+// camp (relayLookup), then re-frames the payload with the sender's pub and
+// delivers it to the target. Unknown sender / target / cross-camp → dropped
+// silently (no error reply — this is a data-plane hot path).
+func handleRelay(conn *net.UDPConn, hub *Hub, src *net.UDPAddr, pkt []byte) {
+	if len(pkt) < relayHdr {
+		return
+	}
+	toPub := hex.EncodeToString(pkt[1:relayHdr])
+	to, fromPub, ok := hub.relayLookup(src, toPub)
+	if !ok {
+		return
+	}
+	fromRaw, err := hex.DecodeString(fromPub)
+	if err != nil || len(fromRaw) != 32 {
+		return
+	}
+	out := make([]byte, 0, relayHdr+len(pkt)-relayHdr)
+	out = append(out, relayDeliver)
+	out = append(out, fromRaw...)
+	out = append(out, pkt[relayHdr:]...)
+	conn.WriteToUDP(out, to)
 }
 
 func sendErr(conn *net.UDPConn, dst *net.UDPAddr, code, message string) {
