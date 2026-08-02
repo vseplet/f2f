@@ -3424,3 +3424,39 @@ a.ax-domain-link:hover {
 .ax-invite-steps li { margin-bottom: 10px; }
 .ax-invite-steps code { display: inline-block; margin: 2px 0; }
 .ax-copy { cursor: pointer; }
+
+/* Certificate viewer modal (portal Certificates). Full-screen scrim + card,
+   reuses the .ax-modal palette. Highlights "trusted for" (name constraints)
+   so the user sees the CA's domain scope at a glance. */
+.ax-cert-overlay {
+    position: fixed; inset: 0; z-index: 1100;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+}
+.ax-cert-modal {
+    width: min(94vw, 520px); max-height: 86vh; overflow: auto;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.ax-cert-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.ax-cert-title { color: var(--text); font-size: 15px; font-weight: 700; }
+.ax-cert-close {
+    background: none; border: none; color: var(--muted);
+    font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.ax-cert-close:hover { color: var(--text); }
+.ax-cert-body { padding: 12px 18px 18px; }
+.ax-cert-row {
+    display: grid; grid-template-columns: 110px 1fr; gap: 10px;
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+    font-size: 13px; align-items: baseline;
+}
+.ax-cert-row:last-child { border-bottom: none; }
+.ax-cert-k { color: var(--muted); }
+.ax-cert-v { color: var(--text); word-break: break-word; }
+.ax-cert-scope .ax-cert-v { color: #6ea8d8; font-weight: 600; }
+.ax-cert-warn { color: var(--danger); font-weight: 600; }
+.ax-cert-fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-2); }

@@ -134,7 +134,11 @@ $(function () {
   // without the two being directly coupled.
   $('#ax-tree').on('click', '.ax-tree-row[data-route]', function () {
     const route = $(this).attr('data-route');
-    if (route) location.hash = route;
+    if (!route) return;
+    // cert:<fp> rows open the certificate viewer modal rather than driving the
+    // main pane — the detail is a one-off inspection, not a tab.
+    if (route.startsWith('cert:')) { openCertModal(route.slice(5)); return; }
+    location.hash = route;
   });
 
   // Forget-peer button (offline ghosts only). Stops the row's own
@@ -3884,7 +3888,7 @@ $(function () {
       ? trusted.map(t => {
           const name = t.peer_name || t.common_name || t.fingerprint.slice(0, 12);
           return row(t.installed ? 'online' : 'half', name,
-            t.installed ? 'installed' : 'pending', null, 'dns:cert:' + name);
+            t.installed ? 'installed' : 'pending', null, 'cert:' + t.fingerprint);
         }).join('')
       : empty('none');
 
@@ -5025,11 +5029,68 @@ $(function () {
         $el.text('not running');
         return;
       }
-      $el.html(
+      const inner =
         '<strong>' + $('<span>').text(data.common_name).html() + '</strong>' +
-        ' <span class="muted">fp ' + (data.fingerprint || '—') + '</span>'
-      );
+        ' <span class="muted">fp ' + (data.fingerprint || '—') + '</span>';
+      // Whole line is clickable → opens the certificate viewer (same as rows).
+      $el.html(data.fingerprint
+        ? '<span class="ax-cert-view" data-fp="' + esc(data.fingerprint) + '" style="cursor:pointer">' + inner + '</span>'
+        : inner);
     }).fail(() => { $('#my-ca-info').addClass('live').text('—'); });
+  }
+  // Clicking my CA line opens the certificate viewer modal.
+  $(document).on('click', '.ax-cert-view', function (e) {
+    e.preventDefault();
+    const fp = $(this).attr('data-fp');
+    if (fp) openCertModal(fp);
+  });
+
+  // openCertModal fetches /api/ca/detail?fp= and shows the full certificate —
+  // subject/issuer/serial/key/validity and, most importantly, the name
+  // constraints (what domains the CA is trusted for). Read-only inspection.
+  function openCertModal(fp) {
+    $('.ax-cert-overlay').remove();
+    $(document).off('keydown.certmodal');
+    const $ov = $('<div class="ax-cert-overlay"></div>').appendTo('body');
+    const $modal = $('<div class="ax-cert-modal"></div>').appendTo($ov);
+    $modal.html('<div class="ax-cert-body"><div class="muted">loading…</div></div>');
+    const close = () => { $ov.remove(); $(document).off('keydown.certmodal'); };
+    $ov.on('click', (e) => { if (e.target === $ov[0]) close(); });
+    $(document).on('keydown.certmodal', (e) => { if (e.key === 'Escape') close(); });
+
+    $.getJSON('/api/ca/detail?fp=' + encodeURIComponent(fp), (d) => {
+      const fmt = (s) => s ? new Date(s * 1000).toLocaleString() : '—';
+      const rows = [];
+      const line = (k, v, cls) => rows.push(
+        '<div class="ax-cert-row' + (cls ? ' ' + cls : '') + '">' +
+        '<span class="ax-cert-k">' + esc(k) + '</span>' +
+        '<span class="ax-cert-v">' + v + '</span></div>');
+      const scope = (d.permitted_dns && d.permitted_dns.length)
+        ? d.permitted_dns.map(x => esc('*' + x)).join(', ') +
+          (d.permitted_critical ? ' <span class="muted">(critical)</span>' : '')
+        : '<span class="ax-cert-warn">ANY domain — no name constraints</span>';
+      line('trusted for', scope, 'ax-cert-scope');
+      line('common name', esc(d.common_name || '—'));
+      line('subject', esc(d.subject || '—'));
+      line('issuer', d.self_signed ? '<span class="muted">self-signed</span>' : esc(d.issuer || '—'));
+      line('key', esc(d.key_type || '—'));
+      line('serial', esc(d.serial || '—'));
+      line('valid', esc(fmt(d.not_before)) + ' → ' + esc(fmt(d.not_after)));
+      if (d.sans && d.sans.length) line('SAN', esc(d.sans.join(', ')));
+      line('installed', d.installed ? 'yes' : 'no');
+      line('SHA-256', '<code class="ax-cert-fp">' + esc(d.sha256 || '—') + '</code>');
+      const title = esc(d.common_name || 'certificate') +
+        (d.mine ? ' <span class="muted">(your CA)</span>' : '');
+      $modal.html(
+        '<div class="ax-cert-head"><span class="ax-cert-title">' + title + '</span>' +
+        '<button class="ax-cert-close" title="close">×</button></div>' +
+        '<div class="ax-cert-body">' + rows.join('') + '</div>');
+      $modal.find('.ax-cert-close').on('click', close);
+    }).fail(() => {
+      $modal.html('<div class="ax-cert-body"><div class="ax-cert-warn">failed to load certificate</div>' +
+        '<button class="ax-cert-close">close</button></div>');
+      $modal.find('.ax-cert-close').on('click', close);
+    });
   }
 
   // ---- trusted peer CAs (DNS tab) ----
@@ -5046,7 +5107,13 @@ $(function () {
       }
       rows.forEach((r) => {
         const $row = $('<div class="ax-intercept">');
-        const $head = $('<div class="ax-intercept-head" style="cursor:default">');
+        const $head = $('<div class="ax-intercept-head" style="cursor:pointer">');
+        // Clicking the row opens the certificate viewer — except when the click
+        // lands on a button (install / remove), which have their own actions.
+        $head.on('click', (e) => {
+          if ($(e.target).closest('button').length) return;
+          if (r.fingerprint) openCertModal(r.fingerprint);
+        });
         $head.append($('<span class="ax-intercept-caret">').text(' '));
         $head.append($('<span class="ax-intercept-spec">').text(r.peer_name || '?'));
         if (r.common_name) {

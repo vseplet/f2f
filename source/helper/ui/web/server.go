@@ -321,6 +321,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/peer-domains/{peer}/{name}", s.handleRemovePeerDomain)
 	mux.HandleFunc("GET /api/ca-cert", s.handleCACert)
 	mux.HandleFunc("GET /api/my-ca", s.handleMyCA)
+	mux.HandleFunc("GET /api/ca/detail", s.handleCADetail)
 	mux.HandleFunc("GET /api/trusted-peers", s.handleTrustedPeers)
 	mux.HandleFunc("POST /api/trusted-peers/{fp}/install", s.handleInstallTrustedPeer)
 	mux.HandleFunc("DELETE /api/trusted-peers/{fp}", s.handleRemoveTrustedPeer)
@@ -897,6 +898,24 @@ func (s *Server) handleMyCA(w http.ResponseWriter, r *http.Request) {
 // fingerprint, common name, install state.
 func (s *Server) handleTrustedPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.pki.ListPeerCAs())
+}
+
+// handleCADetail returns the full parsed detail of one CA (ours or a peer's)
+// by short fingerprint — subject/issuer/serial/key/validity, and crucially the
+// name constraints (permitted DNS) so the portal can show what the cert is
+// scoped to.
+func (s *Server) handleCADetail(w http.ResponseWriter, r *http.Request) {
+	fp := r.URL.Query().Get("fp")
+	if fp == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("missing fp"))
+		return
+	}
+	d, ok := s.pki.CertDetail(fp)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
 }
 
 // handleInstallTrustedPeer adds a discovered peer CA to the system
