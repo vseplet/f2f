@@ -18,6 +18,7 @@
 package camp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -200,6 +201,9 @@ func (s *Service) Start(c *config.Camp) error {
 	// jump), so it also catches the case a VM's host slept and the guest saw no
 	// time jump — the wake detector in the engine would miss that.
 	go s.livenessLoop(ctx, ac)
+	// Push our per-peer connection matrix to the camp (POST /api/links) so the
+	// camp view / other peers can see who reaches whom (direct/half/seen/relay).
+	go s.linksReportLoop(ctx, c.ServerURL, campID)
 
 	s.mu.Lock()
 	s.announce = ac
@@ -514,6 +518,63 @@ func (s *Service) livenessLoop(ctx context.Context, ac *rendezvous.AnnounceClien
 		lastRebind = now
 		clog.Warn("camp", "no announce reply for %ds — rebinding on a fresh port", (now-reply)/1000)
 		s.eng.RebindEphemeral("camp deaf")
+	}
+}
+
+// linksReportLoop periodically POSTs our per-peer connection matrix to the camp
+// (/api/links/<camp>) so the camp view and other peers can see who reaches whom.
+// State per peer: direct (paired), half (one-way), seen (in roster, no crypto
+// signal yet). Runs until ctx is cancelled (Stop / rebind).
+func (s *Service) linksReportLoop(ctx context.Context, serverURL, campID string) {
+	base := httpRosterBase(serverURL)
+	if base == "" {
+		return
+	}
+	endpoint := base + "/api/links/" + campID
+	client := &http.Client{Timeout: 8 * time.Second}
+	t := time.NewTicker(12 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pub := s.eng.IdentityPub()
+		if pub == "" {
+			continue
+		}
+		st := s.eng.Status()
+		links := make([]rendezvous.Link, 0, len(st.Peers))
+		for _, p := range st.Peers {
+			if p.Self || p.Fp == "" {
+				continue
+			}
+			var state string
+			switch {
+			case p.Paired:
+				state = "direct"
+			case p.HalfPaired:
+				state = "half"
+			case p.InCamp:
+				state = "seen"
+			default:
+				continue // offline / not in camp — no meaningful link
+			}
+			links = append(links, rendezvous.Link{Fp: p.Fp, St: state, RTT: int(p.RTTMs)})
+		}
+		body, err := json.Marshal(rendezvous.LinksReport{Pub: pub, Links: links})
+		if err != nil {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("content-type", "application/json")
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+		}
 	}
 }
 
