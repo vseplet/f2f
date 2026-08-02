@@ -11,10 +11,11 @@ import (
 )
 
 // keepaliveDefaultSec is the persistent-keepalive interval handed to AWG
-// for every peer. Matches our pair_req cadence (25s) so AWG-keepalive
-// and pair_req together keep the NAT mapping alive on roughly the same
-// timer rather than fighting each other.
-const keepaliveDefaultSec = 25
+// for every peer. Kept short (10s) so aggressive NATs that close a UDP
+// mapping well under 30s don't drop the tunnel between keepalives — the
+// symptom being periodic bus-conn drops and hosted services (e.g. gitea)
+// going briefly unreachable on marginal direct paths.
+const keepaliveDefaultSec = 10
 
 // PeerSyncInfo describes one peer to push into Device via UAPI. Built
 // from a *peerState in the engine — only peers with a verified WGPub
