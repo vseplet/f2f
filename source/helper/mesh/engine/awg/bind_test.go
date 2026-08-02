@@ -213,3 +213,66 @@ func udpPair(t *testing.T) (a, b *net.UDPConn) {
 	}
 	return a, b
 }
+
+// A relay endpoint round-trips through ParseEndpoint/DstToString, and Send to it
+// frames the packet as [relaySendOp][pub][payload] to the configured camp addr.
+func TestRelaySendFramesToCamp(t *testing.T) {
+	a, camp := udpPair(t)
+	defer a.Close()
+	defer camp.Close()
+
+	bind := New(a)
+	defer bind.Close()
+	if _, _, err := bind.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	bind.SetCampAddr(camp.LocalAddr().(*net.UDPAddr))
+
+	var pub [32]byte
+	for i := range pub {
+		pub[i] = byte(i)
+	}
+	ep, err := bind.ParseEndpoint(NewRelayEndpoint(pub).DstToString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	re, ok := ep.(*Endpoint)
+	if !ok || !re.IsRelay() || re.RelayPub() != pub {
+		t.Fatalf("relay endpoint didn't round-trip: %+v", ep)
+	}
+
+	payload := []byte("awg-shaped bytes")
+	if err := bind.Send([][]byte{payload}, ep); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 1500)
+	_ = camp.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := camp.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1+32 || buf[0] != relaySendOp {
+		t.Fatalf("not a relay frame: op=%#x len=%d", buf[0], n)
+	}
+	if string(buf[1:33]) != string(pub[:]) {
+		t.Errorf("to_pub mismatch")
+	}
+	if string(buf[33:n]) != string(payload) {
+		t.Errorf("payload mismatch: got %q", buf[33:n])
+	}
+}
+
+// With no camp addr set, a relay Send is a silent no-op (relay unavailable).
+func TestRelaySendNoCampIsNoop(t *testing.T) {
+	a, _ := udpPair(t)
+	defer a.Close()
+	bind := New(a)
+	defer bind.Close()
+	if _, _, err := bind.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := bind.Send([][]byte{[]byte("x")}, NewRelayEndpoint([32]byte{1})); err != nil {
+		t.Fatalf("relay send with no camp should be a no-op, got %v", err)
+	}
+}

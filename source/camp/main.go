@@ -11,6 +11,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -26,6 +28,18 @@ import (
 
 	"github.com/vseplet/f2f/source/helper/mesh/camp/rendezvous"
 )
+
+// fpOf is the peer fingerprint used everywhere in f2f: hex(sha256(pub)[:8]) =
+// 16 hex chars. Must match identity.FingerprintHex so the /id column, the
+// links matrix, and the portal all show the SAME fingerprint.
+func fpOf(pubHex string) string {
+	raw, err := hex.DecodeString(pubHex)
+	if err != nil || len(raw) == 0 {
+		return ""
+	}
+	h := sha256.Sum256(raw)
+	return hex.EncodeToString(h[:8])
+}
 
 const (
 	evictAfter    = 60 * time.Second
@@ -258,8 +272,8 @@ func renderCampPage(campID string, peers []rendezvous.PeerInfo) string {
 	// render as readable names.
 	nameByFp := make(map[string]string, len(peers))
 	for _, p := range peers {
-		if len(p.Pub) >= 16 {
-			nameByFp[p.Pub[:16]] = p.Name
+		if fp := fpOf(p.Pub); fp != "" {
+			nameByFp[fp] = p.Name
 		}
 	}
 	var body string
@@ -276,8 +290,8 @@ func renderCampPage(campID string, peers []rendezvous.PeerInfo) string {
 				}
 			}
 			fp := "—"
-			if len(p.Pub) >= 16 {
-				fp = p.Pub[:16]
+			if f := fpOf(p.Pub); f != "" {
+				fp = f
 			}
 			ver := p.Version
 			if ver == "" {

@@ -35,6 +35,10 @@ import (
 	"github.com/vseplet/f2f/source/helper/mesh/engine"
 )
 
+// relayDeliverOp is the first byte of a relay→client frame from the camp:
+// [0xF2][from_pub:32][payload]. Mirrors source/camp's relayDeliver.
+const relayDeliverOp = 0xF2
+
 // Health reports UDP-announce liveness against the camp server,
 // surfaced via /api/status for the UI's camp-health card.
 type Health struct {
@@ -145,7 +149,7 @@ func (s *Service) Start(c *config.Camp) error {
 		return errors.New("camp: engine UDP socket not ready")
 	}
 	pub := s.eng.IdentityPub()
-	ac, err := rendezvous.NewAnnounceClient(udp, c.StunAddr, c.Identity.Name, c.CampID, pub, s.version, s.role)
+	ac, err := rendezvous.NewAnnounceClient(udp, c.StunAddr, c.Identity.Name, c.CampID, pub, s.version, s.role, s.eng.IdentityWGPub())
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -166,6 +170,15 @@ func (s *Service) Start(c *config.Camp) error {
 		// re-resolves (DNS recovery / fly.io IP rotation).
 		if !sameUDPAddr(ac.CampAddr(), from) {
 			return false
+		}
+		// Relay deliver: [0xF2][from_pub:32][payload] — a peer's AWG packet
+		// forwarded to us through the camp relay. Unwrap and hand to the engine
+		// (attributed to the sender's relay endpoint).
+		if len(pkt) >= 1+32 && pkt[0] == relayDeliverOp {
+			var fromPub [32]byte
+			copy(fromPub[:], pkt[1:33])
+			s.eng.DeliverRelay(pkt[33:], fromPub)
+			return true
 		}
 		claimed := ac.HandlePacket(pkt)
 		if claimed {
@@ -391,6 +404,7 @@ func toRoster(peers []rendezvous.PeerInfo) []engine.RosterEntry {
 			Online:      p.Online,
 			Role:        p.Role,
 			Version:     p.Version,
+			WGPub:       p.WGPub,
 		})
 	}
 	return out
@@ -505,6 +519,9 @@ func (s *Service) livenessLoop(ctx context.Context, ac *rendezvous.AnnounceClien
 			return
 		case <-t.C:
 		}
+		// Keep the AWG bind's relay target pointed at the (possibly re-resolved)
+		// camp address, so relay Sends have somewhere to go.
+		s.eng.SetRelayCamp(ac.CampAddr())
 		sent, reply := ac.LastSentMs(), ac.LastReplyMs()
 		now := time.Now().UnixMilli()
 		// Need: the path worked once (reply>0), we've sent since then, and it's
@@ -554,6 +571,12 @@ func (s *Service) linksReportLoop(ctx context.Context, serverURL, campID string)
 			switch {
 			case p.Paired:
 				state = "direct"
+			case p.Relay && p.Online:
+				// Relay endpoint chosen AND we're actually receiving relay traffic
+				// (Online is refreshed by relay rx). A peer we merely *decided* to
+				// relay to but can't reach (e.g. an old peer that can't relay) stays
+				// !Online and falls through to "seen" — no false relay links.
+				state = "relay"
 			case p.HalfPaired:
 				state = "half"
 			case p.InCamp:

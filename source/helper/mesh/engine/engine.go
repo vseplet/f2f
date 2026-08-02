@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -181,6 +182,9 @@ type PeerStatusInfo struct {
 	// Present for any peer whose Pub is known; empty for legacy peers
 	// announced without a pub. Used for BT peer addresses and display.
 	OverlayV4 string `json:"overlay_v4,omitempty"`
+	// Relay is true when wg to this peer is currently routed through the camp
+	// relay (direct hole-punch didn't yield a pair_res in time).
+	Relay bool `json:"relay,omitempty"`
 	// Role is the peer's self-declared run-mode role from the roster
 	// (user/service/task). Empty for peers on an old client that doesn't
 	// announce one. Version is the peer's client build string, same source.
@@ -222,6 +226,10 @@ type peerState struct {
 	// peers on an old client that doesn't announce them.
 	Role    string
 	Version string
+
+	// FirstSeenMs is when this peer first entered our map — used to give direct
+	// hole-punch a grace window (relayAfterMs) before falling back to relay.
+	FirstSeenMs int64
 
 	UDPAddr    *net.UDPAddr // current best-known UDP target (port can shift on NAT rebind)
 	LastSeenMs atomic.Int64 // epoch ms of last received packet from this peer; 0 = never
@@ -776,6 +784,7 @@ type RosterEntry struct {
 	Online      bool   // camp confirms the peer announced recently
 	Role        string // self-declared run-mode role (user/service/task); "" on old clients
 	Version     string // peer's client build string; "" on old clients
+	WGPub       string // peer's X25519 transport pub (hex) from the roster; "" on old clients
 }
 
 // ApplyCampRoster is called by mesh/camp every poll cycle (and
@@ -820,6 +829,18 @@ func (e *Engine) IdentityPub() string {
 		return ""
 	}
 	return e.identity.PubHex()
+}
+
+// IdentityWGPub returns our X25519 transport public key in hex — published in
+// the announce so peers can bootstrap the AWG session (and relay) without a
+// direct hello. "" outside camp mode.
+func (e *Engine) IdentityWGPub() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.identity == nil {
+		return ""
+	}
+	return e.identity.X25519PubHex()
 }
 
 // Identity returns the running camp's Ed25519 identity, or nil when the
@@ -886,6 +907,7 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 	seen := make(map[string]struct{}, len(peers))
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	now := time.Now().UnixMilli()
 	for _, p := range peers {
 		if p.Name == ourName {
 			continue
@@ -919,6 +941,8 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				LastSeenAt:  p.LastSeenAt,
 				Role:        p.Role,
 				Version:     p.Version,
+				WGPub:       p.WGPub, // roster bootstrap — lets relay set up before any direct hello
+				FirstSeenMs: now,
 				UDPAddr:     addr,
 			}
 			e.peers[p.Pub] = st
@@ -935,6 +959,14 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 			existing.LastSeenAt = p.LastSeenAt
 			existing.Role = p.Role
 			existing.Version = p.Version
+			// Bootstrap the transport key from the roster only until a verified
+			// hello sets it — hello (when direct works) stays authoritative.
+			if existing.WGPub == "" && p.WGPub != "" {
+				existing.WGPub = p.WGPub
+			}
+			if existing.FirstSeenMs == 0 {
+				existing.FirstSeenMs = now
+			}
 			if p.Online {
 				existing.PublicIP = p.PublicIP
 				existing.UDPPort = p.UDPPort
@@ -1022,12 +1054,30 @@ func (e *Engine) SetDefaultListen(addr string) {
 // endpoint changes — typically after a successful pair-handshake or
 // a camp poll. Runs the IpcSet outside e.mu to avoid blocking other
 // engine paths.
+// relayAfterMs: how long a peer may go without a direct pair_res (while in camp)
+// before wg is routed through the camp relay. Long enough for a normal
+// hole-punch to complete first, short enough to recover a stuck pair quickly.
+const relayAfterMs = 20000
+
+// peerOnRelay reports whether wg to this peer is currently routed through the
+// camp relay: it's in camp, past its direct grace window, and no fresh pair_res
+// proves the direct path works. Single source of truth for both the endpoint
+// decision (awgSyncPeers) and the reported link state (peersStatusLocked).
+func peerOnRelay(p *peerState, now int64) bool {
+	if !p.InCamp || p.Pub == "" || p.FirstSeenMs == 0 || now-p.FirstSeenMs <= relayAfterMs {
+		return false
+	}
+	rs := p.LastValidResMs.Load()
+	return rs == 0 || now-rs > relayAfterMs
+}
+
 func (e *Engine) awgSyncPeers() {
 	e.mu.Lock()
 	if e.awgDevice == nil {
 		e.mu.Unlock()
 		return
 	}
+	now := time.Now().UnixMilli()
 	peers := make([]awg.PeerSyncInfo, 0, len(e.peers))
 	for _, p := range e.peers {
 		if p.WGPub == "" || p.UDPAddr == nil {
@@ -1036,6 +1086,16 @@ func (e *Engine) awgSyncPeers() {
 		overlayAddr, err := PubToV4Addr(p.Pub)
 		if err != nil {
 			continue
+		}
+		// Endpoint selection: direct by default. A fresh pair_res proves the
+		// DIRECT path works (pair_req/res travel direct, independent of wg). If
+		// none has landed within relayAfterMs while the peer is in camp, route wg
+		// through the camp relay instead — we keep probing direct in
+		// holePunchLoop, and a later pair_res flips it back (wg roaming finishes
+		// the upgrade the moment a direct packet arrives).
+		endpoint := p.UDPAddr.String()
+		if peerOnRelay(p, now) {
+			endpoint = "relay://" + p.Pub
 		}
 		// AllowedIPs = peer's overlay /32 + every intercept prefix the
 		// tunnel service has bound to this peer (via awgAllowedHook).
@@ -1048,7 +1108,7 @@ func (e *Engine) awgSyncPeers() {
 		}
 		peers = append(peers, awg.PeerSyncInfo{
 			WGPub:        p.WGPub,
-			Endpoint:     p.UDPAddr.String(),
+			Endpoint:     endpoint,
 			AllowedCIDRs: cidrs,
 		})
 	}
@@ -1387,6 +1447,11 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 				e.RebindEphemeral(fmt.Sprintf("all %d peers silent (post-wake?)", eligible))
 				return
 			}
+			// Re-evaluate direct↔relay endpoint selection: a peer that hasn't
+			// paired directly within relayAfterMs flips to the relay, and back
+			// once a direct pair_res lands. SyncPeers diffs, so an unchanged
+			// decision is a no-op (no IpcSet churn).
+			e.awgSyncPeers()
 			// Static --peer mode (legacy): single keepalive every 25s
 			// to the configured static endpoint, no peer-state tracking.
 			// No obfenv in static mode — fall back to the legacy 1-byte
@@ -1400,6 +1465,36 @@ func (e *Engine) holePunchLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// SetRelayCamp tells the AWG bind where the camp relay lives, enabling relay
+// Sends to peers whose direct path is down. Called by mesh/camp as the camp
+// address resolves/changes; nil disables relay.
+func (e *Engine) SetRelayCamp(addr *net.UDPAddr) {
+	if e.awgBind != nil {
+		e.awgBind.SetCampAddr(addr)
+	}
+}
+
+// DeliverRelay feeds a relay-delivered AWG packet (already unwrapped from the
+// camp's [0xF2][from_pub][payload] frame) into the device, attributed to
+// fromPub's relay endpoint so replies route back through the relay.
+func (e *Engine) DeliverRelay(payload []byte, fromPub [32]byte) {
+	if e.awgBind == nil {
+		return
+	}
+	// A relay packet is proof the sender is reachable through the camp, so mark
+	// it live — otherwise a pure-relay peer never gets a direct pair_req/res and
+	// stays "offline", which excludes it from the bus, DNS peer-seeding, and the
+	// UI, and makes its link state read as a dead "seen". fromPub is the sender's
+	// ed25519 pub — the same key as the peers map — so this is a direct lookup.
+	pubHex := hex.EncodeToString(fromPub[:])
+	e.mu.Lock()
+	if p := e.peers[pubHex]; p != nil {
+		p.LastSeenMs.Store(time.Now().UnixMilli())
+	}
+	e.mu.Unlock()
+	e.awgBind.DeliverRelay(payload, fromPub)
 }
 
 // RebindEphemeral restarts the transport on a fresh ephemeral port — the cure
@@ -1635,6 +1730,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	now := time.Now().UnixMilli()
 	for _, k := range keys {
 		p := e.peers[k]
 		seen := p.LastSeenMs.Load()
@@ -1667,6 +1763,7 @@ func (e *Engine) peersStatusLocked() []PeerStatusInfo {
 			Paired:      paired,
 			HalfPaired:  halfPaired,
 			OverlayV4:   overlayV4OrEmpty(p.Pub),
+			Relay:       peerOnRelay(p, now),
 			Role:        p.Role,
 			Version:     p.Version,
 		})

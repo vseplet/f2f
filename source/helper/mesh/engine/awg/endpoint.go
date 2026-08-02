@@ -1,27 +1,50 @@
 package awg
 
 import (
+	"encoding/hex"
+	"errors"
 	"net/netip"
+	"strings"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
 )
 
-// Endpoint is f2f's implementation of conn.Endpoint for amneziawg-go.
-// It wraps the peer's UDP address (host:port) — sufficient for IPv4/IPv6
-// in our setup. AmneziaWG also tracks a `src` address for cases where
-// the receiving socket binds to a specific local address; on f2f we
-// always use the single engine UDP socket, so src stays cleared.
+// relayScheme prefixes a relay endpoint's string form ("relay://<64hex pub>"),
+// so a peer reached only through the camp relay round-trips through UAPI
+// (endpoint=) and DstToString like any other endpoint.
+const relayScheme = "relay://"
+
+// Endpoint is f2f's implementation of conn.Endpoint for amneziawg-go. Normally
+// it wraps the peer's UDP address (host:port). It can also be a RELAY endpoint
+// (relay=true, carrying the peer's Ed25519 pub): Bind.Send then frames the
+// packet and forwards it through the camp relay instead of writing to a direct
+// address. AmneziaWG also tracks a `src` address for a specific local bind; on
+// f2f we always use the single engine UDP socket, so src stays cleared.
 type Endpoint struct {
-	dst netip.AddrPort
-	src netip.Addr // local source — almost always zero-value for us
+	dst   netip.AddrPort
+	src   netip.Addr // local source — almost always zero-value for us
+	relay bool       // if true, reach the peer via the camp relay, not dst
+	pub   [32]byte   // peer Ed25519 pub — the relay target (relay endpoints only)
 }
 
 var _ conn.Endpoint = (*Endpoint)(nil)
 
-// NewEndpoint builds an Endpoint from a remote AddrPort.
+// NewEndpoint builds a direct Endpoint from a remote AddrPort.
 func NewEndpoint(dst netip.AddrPort) *Endpoint {
 	return &Endpoint{dst: dst}
 }
+
+// NewRelayEndpoint builds an Endpoint that reaches the peer through the camp
+// relay, keyed by its Ed25519 pub.
+func NewRelayEndpoint(pub [32]byte) *Endpoint {
+	return &Endpoint{relay: true, pub: pub}
+}
+
+// IsRelay reports whether this endpoint is reached via the camp relay.
+func (e *Endpoint) IsRelay() bool { return e.relay }
+
+// RelayPub returns the peer's pub for a relay endpoint (zero otherwise).
+func (e *Endpoint) RelayPub() [32]byte { return e.pub }
 
 // ClearSrc resets the source field. Called by amneziawg-go when a peer
 // roams or NAT-rebinds — the cached src is no longer trusted.
@@ -36,15 +59,23 @@ func (e *Endpoint) SrcToString() string {
 	return e.src.String()
 }
 
-// DstToString returns "host:port" of the remote peer. amneziawg-go uses
-// it as the public identity of an endpoint (UAPI's `endpoint=` field).
-func (e *Endpoint) DstToString() string { return e.dst.String() }
+// DstToString returns the endpoint's public identity (UAPI's `endpoint=`
+// field): "host:port" for a direct endpoint, "relay://<pubhex>" for a relay one.
+// The relay form round-trips through ParseEndpoint.
+func (e *Endpoint) DstToString() string {
+	if e.relay {
+		return relayScheme + hex.EncodeToString(e.pub[:])
+	}
+	return e.dst.String()
+}
 
-// DstToBytes returns a binary serialization of dst (IP bytes + 2 bytes
-// port). Used inside amneziawg-go for mac2 cookie computation — value
-// just needs to be unique per endpoint, the exact layout doesn't matter
-// as long as it's deterministic.
+// DstToBytes returns a deterministic, per-endpoint-unique serialization used by
+// amneziawg-go for mac2 cookies. Relay endpoints key on the pub; direct ones on
+// the marshaled address.
 func (e *Endpoint) DstToBytes() []byte {
+	if e.relay {
+		return e.pub[:]
+	}
 	b, _ := e.dst.MarshalBinary()
 	return b
 }
@@ -58,3 +89,23 @@ func (e *Endpoint) SrcIP() netip.Addr { return e.src }
 // DstAddrPort exposes the full AddrPort for callers that need to write
 // to it via net.UDPConn (i.e. our Bind.Send). Not part of conn.Endpoint.
 func (e *Endpoint) DstAddrPort() netip.AddrPort { return e.dst }
+
+// parseEndpointString builds an Endpoint from its DstToString form — a relay
+// URI ("relay://<pubhex>") or a plain "host:port". Used by Bind.ParseEndpoint
+// so a peer's endpoint set over UAPI can be direct or relay.
+func parseEndpointString(s string) (*Endpoint, error) {
+	if strings.HasPrefix(s, relayScheme) {
+		raw, err := hex.DecodeString(strings.TrimPrefix(s, relayScheme))
+		if err != nil || len(raw) != 32 {
+			return nil, errors.New("awg: bad relay endpoint")
+		}
+		var pub [32]byte
+		copy(pub[:], raw)
+		return NewRelayEndpoint(pub), nil
+	}
+	addr, err := netip.ParseAddrPort(s)
+	if err != nil {
+		return nil, err
+	}
+	return NewEndpoint(addr), nil
+}

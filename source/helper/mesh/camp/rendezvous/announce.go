@@ -29,6 +29,7 @@ type AnnounceClient struct {
 	pub           string // local ed25519 pubkey in hex, "" in static --peer mode
 	version       string // client build version, published in the roster
 	role          string // run-mode role (user/service/task), published in the roster
+	wgPub         string // X25519 transport pub (hex), published so peers bootstrap AWG/relay
 
 	self atomic.Pointer[PeerInfo] // latest announced reply
 
@@ -54,7 +55,7 @@ type AnnounceClient struct {
 // outage at startup — e.g. the machine just woke and the network isn't
 // up yet — self-heals instead of permanently failing. pub is the local
 // ed25519 pubkey in hex, empty if not available.
-func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub, version, role string) (*AnnounceClient, error) {
+func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub, version, role, wgPub string) (*AnnounceClient, error) {
 	a := &AnnounceClient{
 		conn:        conn,
 		campAddrStr: campAddrStr,
@@ -62,6 +63,7 @@ func NewAnnounceClient(conn *net.UDPConn, campAddrStr, name, campID, pub, versio
 		pub:         pub,
 		version:     version,
 		role:        role,
+		wgPub:       wgPub,
 	}
 	a.name.Store(&name)
 	a.resolve() // best-effort; sendAnnounce keeps retrying if DNS isn't ready
@@ -263,6 +265,7 @@ func (a *AnnounceClient) sendAnnounce() error {
 		Pub:     a.pub,
 		Version: a.version,
 		Role:    a.role,
+		WGPub:   a.wgPub,
 	})
 	if err != nil {
 		return err

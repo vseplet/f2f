@@ -34,6 +34,11 @@ type PeerInfo struct {
 	// task itself (it drops non-allowlisted inbound). Empty for normal peers.
 	Role  string   `json:"role,omitempty"`
 	Allow []string `json:"allow,omitempty"`
+	// WGPub is the peer's X25519 transport public key (hex), published so peers
+	// can set up the AWG session — and thus the RELAY path — without a direct
+	// hello handshake first. Not a secret; a wrong value just fails the Noise
+	// handshake. Empty for old clients (they still need direct hello).
+	WGPub string `json:"wg_pub,omitempty"`
 	// Links is this peer's self-reported view of its connection to each other
 	// peer (direct/half/seen/relay + rtt), pushed via POST /api/links and echoed
 	// in /api/id. Lets the UI render a camp-wide connectivity matrix and informs
@@ -85,6 +90,9 @@ type AnnounceReq struct {
 	Version string   `json:"version,omitempty"`
 	Role    string   `json:"role,omitempty"`
 	Allow   []string `json:"allow,omitempty"`
+	// WGPub is our X25519 transport pub (hex), published so peers can bootstrap
+	// the AWG session (and relay) without a direct hello. See PeerInfo.WGPub.
+	WGPub string `json:"wg_pub,omitempty"`
 }
 
 // AnnouncedResp is what camp sends back on success. The client parses

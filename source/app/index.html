@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>f2f</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="app">
+      <header class="bar">
+        <div class="brand">f2f</div>
+        <div class="state">
+          <span id="dot" class="dot off"></span>
+          <span id="state-text">…</span>
+        </div>
+        <div class="actions">
+          <button id="btn-install" type="button" hidden>Install helper</button>
+          <button id="btn-start" type="button">Start</button>
+          <button id="btn-stop" type="button">Stop</button>
+        </div>
+      </header>
+
+      <section id="summary" class="summary"></section>
+
+      <section class="peers">
+        <div class="peers-head">Peers</div>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>name</th>
+              <th>role</th>
+              <th>overlay</th>
+              <th>endpoint</th>
+              <th>rtt</th>
+            </tr>
+          </thead>
+          <tbody id="peers-body"></tbody>
+        </table>
+      </section>
+
+      <footer id="err" class="err"></footer>
+    </main>
+  </body>
+</html>

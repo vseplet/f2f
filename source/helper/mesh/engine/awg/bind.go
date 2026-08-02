@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/vseplet/f2f/source/helper/clog"
 )
 
 // inboxBufferSize is how many AWG packets can be queued between
@@ -40,12 +41,19 @@ import (
 // keepalive eventually retransmits anyway.
 const inboxBufferSize = 64
 
-// inboxItem is one packet handed off from engine to AWG device.
-// data is a fresh copy — engine's peerToTunLoop reuses its read buffer
-// for every recvfrom syscall, so we must copy before queueing.
+// relaySendOp is the first byte of a client→relay frame on the camp socket:
+// [relaySendOp][to_pub:32][payload]. Mirrors source/camp's relaySend. The
+// reverse (relay→client, [0xF2][from_pub][payload]) is unwrapped by the engine
+// and handed to DeliverRelay.
+const relaySendOp = 0xF3
+
+// inboxItem is one packet handed off from engine to AWG device. data is a fresh
+// copy — engine's peerToTunLoop reuses its read buffer for every recvfrom
+// syscall, so we must copy before queueing. ep is the source endpoint (direct
+// or relay) amneziawg-go should attribute the packet to.
 type inboxItem struct {
 	data []byte
-	src  netip.AddrPort
+	ep   conn.Endpoint
 }
 
 // Bind implements conn.Bind. Construct with New(), pass to
@@ -61,11 +69,20 @@ type Bind struct {
 	txBytes, rxBytes     atomic.Uint64
 	txPackets, rxPackets atomic.Uint64
 
+	// campAddr is where relay frames go: the camp server's UDP endpoint. Set by
+	// the engine once the camp address resolves. nil ⇒ relay unavailable, so a
+	// Send to a relay endpoint is dropped (falls back to direct on the next
+	// roam). Atomic — read on the Send hot path, written from the camp service.
+	campAddr atomic.Pointer[net.UDPAddr]
+
 	mu     sync.Mutex
 	open   bool
 	closed chan struct{}
 	inbox  chan inboxItem
 }
+
+// SetCampAddr sets (or clears) the relay server endpoint used for relay Sends.
+func (b *Bind) SetCampAddr(addr *net.UDPAddr) { b.campAddr.Store(addr) }
 
 var _ conn.Bind = (*Bind)(nil)
 
@@ -127,7 +144,7 @@ func (b *Bind) Open(_ uint16) ([]conn.ReceiveFunc, uint16, error) {
 			}
 			n := copy(packets[0], item.data)
 			sizes[0] = n
-			eps[0] = NewEndpoint(item.src)
+			eps[0] = item.ep
 			return 1, nil
 		}
 	}
@@ -160,12 +177,44 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if !ok {
 		return conn.ErrWrongEndpointType
 	}
+	if e.relay {
+		return b.sendRelay(bufs, e.pub)
+	}
 	addr := net.UDPAddrFromAddrPort(e.DstAddrPort())
 	for _, buf := range bufs {
 		if len(buf) == 0 {
 			continue
 		}
 		if n, err := b.udp.WriteToUDP(buf, addr); err != nil {
+			return err
+		} else {
+			b.txBytes.Add(uint64(n))
+			b.txPackets.Add(1)
+		}
+	}
+	return nil
+}
+
+// sendRelay wraps each packet as [relaySendOp][to_pub:32][payload] and sends it
+// to the camp relay, which forwards it to the target peer. No camp address yet
+// ⇒ silently drop (relay unavailable; wg retransmits, and the peer roams back
+// to direct if that path recovers).
+func (b *Bind) sendRelay(bufs [][]byte, pub [32]byte) error {
+	camp := b.campAddr.Load()
+	if camp == nil {
+		clog.Debug("relay", "send drop: no camp addr yet (to %x)", pub[:6])
+		return nil
+	}
+	clog.Debug("relay", "send %dpkt to %x via %s", len(bufs), pub[:6], camp)
+	for _, buf := range bufs {
+		if len(buf) == 0 {
+			continue
+		}
+		frame := make([]byte, 0, 1+32+len(buf))
+		frame = append(frame, relaySendOp)
+		frame = append(frame, pub[:]...)
+		frame = append(frame, buf...)
+		if n, err := b.udp.WriteToUDP(frame, camp); err != nil {
 			return err
 		} else {
 			b.txBytes.Add(uint64(n))
@@ -187,11 +236,7 @@ func (b *Bind) Stats() (txBytes, rxBytes, txPackets, rxPackets uint64) {
 // Endpoint. Called by amneziawg-go's UAPI when the device config has
 // `endpoint=...` lines.
 func (b *Bind) ParseEndpoint(s string) (conn.Endpoint, error) {
-	addr, err := netip.ParseAddrPort(s)
-	if err != nil {
-		return nil, err
-	}
-	return NewEndpoint(addr), nil
+	return parseEndpointString(s)
 }
 
 // BatchSize returns the maximum packets-per-call the Bind expects.
@@ -209,12 +254,25 @@ func (b *Bind) BatchSize() int { return 1 }
 // AWG keepalive will retransmit. data is copied before queuing so
 // the caller can reuse its read buffer.
 func (b *Bind) Deliver(data []byte, src netip.AddrPort) {
+	b.enqueue(data, NewEndpoint(src))
+}
+
+// DeliverRelay hands off an AWG packet that arrived via the camp relay
+// (unwrapped from [0x F2][from_pub][payload] by the engine). It's attributed to
+// a RELAY endpoint keyed by the sender's pub, so amneziawg-go's replies go back
+// out through the relay too — until a direct packet roams the peer to a direct
+// endpoint.
+func (b *Bind) DeliverRelay(data []byte, fromPub [32]byte) {
+	b.enqueue(data, NewRelayEndpoint(fromPub))
+}
+
+func (b *Bind) enqueue(data []byte, ep conn.Endpoint) {
 	b.rxBytes.Add(uint64(len(data)))
 	b.rxPackets.Add(1)
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	select {
-	case b.inbox <- inboxItem{data: cp, src: src}:
+	case b.inbox <- inboxItem{data: cp, ep: ep}:
 	case <-b.closed:
 	default:
 		// inbox full — silent drop. AWG will reattempt on next keepalive.

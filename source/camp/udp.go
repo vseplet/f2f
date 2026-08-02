@@ -153,9 +153,15 @@ func serveUDP(conn *net.UDPConn, hub *Hub) {
 				break
 			}
 		}
+		// wg_pub is the peer's X25519 transport key (64 hex) — published so peers
+		// bootstrap AWG/relay without a direct hello. Sanitize; blank if malformed.
+		wgPub := req.WGPub
+		if !pubRE.MatchString(wgPub) {
+			wgPub = ""
+		}
 
 		wasNew := !hub.has(campID, pub)
-		info := hub.upsert(campID, pub, name, src, version, role, allow)
+		info := hub.upsert(campID, pub, name, src, version, role, wgPub, allow)
 		if wasNew {
 			log.Printf("join: %s@%s pub=%s from %s", name, campID, short(pub), src)
 		}
@@ -182,8 +188,10 @@ func handleRelay(conn *net.UDPConn, hub *Hub, src *net.UDPAddr, pkt []byte) {
 	toPub := hex.EncodeToString(pkt[1:relayHdr])
 	to, fromPub, ok := hub.relayLookup(src, toPub)
 	if !ok {
+		log.Printf("relay: drop from %s → %s (unknown sender/target/cross-camp)", src, short(toPub))
 		return
 	}
+	log.Printf("relay: %s → %s (%dB)", short(fromPub), short(toPub), len(pkt)-relayHdr)
 	fromRaw, err := hex.DecodeString(fromPub)
 	if err != nil || len(fromRaw) != 32 {
 		return

@@ -767,9 +767,16 @@ func run(opts runOpts) error {
 	if selErr != nil {
 		clog.Console("camp select: %v", selErr)
 	} else if selCamp != nil {
+		// Listen defaults to :9000; F2F_LISTEN overrides it (e.g. ":0" for an
+		// ephemeral port so several helpers — or test containers sharing the
+		// host's network — can run without fighting over the same UDP port).
+		listen := ":9000"
+		if v := os.Getenv("F2F_LISTEN"); v != "" {
+			listen = v
+		}
 		cfg := engine.Config{
 			LocalIP:  "100.64.0.1", // placeholder; engine derives the overlay-IP from pub
-			Listen:   ":9000",
+			Listen:   listen,
 			Camp:     selCamp,
 			Identity: selIdt,
 		}
@@ -921,8 +928,12 @@ func (r busResolver) Peers() []string {
 		}
 		// Skip offline members: dialing them just burns the 5s ping
 		// timeout and spams "ping failed" — they reappear here as soon
-		// as the camp roster marks them online again.
-		if !p.Online {
+		// as the camp roster marks them online again. Exception: a
+		// relay-routed peer can't produce a direct pair_req/res, so its
+		// direct-online signal is always stale — dialing it anyway is what
+		// bootstraps the wg handshake over the relay (and DeliverRelay then
+		// keeps it marked live).
+		if !p.Online && !p.Relay {
 			continue
 		}
 		// Defensive self-exclusion: the camp-owner entry can appear without
