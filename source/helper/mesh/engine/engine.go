@@ -971,7 +971,17 @@ func (e *Engine) applyPeerList(peers []RosterEntry) {
 				existing.PublicIP = p.PublicIP
 				existing.UDPPort = p.UDPPort
 				existing.UDPEndpoint = p.UDPEndpoint
-				if addr != nil && !sameUDPAddr(existing.UDPAddr, addr) {
+				// Prefer an endpoint learned from live direct pair traffic over
+				// the camp's announce-reflex address. Under address-dependent
+				// (symmetric-ish) NAT the external port a peer uses toward US
+				// differs from the one it announces to the camp — taking the
+				// roster address would send our pair_res/wg to a dead port,
+				// breaking the handshake and flip-flopping the endpoint every
+				// poll ("NAT rebind?" spam). Only adopt the roster address when
+				// no recent direct signal contradicts it.
+				req, res := existing.LastValidReqMs.Load(), existing.LastValidResMs.Load()
+				directFresh := (req != 0 && now-req < pairFreshMs) || (res != 0 && now-res < pairFreshMs)
+				if addr != nil && !sameUDPAddr(existing.UDPAddr, addr) && !directFresh {
 					existing.UDPAddr = addr
 				}
 				if !existing.InCamp {

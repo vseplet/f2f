@@ -3617,11 +3617,13 @@ $(function () {
 
   // peerDot maps a peer to a status-dot class — the SAME vocabulary the main
   // window's peers table uses, so sidebar and window colours match:
-  //   self→accent, paired→green, half_paired→orange, in_camp(no pair)→red, else→grey.
+  //   self→accent, paired→green, relay(via camp)→blue, half_paired→orange,
+  //   in_camp(no pair)→red, else→grey.
   function peerDot(p) {
     if (!p) return 'offline';
     if (p.self) return 'self';
     if (p.paired) return 'reachable';
+    if (p.relay && p.online) return 'relayed';
     if (p.half_paired) return 'degraded';
     if (p.in_camp) return 'unreachable';
     return 'offline';
@@ -4485,6 +4487,7 @@ $(function () {
       // Color matrix:
       //   self                                  → yellow (you)
       //   paired                                → green  (bidirectional pair-handshake, RTT measured)
+      //   relay (via camp, traffic flowing)     → blue   (no direct path; tunnelled through the camp relay)
       //   half_paired                           → orange (one-way only; we hear them OR they hear us, not both)
       //   in_camp without paired/half_paired    → red    (in camp roster but no crypto signal — old version OR NAT blocked)
       //   neither                               → gray   (not in camp)
@@ -4495,6 +4498,9 @@ $(function () {
       } else if (p.paired) {
         dotClass = 'reachable';
         dotTitle = 'paired — bidirectional crypto-attested' + (p.rtt_ms ? ' — rtt ' + p.rtt_ms + 'ms' : '');
+      } else if (p.relay && p.online) {
+        dotClass = 'relayed';
+        dotTitle = 'connected via camp relay — no direct path (hole-punch failed)';
       } else if (p.half_paired) {
         dotClass = 'degraded';
         dotTitle = 'half-paired — one direction only (NAT-rebind or asymmetric path)';

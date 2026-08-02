@@ -535,6 +535,11 @@
 .ax-tree-row.unreachable .ax-tree-dot {
     background: var(--danger);
 }
+/* Connected through the camp relay (no direct path). Blue — matches the /id
+   links matrix so both views agree on what "relay" looks like. */
+.ax-tree-row.relayed .ax-tree-dot {
+    background: #6ea8d8;
+}
 .ax-tree-row.self .ax-tree-dot {
     background: var(--accent);
 }
@@ -1295,6 +1300,10 @@ details.ax-advanced > .ax-advanced-body {
 }
 .ax-frame .ax-dot.unreachable {
     background: var(--danger);
+}
+.ax-frame .ax-dot.relayed {
+    background: #6ea8d8;
+    box-shadow: 0 0 4px color-mix(in srgb, #6ea8d8 50%, transparent);
 }
 .ax-frame .ax-dot.self {
     background: var(--accent);
